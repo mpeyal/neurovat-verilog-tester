@@ -1,0 +1,145 @@
+// ecfet_v2.va - upgraded practical ECFET / ECRAM model
+//
+// Drop-in replacement for basic_v1_Diffu_Drft_verilog with the same pins.
+// Identical dynamics to the Python reference model (ecfet/model_v2.py);
+// tune parameters in Python first, then copy them here.
+//
+// Improvements over v1:
+//  * Charge-controlled conductance update with exponential soft-bound
+//    windows (NeuroSim-style nu_p / nu_d nonlinearity) - no hard clamps,
+//    no switch-branch V()/I() mixing, so Spectre convergence is clean.
+//  * Volatile relaxation proportional to the written dG: a fraction
+//    kappa_v of every write lands in three relaxation pools with
+//    tau1 = w^2/2D, tau2 = l^2/2D, tau3 - replaces v1's fixed
+//    (c1+c2+c3)-ohm post-pulse jump and its hard 1 s cutoff.
+//  * Long-term retention drift of the nonvolatile state toward R_eq.
+//  * All state lives on internal nodes (1 V == 1 S), integrated by the
+//    simulator itself, so timestep control and backtracking are exact.
+//
+// Sign convention matches v1: positive gate current RAISES R (polarity=+1).
+//
+// dG per unit pulse: a pulse carrying Q_ref coulombs (e.g. 100 pA x 10 ms)
+// moves G by ~dG_unit*window where dG_unit = (Gmax-Gmin)/n_states.
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module ecfet_v2(In, Out, IGsc, Rmem);
+output Rmem;
+inout In, Out;
+input IGsc;
+
+electrical In, Out, IGsc, Rmem;
+electrical n_nv, n_v1, n_v2, n_v3, ignd;   // state nodes: 1 V == 1 S
+
+branch (In,Out) mem;
+
+// resistance range
+parameter real Rmin  = 0.1k from (0:inf);
+parameter real Rmax  = 10k  from (0:inf);
+parameter real Rinit = 500  from (0:inf);
+
+// charge-controlled update
+parameter real Q_ref    = 1p  from (0:inf);   // C per unit pulse
+parameter real n_states = 100 from (0:inf);   // unit steps across full range
+parameter real nu_p     = 2.0 from [0:inf);   // potentiation nonlinearity
+parameter real nu_d     = 2.0 from [0:inf);   // depression nonlinearity
+parameter real polarity = 1.0 from [-1:1];    // +1: positive I raises R
+
+// volatile (short-term) relaxation
+parameter real kappa_v = 0.3 from [0:1);      // volatile fraction per write
+parameter real w    = 2.828u from (0:inf);
+parameter real l    = 4u     from (0:inf);
+parameter real D    = 0.4n   from (0:inf);
+parameter real tao3 = 19     from (0:inf);
+parameter real c1 = 10  from [0:inf);
+parameter real c2 = 9.9 from [0:inf);
+parameter real c3 = 0.1 from [0:inf);
+parameter real tau_scale = 1.0 from (0:inf);
+
+// long-term retention
+parameter real tau_retention = 10k from (0:inf);
+parameter real R_eq          = 10k from (0:inf);
+
+// gate threshold / leak (same semantics as v1)
+parameter real I_drift_th       = 1p  from [0:inf);
+parameter real leak_drift_scale = 0.0 from [0:1];
+
+real Gmin, Gmax, G_eq, dG_unit;
+real tau1, tau2, tau3v, csum, cn1, cn2, cn3;
+real absI, Ieff, G_total, x, win, u, sgn;
+
+analog begin
+    Gmin    = 1.0 / Rmax;
+    Gmax    = 1.0 / Rmin;
+    G_eq    = 1.0 / R_eq;
+    dG_unit = (Gmax - Gmin) / n_states;
+
+    tau1  = (w*w) / (2.0*D) * tau_scale;
+    tau2  = (l*l) / (2.0*D) * tau_scale;
+    tau3v = tao3 * tau_scale;
+
+    csum = c1 + c2 + c3;
+    cn1 = c1 / csum;
+    cn2 = c2 / csum;
+    cn3 = c3 / csum;
+
+    V(ignd) <+ 0;
+
+    // gate threshold / leak scaling
+    absI = abs(I(IGsc));
+    if (absI < I_drift_th)
+        Ieff = leak_drift_scale * I(IGsc);
+    else
+        Ieff = I(IGsc);
+
+    // total conductance = nonvolatile + volatile pools
+    G_total = V(n_nv,ignd) + V(n_v1,ignd) + V(n_v2,ignd) + V(n_v3,ignd);
+    if (G_total < Gmin) G_total = Gmin;
+    if (G_total > Gmax) G_total = Gmax;
+    x = (G_total - Gmin) / (Gmax - Gmin);
+
+    // charge-driven update rate u (S/s), soft-bounded
+    if (Ieff != 0.0) begin
+        if (Ieff > 0)
+            sgn = -polarity;     // polarity=+1: positive I lowers G (raises R)
+        else
+            sgn = polarity;
+
+        if (sgn > 0)
+            win = limexp(-nu_p * x);            // conductance rising
+        else
+            win = limexp(-nu_d * (1.0 - x));    // conductance falling
+
+        u = sgn * dG_unit * abs(Ieff) / Q_ref * win;
+
+        // hard stop exactly at the range edges
+        if ((G_total >= Gmax && u > 0) || (G_total <= Gmin && u < 0))
+            u = 0.0;
+    end else begin
+        u = 0.0;
+    end
+
+    if (analysis("ic")) begin
+        V(n_nv,ignd) <+ 1.0 / Rinit;
+        V(n_v1,ignd) <+ 0.0;
+        V(n_v2,ignd) <+ 0.0;
+        V(n_v3,ignd) <+ 0.0;
+    end else begin
+        // d(G_nv)/dt = (1-kappa_v)*u - (G_nv - G_eq)/tau_retention
+        I(n_nv,ignd) <+ ddt(V(n_nv,ignd))
+                        - (1.0 - kappa_v) * u
+                        + (V(n_nv,ignd) - G_eq) / tau_retention;
+
+        // d(G_vi)/dt = kappa_v*cni*u - G_vi/taui
+        I(n_v1,ignd) <+ ddt(V(n_v1,ignd)) - kappa_v*cn1*u + V(n_v1,ignd)/tau1;
+        I(n_v2,ignd) <+ ddt(V(n_v2,ignd)) - kappa_v*cn2*u + V(n_v2,ignd)/tau2;
+        I(n_v3,ignd) <+ ddt(V(n_v3,ignd)) - kappa_v*cn3*u + V(n_v3,ignd)/tau3v;
+    end
+
+    // outputs
+    V(Rmem) <+ 1.0 / G_total;
+    V(mem)  <+ I(mem) / G_total;
+end
+
+endmodule
