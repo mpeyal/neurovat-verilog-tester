@@ -57,6 +57,18 @@ class V2Params:
     tau_retention: float = 1e4     # s; relaxation of G_nv toward G_eq
     G_eq: float = 1.0 / 10e3       # equilibrium conductance (= Gmin default)
 
+    # spike-timing-dependent plasticity (pair-based eligibility trace)
+    # Each pulse leaves a trace that decays with tau_stdp.  When a pulse of the
+    # OPPOSITE polarity arrives, a portion of the surviving trace is locked into
+    # the nonvolatile conductance: a depressing pulse following a recent
+    # potentiating one (pre-before-post, dt>0) nets depression; a potentiating
+    # pulse following a recent depressing one (post-before-pre, dt<0) nets
+    # potentiation.  Magnitude ~ A_stdp * exp(-|dt|/tau_stdp) -> the classic
+    # exponential STDP window.  Without this coupling the charge-controlled
+    # write is timing-blind and the STDP curve is flat.
+    A_stdp: float = 8e-6           # S, locked-in conductance per unit trace
+    tau_stdp: float = 0.02         # s, STDP trace time constant
+
     # gate threshold / leak (same semantics as v1)
     I_drift_th: float = 1e-12
     leak_drift_scale: float = 0.0
@@ -102,6 +114,8 @@ class EcfetV2:
         self.pools = [0.0, 0.0, 0.0]   # volatile conductance components
         self.prev_drift_on = False
         self.cycle_factor = 1.0
+        self.tr_pot = 0.0              # eligibility trace: recent potentiation
+        self.tr_dep = 0.0              # eligibility trace: recent depression
         self._rng = random.Random(p.seed)
 
     # ------------------------------------------------------------------
@@ -124,10 +138,25 @@ class EcfetV2:
         Ieff = p.leak_drift_scale * I_gate if absI < p.I_drift_th else I_gate
         drift_on = abs(Ieff) >= p.I_drift_th
 
+        # STDP eligibility traces relax every step (exact exponential update)
+        if p.tau_stdp > 0:
+            tr_decay = math.exp(-dt / p.tau_stdp)
+            self.tr_pot *= tr_decay
+            self.tr_dep *= tr_decay
+
         if drift_on and not self.prev_drift_on:
             self.cycle_factor = 1.0
             if p.sigma_c2c > 0:
                 self.cycle_factor = max(0.0, 1.0 + self._rng.gauss(0.0, p.sigma_c2c))
+            # STDP lock-in: this pulse pairs with the opposite-polarity trace.
+            potentiating = (-math.copysign(1.0, Ieff) * p.polarity) > 0.0
+            if potentiating:
+                self.G_nv += p.A_stdp * self.tr_dep   # post-before-pre -> LTP
+                self.tr_pot += 1.0
+            else:
+                self.G_nv -= p.A_stdp * self.tr_pot   # pre-before-post -> LTD
+                self.tr_dep += 1.0
+            self.G_nv = min(max(self.G_nv, p.Gmin), p.Gmax)
 
         # 1) volatile pools always relax (exact exponential update)
         taus = p.taus

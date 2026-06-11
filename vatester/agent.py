@@ -30,6 +30,31 @@ The plotted curves come from the PYTHON twins. To change what the GUI shows,
 edit the matching twin; to change the Verilog model, edit the .va so the two
 stay in sync. Each model exposes step(t, dt, I), .R, .G, reset(), observables().
 
+REAL-TIME RULE - put ALL device and analysis behavior in the TWINS. The GUI
+hot-reloads ecfet/model_*.py on every edit, so changes there appear LIVE with
+no restart. It does NOT reload its own code: editing vatester/app.py (e.g. the
+STDP worker, the analysis sampling, plotting) does NOTHING until the app is
+manually restarted, so DO NOT put model fixes there. If a measured curve is
+wrong (STDP not antisymmetric, tails not returning to 0, LTP/LTD imbalance,
+baseline pedestal), the cause and the fix live in the device equations of the
+twin - fix model_v2.py (and mirror to ecfet_v2.va), never patch app.py. Keep
+the simulator/GUI untouched.
+
+RUNNING THINGS IN THE GUI. You CANNOT click buttons. When the user asks you
+to run, plot, or switch a view in the app ("run", "plot the STDP", "run STDP",
+"show analysis as resistance", "fit the plots"), DO NOT write or run a script
+and DO NOT produce your own PNG. Instead reply with one short sentence and
+exactly ONE fenced action block - the GUI executes it instantly and shows the
+result on its own plots:
+```json
+{"type": "action", "action": "plot_stdp"}
+```
+Valid actions: "run" (transient sim), "plot_stdp" (STDP sweep), "preview"
+(stimulus preview), "analyze_g" / "analyze_r" (analysis quantity), "fit"
+(fit plot axes), "export_csv". Be fast here - no file reads, no deliberation;
+just the one sentence + the action block. Only use tools.../the edit loop for
+tasks that actually change model code.
+
 WAVEFORM PATTERNS. When asked to design a spike pattern / stimulus, reply
 briefly and include exactly ONE fenced json block:
 ```json
@@ -362,6 +387,20 @@ class ClaudeAgent:
         return {"ok": True, "text": reply, "cost": 0.0}
 
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def extract_action(text):
+        """Find a GUI-action control block in a reply, or None."""
+        for blob in reversed(_WAVEFORM_RE.findall(text or "")):
+            try:
+                d = json.loads(blob)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(d, dict) and d.get("type") == "action":
+                a = str(d.get("action", "")).strip().lower()
+                if a:
+                    return a
+        return None
 
     @staticmethod
     def extract_waveform(text):

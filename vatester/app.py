@@ -7,6 +7,7 @@ Layout
   right     Claude agent chat (bubbles, pattern cards, prompt chips)
 """
 
+import bisect
 import contextlib
 import dataclasses
 import importlib
@@ -15,6 +16,7 @@ import os
 import queue
 import re
 import shutil
+import sys
 import threading
 import time
 
@@ -142,6 +144,8 @@ class App:
         self._prev_mtimes = None
         self._watch_tick = 0
         self._backup_dir = None     # snapshot of editable files before agent
+        self._last_compute = "transient"  # "transient" | "stdp" (live re-run)
+        self._restart = False       # set to relaunch and apply GUI-code edits
         self._series = []
         self._ana_series = []
         self.sim_running = False
@@ -161,6 +165,8 @@ class App:
         self._stdp_summary = []
         self._tip_frame = -10
         self._hover_ann = {}       # plot -> in-canvas hover bubble annotation
+        self._hover_cache = {}     # plot -> [(label, xs, ys)] for fast hover
+        self._hover_last = None    # (plot, mx, my) of last computed bubble
 
     # =================================================================
     # fonts & themes
@@ -536,6 +542,60 @@ class App:
         if dpg.get_frame_count() - self._tip_frame > 1:
             self._hide_hover_bubble()
 
+    def _get_hover_data(self, plot):
+        """Cached (label, xs, ys) lists for a plot's data series, so the hover
+        handler doesn't copy big arrays every frame. Rebuilt lazily after a
+        re-plot (the cache is cleared when data changes)."""
+        data = self._hover_cache.get(plot)
+        if data is not None:
+            return data
+        yax = self.PROBE_AXES[plot][1]
+        data = []
+        for sid in dpg.get_item_children(yax, 1) or []:
+            try:
+                lbl = dpg.get_item_configuration(sid).get("label", "") or ""
+                if lbl.startswith("##"):
+                    continue
+                val = dpg.get_value(sid)
+            except Exception:
+                continue
+            if not val or len(val) < 2 or not val[0]:
+                continue
+            data.append((lbl, list(val[0]), list(val[1])))
+        self._hover_cache[plot] = data
+        return data
+
+    @staticmethod
+    def _nearest_on_series(xs, ys, mx, my, xspan, yspan):
+        """Nearest point on a single x-sorted series via binary search +
+        outward scan with early termination (x-distance is monotonic). Returns
+        (d2, x, y) or None. Skips NaN y (gap breaks)."""
+        n = len(xs)
+        if n == 0:
+            return None
+        i = bisect.bisect_left(xs, mx)
+        best = None
+        lo, hi = i - 1, i
+        while lo >= 0 or hi < n:
+            for j in (lo, hi):
+                if 0 <= j < n:
+                    dxn = (xs[j] - mx) / xspan
+                    if best is not None and dxn * dxn >= best[0]:
+                        continue
+                    yv = ys[j]
+                    if yv != yv:                 # NaN
+                        continue
+                    d = dxn * dxn + ((yv - my) / yspan) ** 2
+                    if best is None or d < best[0]:
+                        best = (d, float(xs[j]), float(yv))
+            ldx = ((xs[lo] - mx) / xspan) ** 2 if lo >= 0 else float("inf")
+            hdx = ((xs[hi] - mx) / xspan) ** 2 if hi < n else float("inf")
+            if best is not None and ldx >= best[0] and hdx >= best[0]:
+                break
+            lo -= 1
+            hi += 1
+        return best
+
     def _on_plot_hover(self, sender, app_data, user_data):
         """Draw an in-canvas bubble at the nearest data point, showing its
         x / y values with units. Fires while the plot is hovered."""
@@ -552,7 +612,20 @@ class App:
         y0, y1 = dpg.get_axis_limits(yax)
         xs_span = (x1 - x0) or 1.0
         ys_span = (y1 - y0) or 1.0
-        best = self._nearest_series_point(yax, mx, my, xs_span, ys_span)
+        # throttle: if the cursor barely moved since the last computed bubble,
+        # keep the bubble alive but skip the (potentially heavy) search
+        last = self._hover_last
+        if (last and last[0] == plot
+                and abs(mx - last[1]) < xs_span * 0.004
+                and abs(my - last[2]) < ys_span * 0.004):
+            self._tip_frame = dpg.get_frame_count()
+            return
+        self._hover_last = (plot, mx, my)
+        best = None
+        for lbl, xs, ys in self._get_hover_data(plot):
+            cand = self._nearest_on_series(xs, ys, mx, my, xs_span, ys_span)
+            if cand is not None and (best is None or cand[0] < best[0]):
+                best = (cand[0], cand[1], cand[2], lbl)
         if best is None or best[0] > 0.05 ** 2:
             self._hide_hover_bubble()
             return
@@ -958,8 +1031,35 @@ class App:
                 dpg.add_menu_item(label="List libraries",
                                   callback=self.on_virtuoso_libs)
             with dpg.menu(label="Agent"):
+                dpg.add_menu_item(
+                    label="Autonomous: edit + run + fix (auto-approve)",
+                    check=True, default_value=True, tag="menu_auto")
+                with dpg.tooltip("menu_auto"):
+                    dpg.add_text("On: the agent may edit files, run shell "
+                                 "commands, and loop edit->simulate->verify->"
+                                 "fix without per-step approval.\nOff: "
+                                 "read-only - it can look but not change "
+                                 "anything.")
+                dpg.add_menu_item(label="Live re-plot on code change",
+                                  check=True, default_value=True,
+                                  tag="menu_liveplot",
+                                  callback=lambda s, a:
+                                  dpg.set_value("cb_liveplot", a))
+                dpg.add_separator()
+                dpg.add_menu_item(label="Revert agent edits",
+                                  callback=self.on_agent_revert)
+                ri = dpg.add_menu_item(
+                    label="Restart app (apply GUI-code edits)",
+                    callback=self.on_restart_app)
+                with dpg.tooltip(ri):
+                    dpg.add_text("Model twins (ecfet/model_*.py) hot-reload "
+                                 "live. Edits to the GUI itself "
+                                 "(vatester/app.py) need a restart - this "
+                                 "relaunches the app to apply them.")
                 dpg.add_menu_item(label="Reset conversation",
                                   callback=self.on_agent_reset)
+                dpg.add_menu_item(label="Account / sign-in...",
+                                  callback=self.on_account_open)
                 dpg.add_menu_item(label="Backend info",
                                   callback=lambda: self.log(
                                       "agent: " + self.agent.backend_label()))
@@ -1345,7 +1445,7 @@ class App:
                                 dpg.add_text("Sign in / switch Claude account, "
                                              "or run this app under a specific "
                                              "key/token")
-                with dpg.child_window(tag="chat_log", height=-162,
+                with dpg.child_window(tag="chat_log", height=-122,
                                       border=False):
                     pass
                 with dpg.group(tag="chips_row"):
@@ -1371,38 +1471,14 @@ class App:
                                            show=False,
                                            callback=self.on_agent_stop)
                     dpg.bind_item_theme(bstop, self.themes["stop"])
+                # the live-plot toggle is mirrored from the Agent menu; the
+                # watcher reads cb_liveplot, so keep it (hidden, in sync)
+                dpg.add_checkbox(tag="cb_liveplot", default_value=True,
+                                 show=False)
                 with dpg.group(horizontal=True):
-                    cb1 = dpg.add_checkbox(label="file edits", tag="cb_edits")
-                    with dpg.tooltip(cb1):
-                        dpg.add_text("Allow the agent to modify files in the "
-                                     "workspace (.va sources, twins, scripts)")
-                    cb2 = dpg.add_checkbox(label="shell", tag="cb_bash")
-                    with dpg.tooltip(cb2):
-                        dpg.add_text("Allow the agent to run shell commands "
-                                     "(simulations, Virtuoso scripts, git)")
-                    cb3 = dpg.add_checkbox(label="auto-fix", tag="cb_auto")
-                    with dpg.tooltip(cb3):
-                        dpg.add_text("Autonomous mode: grants file edits + "
-                                     "shell and lets the agent run the full "
-                                     "edit -> simulate -> verify -> fix loop\n"
-                                     "until the behavior is right (no per-step "
-                                     "approval). Up to ~30 min per request.")
-                    dpg.add_button(label="Reset", small=True,
-                                   callback=self.on_agent_reset)
-                with dpg.group(horizontal=True):
-                    cb4 = dpg.add_checkbox(label="live plot", tag="cb_liveplot",
-                                           default_value=True)
-                    with dpg.tooltip(cb4):
-                        dpg.add_text("Auto re-simulate and re-plot whenever the "
-                                     "agent saves an edit to a model twin, so "
-                                     "you see changes in real time.")
-                    rb = dpg.add_button(label="Revert agent edits", small=True,
-                                        callback=self.on_agent_revert)
-                    with dpg.tooltip(rb):
-                        dpg.add_text("Restore the model twins + .va files to "
-                                     "the snapshot taken before the last agent "
-                                     "turn.")
-                    self._small("", tag="cost_label")
+                    self._small("autonomous · live plot — see Agent menu",
+                                color=C_MUTED)
+                    self._small("", tag="cost_label", color=C_TEXT2)
 
     # =================================================================
     # chat rendering
@@ -1423,7 +1499,21 @@ class App:
                 with dpg.group(horizontal=True):
                     self._small(role[0], color=role[1])
                     self._small(time.strftime("%H:%M"), color=C_MUTED)
-                dpg.add_text(text, wrap=BUBBLE_W - indent - 28, color=C_TEXT)
+                    cp = dpg.add_button(label="copy", small=True,
+                                        user_data=text,
+                                        callback=lambda s, a, u:
+                                        dpg.set_clipboard_text(u))
+                    dpg.bind_item_theme(cp, self.themes["chip"])
+                    if "small" in self.fonts:
+                        dpg.bind_item_font(cp, self.fonts["small"])
+                    with dpg.tooltip(cp):
+                        dpg.add_text("Copy this message to the clipboard")
+                msg = dpg.add_text(text, wrap=BUBBLE_W - indent - 28,
+                                   color=C_TEXT)
+                with dpg.popup(msg):    # right-click the text -> Copy
+                    dpg.add_selectable(label="Copy message", user_data=text,
+                                       callback=lambda s, a, u:
+                                       dpg.set_clipboard_text(u))
             dpg.bind_item_theme(bub, self.themes[theme])
         dpg.add_spacer(height=5, parent="chat_log")
         self._scroll_bottom("chat_log")
@@ -1673,6 +1763,7 @@ class App:
             dpg.set_value("designer_summary", str(e))
             return
         self._clear_probes(("preview_plot",))
+        self._hover_cache.pop("preview_plot", None)
         xs, ys = self._stair_points(wf, 1.0 / sf.UNIT_SCALE.get(unit, 1.0))
         dpg.delete_item("prev_y", children_only=True)
         dpg.add_stair_series(xs, ys, parent="prev_y",
@@ -1729,6 +1820,8 @@ class App:
             t_stop = (wf.breakpoints[-1] if wf.breakpoints else 0.0) \
                 + max(dpg.get_value("tail_input"), 0.0)
         self.sim_running = True
+        if not live:
+            self._last_compute = "transient"
         if live:
             self._busy(True, "live re-plot (agent edited the code)")
         else:
@@ -1773,12 +1866,13 @@ class App:
 
     # ---------------- STDP characterization --------------------------
 
-    def on_plot_stdp(self, *_):
+    def on_plot_stdp(self, *_, live=False):
         if self.sim_running:
             return
         models = self._checked_models()
         if not models:
-            self.log("[stdp] no model selected")
+            if not live:
+                self.log("[stdp] no model selected")
             return
         unit = dpg.get_value("unit_combo")
         kind = dpg.get_value("kind_combo")
@@ -1808,32 +1902,40 @@ class App:
         pos = sorted({round(d, 9) for d in cand
                       if d >= dt_min - 1e-12})      # |dt| > pulse width
         dts = [-d for d in reversed(pos)] + pos    # mirror; no overlap region
-        self.log(f"[stdp] |dt| starts at {dt_min * 1e3:g} ms "
-                 f"(> pulse width {width * 1e3:g} ms): no pulse overlap")
         self._stdp_ctx = {
             "models": models, "amp_pre": amp_pre, "amp_post": amp_post,
             "width": width, "tail": tail, "unit": unit, "kind": kind,
             "dts": dts,
         }
-        for m in models:
-            mk = getattr(m, "input_kind", "current")
-            if mk != kind:
-                self.log(f"  [warn] {m.name} expects {mk} input; "
-                         f"amplitudes are treated as {mk}")
+        if not live:
+            self.log(f"[stdp] |dt| starts at {dt_min * 1e3:g} ms "
+                     f"(> pulse width {width * 1e3:g} ms): no pulse overlap")
+            for m in models:
+                mk = getattr(m, "input_kind", "current")
+                if mk != kind:
+                    self.log(f"  [warn] {m.name} expects {mk} input; "
+                             f"amplitudes are treated as {mk}")
         self.sim_running = True
-        self._busy(True, f"STDP sweep: {len(dts)} timings x "
-                         f"{len(models)} model(s)")
-        self.log(f"[stdp] sweep dt {dts[0] * 1e3:+.4g}..{dts[-1] * 1e3:+.4g} ms"
-                 f" ({len(dts)} pts), "
-                 f"pre {dpg.get_value('stdp_amp_pre'):+g} {unit}, "
-                 f"post {dpg.get_value('stdp_amp_post'):+g} {unit}, "
-                 f"width {dpg.get_value('stdp_width_ms'):g} ms, "
-                 f"settle {dpg.get_value('stdp_settle_ms'):g} ms")
+        if not live:
+            self._last_compute = "stdp"
+        if live:
+            self._busy(True, "live STDP re-sweep (agent edited the code)")
+        else:
+            self._busy(True, f"STDP sweep: {len(dts)} timings x "
+                             f"{len(models)} model(s)")
+            self.log(f"[stdp] sweep dt {dts[0]*1e3:+.4g}..{dts[-1]*1e3:+.4g} ms"
+                     f" ({len(dts)} pts), "
+                     f"pre {dpg.get_value('stdp_amp_pre'):+g} {unit}, "
+                     f"post {dpg.get_value('stdp_amp_post'):+g} {unit}, "
+                     f"width {dpg.get_value('stdp_width_ms'):g} ms, "
+                     f"settle {dpg.get_value('stdp_settle_ms'):g} ms")
         threading.Thread(target=self._stdp_worker,
-                         args=(models, amp_pre, amp_post, width, dts, tail),
+                         args=(models, amp_pre, amp_post, width, dts, tail,
+                               live),
                          daemon=True).start()
 
-    def _stdp_worker(self, models, amp_pre, amp_post, width, dts, tail):
+    def _stdp_worker(self, models, amp_pre, amp_post, width, dts, tail,
+                     live=False):
         t0c = 10e-3
         curves = {}
         t_start = time.perf_counter()
@@ -1848,18 +1950,28 @@ class App:
                     t_stop = max(pre_t, post_t) + width + tail
                     r = simulate(m, wf, t_stop, label=m.name)
                     ys.append(float((r.G[-1] - r.G[0]) * 1e6))
+                # STDP Delta-w is defined relative to the uncorrelated baseline:
+                # at large |dt| the two pulses are independent, so any residual
+                # dG there is timing-blind (single-pulse charge writes that don't
+                # cancel) and must be subtracted so the tails approach 0.
+                if len(ys) >= 2:
+                    base = 0.5 * (ys[0] + ys[-1])   # dt = -max and dt = +max
+                    ys = [y - base for y in ys]
                 curves[m.name] = ys
-                self.q.put(("log", f"  [stdp] {m.name}: dG "
-                                   f"{min(ys):+.4g}..{max(ys):+.4g} uS"))
+                if not live:
+                    self.q.put(("log", f"  [stdp] {m.name}: dG "
+                                       f"{min(ys):+.4g}..{max(ys):+.4g} uS"))
         except Exception as e:
             self.q.put(("log", f"[stdp] FAILED: {e!r}"))
-        self.q.put(("log", f"[stdp] sweep done in "
-                           f"{time.perf_counter() - t_start:.1f} s"))
-        self.q.put(("stdp", [d * 1e3 for d in dts], curves))
+        if not live:
+            self.q.put(("log", f"[stdp] sweep done in "
+                               f"{time.perf_counter() - t_start:.1f} s"))
+        self.q.put(("stdp", [d * 1e3 for d in dts], curves, live))
 
-    def _show_stdp(self, dts_ms, curves):
+    def _show_stdp(self, dts_ms, curves, live=False):
         self.sim_running = False
         self._clear_probes(("stdp_plot",))
+        self._hover_cache.pop("stdp_plot", None)
         for s in self._stdp_series:
             if dpg.does_item_exist(s):
                 dpg.delete_item(s)
@@ -1885,13 +1997,18 @@ class App:
                          f"  |  strongest change at dt = "
                          f"{dts_ms[imax]:+.3g} ms")
         self._stdp_summary = lines
-        for ln in lines:
-            self.log("  [stdp] " + ln)
-        self.log("  [stdp] click any curve point to drill into that timing "
-                 "(R/G/spike transient + dT, dG, dR)")
+        if not live:
+            for ln in lines:
+                self.log("  [stdp] " + ln)
+            self.log("  [stdp] click any curve point to drill into that timing "
+                     "(R/G/spike transient + dT, dG, dR)")
         self._fit_axes_of(("stdp_x", "stdp_y"))
-        self._busy(False, f"STDP curve ready - {len(curves)} model(s)")
-        dpg.set_value("center_tabs", "tab_stdp")
+        if live:
+            self._busy(False, f"live STDP · {len(curves)} model(s) "
+                              f"(agent edit applied)")
+        else:
+            self._busy(False, f"STDP curve ready - {len(curves)} model(s)")
+            dpg.set_value("center_tabs", "tab_stdp")
 
     def _stdp_drilldown(self):
         """Re-run the single pre/post pair at the clicked dt and show the
@@ -1949,6 +2066,8 @@ class App:
         self.results_meta = meta
         self.results_unit = unit
         self._clear_probes(("plot_i", "plot_r", "plot_g"))
+        for _p in ("plot_i", "plot_r", "plot_g"):
+            self._hover_cache.pop(_p, None)
         for s in self._series:
             if dpg.does_item_exist(s):
                 dpg.delete_item(s)
@@ -2006,6 +2125,7 @@ class App:
 
     def update_analysis(self):
         self._clear_probes(("ana_plot",))
+        self._hover_cache.pop("ana_plot", None)
         for s in self._ana_series:
             if dpg.does_item_exist(s):
                 dpg.delete_item(s)
@@ -2633,9 +2753,9 @@ class App:
         dpg.configure_item("btn_send", enabled=False)
         self._chat_pending(True)
         ctx = self._agent_context()
-        auto = dpg.get_value("cb_auto")
-        edits = dpg.get_value("cb_edits") or auto
-        bash = dpg.get_value("cb_bash") or auto
+        auto = (dpg.get_value("menu_auto")
+                if dpg.does_item_exist("menu_auto") else True)
+        edits = bash = auto
         model = self.agent_model_id or "default"
         if edits:                       # snapshot before the agent can edit
             self._backup_editable()
@@ -2657,15 +2777,19 @@ class App:
         self._chat_pending(False)
         text = res.get("text") or ""
         wf = self.agent.extract_waveform(text)
+        action = self.agent.extract_action(text)
         if res.get("ok"):
             shown = text
-            if wf:
+            if wf or action:        # hide the json control block from the user
                 shown = re.sub(r"```(?:json)?\s*\{.*?\}\s*```",
                                "", shown, flags=re.S).strip()
-                shown = shown or f"Here is the pattern — {wf['label']}."
+                shown = shown or (f"Here is the pattern — {wf['label']}."
+                                  if wf else "Running it now.")
             self.append_chat("agent", shown or "(empty reply)")
             if wf:
                 self._add_pattern_card(wf)
+            if action:
+                self._run_agent_action(action)
         else:
             self.append_chat("err", res.get("error") or "unknown error")
         if self.agent.total_cost:
@@ -2673,6 +2797,25 @@ class App:
                           f"session cost ${self.agent.total_cost:.3f}")
         if may_have_edited:
             self._check_external_edits()
+
+    def _run_agent_action(self, action):
+        """Execute a GUI action the agent asked for (so it can actually run
+        plots in the app instead of scripting them)."""
+        actions = {
+            "run": lambda: self.on_run(),
+            "plot_stdp": lambda: self.on_plot_stdp(),
+            "preview": lambda: self.on_preview(),
+            "analyze_g": lambda: self.on_analysis_metric("G"),
+            "analyze_r": lambda: self.on_analysis_metric("R"),
+            "fit": lambda: self.fit_axes(),
+            "export_csv": lambda: self.export_csv(),
+        }
+        fn = actions.get(action)
+        if fn:
+            self.log(f"[agent] running GUI action: {action}")
+            fn()
+        else:
+            self.log(f"[agent] unknown GUI action: {action}")
 
     def on_load_agent_pattern(self, sender=None, app_data=None, user_data=None):
         wf = user_data
@@ -2700,6 +2843,11 @@ class App:
         dpg.delete_item("chat_log", children_only=True)
         self.append_chat("agent", "Conversation reset.")
         self.log("[agent] conversation reset")
+
+    def on_restart_app(self):
+        self.log("[app] restarting to apply GUI-code changes...")
+        self._restart = True
+        dpg.stop_dearpygui()
 
     def on_agent_stop(self):
         if self.agent.stop():
@@ -2753,7 +2901,11 @@ class App:
             except Exception as e:
                 self.log(f"[live] reload failed (syntax error in twin?): {e}")
                 return
-            self.on_run(live=True)
+            # re-run whatever the user last computed (STDP sweep or transient)
+            if self._last_compute == "stdp" and self._stdp_ctx is not None:
+                self.on_plot_stdp(live=True)
+            else:
+                self.on_run(live=True)
 
     # ---- backup / revert agent edits --------------------------------
 
@@ -2937,7 +3089,8 @@ class App:
                     self._show_results(item[1], item[2], item[3], item[4],
                                        live=(len(item) > 5 and item[5]))
                 elif kind == "stdp":
-                    self._show_stdp(item[1], item[2])
+                    self._show_stdp(item[1], item[2],
+                                    live=(len(item) > 3 and item[3]))
                 elif kind == "chat":
                     self._on_chat_done(item[1], item[2])
                 elif kind == "account":
@@ -2963,6 +3116,8 @@ class App:
                 break
         self.virtuoso.disconnect()
         dpg.destroy_context()
+        if self._restart:               # relaunch to apply GUI-code edits
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 def main(workdir=None, smoke_frames=0):

@@ -31,6 +31,7 @@ input IGsc;
 
 electrical In, Out, IGsc, Rmem;
 electrical n_nv, n_v1, n_v2, n_v3, ignd;   // state nodes: 1 V == 1 S
+electrical n_tp, n_td;                     // STDP eligibility traces (1 V == 1 unit)
 
 branch (In,Out) mem;
 
@@ -61,6 +62,16 @@ parameter real tau_scale = 1.0 from (0:inf);
 parameter real tau_retention = 10k from (0:inf);
 parameter real R_eq          = 10k from (0:inf);
 
+// spike-timing-dependent plasticity (continuous-time eligibility traces).
+// Each polarity of gate drive charges its own trace (tr_pot for potentiating
+// drive, tr_dep for depressing drive); both relax with tau_stdp.  A pulse
+// arriving while the OPPOSITE trace is still alive locks a portion into the
+// nonvolatile conductance (rate A_stdp/tau_stdp * opposite_trace), giving the
+// exponential STDP window: post-after-pre depresses, pre-after-post
+// potentiates.  Continuous analog of the edge-triggered rule in model_v2.py.
+parameter real A_stdp   = 8e-6 from [0:inf);   // S, lock-in per unit trace
+parameter real tau_stdp = 0.02 from (0:inf);   // s, trace time constant
+
 // gate threshold / leak (same semantics as v1)
 parameter real I_drift_th       = 1p  from [0:inf);
 parameter real leak_drift_scale = 0.0 from [0:1];
@@ -68,6 +79,7 @@ parameter real leak_drift_scale = 0.0 from [0:1];
 real Gmin, Gmax, G_eq, dG_unit;
 real tau1, tau2, tau3v, csum, cn1, cn2, cn3;
 real absI, Ieff, G_total, x, win, u, sgn;
+real pot_on, dep_on, u_stdp;
 
 analog begin
     Gmin    = 1.0 / Rmax;
@@ -116,25 +128,42 @@ analog begin
         // hard stop exactly at the range edges
         if ((G_total >= Gmax && u > 0) || (G_total <= Gmin && u < 0))
             u = 0.0;
+
+        pot_on = (sgn > 0) ? 1.0 : 0.0;   // potentiating drive (G rising)
+        dep_on = (sgn > 0) ? 0.0 : 1.0;   // depressing drive (G falling)
     end else begin
         u = 0.0;
+        pot_on = 0.0;
+        dep_on = 0.0;
     end
+
+    // STDP lock-in rate: a pulse pairs with the surviving opposite trace
+    u_stdp = (A_stdp / tau_stdp) *
+             (pot_on * V(n_td,ignd) - dep_on * V(n_tp,ignd));
 
     if (analysis("ic")) begin
         V(n_nv,ignd) <+ 1.0 / Rinit;
         V(n_v1,ignd) <+ 0.0;
         V(n_v2,ignd) <+ 0.0;
         V(n_v3,ignd) <+ 0.0;
+        V(n_tp,ignd) <+ 0.0;
+        V(n_td,ignd) <+ 0.0;
     end else begin
-        // d(G_nv)/dt = (1-kappa_v)*u - (G_nv - G_eq)/tau_retention
+        // d(G_nv)/dt = (1-kappa_v)*u + u_stdp - (G_nv - G_eq)/tau_retention
         I(n_nv,ignd) <+ ddt(V(n_nv,ignd))
                         - (1.0 - kappa_v) * u
+                        - u_stdp
                         + (V(n_nv,ignd) - G_eq) / tau_retention;
 
         // d(G_vi)/dt = kappa_v*cni*u - G_vi/taui
         I(n_v1,ignd) <+ ddt(V(n_v1,ignd)) - kappa_v*cn1*u + V(n_v1,ignd)/tau1;
         I(n_v2,ignd) <+ ddt(V(n_v2,ignd)) - kappa_v*cn2*u + V(n_v2,ignd)/tau2;
         I(n_v3,ignd) <+ ddt(V(n_v3,ignd)) - kappa_v*cn3*u + V(n_v3,ignd)/tau3v;
+
+        // eligibility traces: charge toward 1 while their drive is on, decay
+        // with tau_stdp -> d(tr)/dt = (on - tr)/tau_stdp
+        I(n_tp,ignd) <+ ddt(V(n_tp,ignd)) - (pot_on - V(n_tp,ignd))/tau_stdp;
+        I(n_td,ignd) <+ ddt(V(n_td,ignd)) - (dep_on - V(n_td,ignd))/tau_stdp;
     end
 
     // outputs
