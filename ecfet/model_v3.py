@@ -87,29 +87,29 @@ class V3Params:
     # Q_full: charge to traverse the WHOLE intercalation window x: 0 -> 1.
     #   A full sweep at 50 pA/10 ms pulses takes Q_full/Q_ref ~ 1461 pulses, so
     #   >250 distinct nonvolatile states across the window.  dx = |I|*dt/Q_full.
-    Q_full: float = 7.305155266508837e-10
+    Q_full: float = 8.034e-10
     # k: logistic steepness of the saturating S-curve G_nv = Gmin+(Gmax-Gmin)*S(x).
     #   k=6 gives: concave-down potentiation (saturates near Gmax), concave-up
     #   depression (saturates near Gmin), ~linear 10-90% middle (R^2~0.996), and a
     #   bell-shaped per-pulse step (small at the rails, large mid-range).  At the
-    #   227 uS bias (x~0.20, near the low rail) the retained step is ~0.57 uS
-    #   (-11 ohm, Fig.3a); mid-range it is ~1.2 uS.
+    #   227 uS bias (x~0.20, near the low rail) the retained step is ~0.52 uS
+    #   (-10 ohm, Fig.3a); mid-range it is ~1.2 uS.
     k: float = 6.0
     polarity: float = -1.0         # -1: positive (intercalation) I potentiates
 
     # ---- volatile EDL split (Sec. 2.2) ------------------------------------
     # The EDL injected per sub-step is (kappa_v/(1-kappa_v)) * |dG_nv|, spread over
-    # the 3 pools.  kappa_v ~ 0.673 makes the OBSERVED instantaneous step -30 ohm
-    # @ 227 uS (Fig.3a), relaxing to the retained -11 ohm.  Because it scales by
+    # the 3 pools.  kappa_v ~ 0.704 makes the OBSERVED instantaneous step -30 ohm
+    # @ 227 uS (Fig.3a), relaxing to the retained -10 ohm.  Because it scales by
     # the ACTUAL retained step dG_nv (itself bell-shaped), the EDL tapers at the
     # rails too -> no separate soft window is needed.
-    kappa_v: float = 0.673
+    kappa_v: float = 0.704
 
     # ---- volatile relaxation (3 pools; Sec. 3) ----------------------------
     # tau1 = w^2/2D = 22.2 ms (FAST in-plane / EDL gating), tau2 = l^2/2D =
     # 312.5 ms, tau3 = 19 s (LFP <-> graphene slow tail).  FAST-dominant: c1
     # carries the bulk on tau1=22 ms (present within the 10 ms read pulse, drops
-    # fast afterward) with a small slow tail on tau3 (the 2-stage -30 -> -11
+    # fast afterward) with a small slow tail on tau3 (the 2-stage -30 -> -10
     # recovery of Fig.3a).  These are the EDL split ONLY; the STDP trace weights
     # (stdp_c1/2/3) are independent.
     w: float = 4e-6                # device width (Fig. 4b)
@@ -202,12 +202,12 @@ class V3Params:
     def paper(cls, **overrides):
         """Paper-matched preset (Sharbati et al. 2018) - the conserved-x +
         saturating-G(x) law.  120..1150 uS window, 4400 ohm bias, logistic
-        steepness k=6, Q_full=7.305e-10 C (~1461 pulses across the window),
-        kappa_v=0.673 (observed -30 ohm relaxing to retained -11 ohm), FAST-
+        steepness k=6, Q_full=8.034e-10 C (~1414 pulses across the window),
+        kappa_v=0.704 (observed -30 ohm relaxing to retained -10 ohm), FAST-
         dominant EDL pools (0.80/0.05/0.15 on 22 ms/315 ms/19 s), slow 19 s tail
         ON, tau_ret=1.05e6 s (+3.2%/13 h).  Pass overrides (e.g. Rinit=4410)."""
         base = dict(Rmin=870.0, Rmax=8333.0, Rinit=4400.0, Q_ref=0.5e-12,
-                    Q_full=7.305155266508837e-10, k=6.0, kappa_v=0.673,
+                    Q_full=8.034e-10, k=6.0, kappa_v=0.704,
                     w=4e-6, l=15e-6, D=3.6e-10, tao3=19.0,
                     c1=0.80, c2=0.05, c3=0.15, tau_ret=1.05e6, x_eq=0.0,
                     A_stdp=6e-6, kinetic_on=False)

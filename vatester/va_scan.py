@@ -16,6 +16,7 @@ _RE_PARAM = re.compile(
 # (model_key, keywords) - first match wins, checked against filename + module
 MODEL_HINTS = [
     ("fefet", ("fefet", "ferro", "hzo")),
+    ("v3", ("v3", "paper")),
     ("v2", ("v2", "ecram", "practical")),
     ("v1", ("v1", "basic", "diffu", "drft", "memristor", "ecfet")),
 ]

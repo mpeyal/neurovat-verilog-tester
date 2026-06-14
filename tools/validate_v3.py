@@ -147,7 +147,8 @@ def fig3a_3b():
 # ===========================================================================
 def fig3c():
     width, amp, period = 10e-3, 50e-12, 0.2
-    n_up = n_dn = 1400
+    # Q_full=8.034e-10 -> ~1414 pulses to the 95% crossing; run enough to find it.
+    n_up = n_dn = 1700
 
     p = V3Params.paper(Rinit=8333.0)        # start at Gmin (delithiated bottom)
     pulses, t = [], 0.5

@@ -5,7 +5,7 @@
 //   SATURATING-G(x) graphene Li-intercalation synapse) in Spectre: apply a single
 //   +50 pA / 10 ms intercalation pulse at the Fig.3a operating bias (G_init =
 //   227 uS, R = 4400 ohm) and observe the instantaneous dip (-30 ohm) relax to
-//   the retained step (-11 ohm), exactly as tools/validate_v3.py does in Python.
+//   the retained step (-10 ohm), exactly as tools/validate_v3.py does in Python.
 //
 //   *** CANNOT BE RUN IN THIS ENVIRONMENT - NO SPECTRE / OPENVAF LICENSE. ***
 //   This file is provided so the model can be checked on a real simulator.  It
@@ -33,7 +33,7 @@ ahdl_include "../ecfet_v3.va"
 //   Internal state nodes: n_x (conserved x in [0,1], 1 V == 1 x), n_v1/2/3 (EDL
 //   pools, 1 V == 1 S), n_stdp (STDP-locked contribution, 1 V == 1 S).  We .save
 //   these below.  Defaults match the paper config (Rinit=4400 -> 227 uS, k=6,
-//   Q_full=7.305e-10, kappa_v=0.673, A_stdp=6e-6, tau_ret=1.05e6, ...), so no
+//   Q_full=8.034e-10, kappa_v=0.704, A_stdp=6e-6, tau_ret=1.05e6, ...), so no
 //   parameter overrides are needed to reproduce Fig.3a.
 // ===========================================================================
 X1 (n_in n_out n_igsc n_rmem) ecfet_v3 Rinit=4400
@@ -109,7 +109,7 @@ save vread:p                            // current through the read source
 //   At t = 4.999 s (pre-pulse):       V(n_rmem) ~ 4400 ohm,  X1.n_x ~ 0.19985
 //   At t = 5.010 s (pulse ON, end):   V(n_rmem) ~ 4370 ohm  (instantaneous dR
 //                                       ~ -30 ohm; EDL fast pool present)
-//   X1.n_x at pulse end:              ~ 0.2003   (retained dR' ~ -11 ohm on G_nv;
+//   X1.n_x at pulse end:              ~ 0.2005   (retained dR' ~ -10 ohm on G_nv;
 //                                       G_nv = Gmin+(Gmax-Gmin)*S(x) ~ 227.8 uS)
 //   At t = 120 s (settled):           V(n_rmem) ~ 4389 ohm  (EDL fast pool gone,
 //                                       19 s tail + retention overlap); the PURE

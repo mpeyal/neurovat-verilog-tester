@@ -32,6 +32,7 @@ defence against malicious code.  Only put twins you trust here.
 import glob
 import importlib.util
 import os
+import sys
 
 
 def load_twins(twins_dir):
@@ -52,6 +53,9 @@ def load_twins(twins_dir):
         try:
             spec = importlib.util.spec_from_file_location(modname, path)
             mod = importlib.util.module_from_spec(spec)
+            # register in sys.modules BEFORE exec so importlib.reload() works
+            # later (the live hot-reload watcher relies on this)
+            sys.modules[modname] = mod
             spec.loader.exec_module(mod)
         except Exception as e:                      # noqa: BLE001 - report any
             out.append((path, None, f"{type(e).__name__}: {e}"))

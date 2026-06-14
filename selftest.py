@@ -229,7 +229,7 @@ try:
              abs(dRp_nv + 10.0) < 2.0, f"dR'={dRp_nv:+.2f}")
 
     # --- Fig.3c LTP/LTD on G_nv: spans the window AND SYMMETRIC LTD to Gmin ---
-    _amp3, _per3, _W3, _N3 = 50e-12, 0.2, 10e-3, 1100
+    _amp3, _per3, _W3, _N3 = 50e-12, 0.2, 10e-3, 1400  # Q_full=8.034e-10 -> longer ramp
     _pul3, _t3 = [], 0.5
     for _k in range(_N3):
         _pul3.append((_t3, _W3, +_amp3)); _t3 += _per3

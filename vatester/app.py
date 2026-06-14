@@ -24,7 +24,7 @@ import time
 import dearpygui.dearpygui as dpg
 
 from ecfet import (Waveform, EcfetV1, V1Params, EcfetV2, V2Params,
-                   FeFET, FeFETParams, simulate)
+                   EcfetV3, V3Params, FeFET, FeFETParams, simulate)
 from . import signal_factory as sf
 from .agent import ClaudeAgent
 from .va_scan import scan as va_scan
@@ -87,6 +87,7 @@ class ModelSpec:
 MODEL_SPECS = [
     ModelSpec("v1", "ECFET v1 (Verilog-A port)", EcfetV1, V1Params, "current"),
     ModelSpec("v2", "ECFET v2 (practical ECRAM)", EcfetV2, V2Params, "current"),
+    ModelSpec("v3", "ECFET v3 (paper-faithful)", EcfetV3, V3Params, "current"),
     ModelSpec("fefet", "FeFET (Merz/Preisach-lite)", FeFET, FeFETParams, "voltage"),
 ]
 SPEC_BY_KEY = {s.key: s for s in MODEL_SPECS}
@@ -94,21 +95,23 @@ GEN_BY_NAME = {g.name: g for g in sf.GENERATORS}
 
 # device classes group the model keys; selecting a class reconfigures the GUI
 # (which models are enabled, current vs voltage drive, ΔG vs ΔVt, polarization)
-DEVICE_FAMILIES = {"ECFET": ("v1", "v2"), "FeFET": ("fefet",)}
+DEVICE_FAMILIES = {"ECFET": ("v1", "v2", "v3"), "FeFET": ("fefet",)}
 DEVICE_OF_KEY = {k: dev for dev, keys in DEVICE_FAMILIES.items() for k in keys}
 DEVICE_KIND = {"ECFET": "current", "FeFET": "voltage"}   # default drive
 
 # model_key -> the Python "twin" source the GUI actually simulates
 TWIN_FILE = {"v1": "ecfet/model_v1.py", "v2": "ecfet/model_v2.py",
-             "fefet": "ecfet/model_fefet.py"}
+             "v3": "ecfet/model_v3.py", "fefet": "ecfet/model_fefet.py"}
 LABEL_TO_KEY = {s.label: s.key for s in MODEL_SPECS}
 
 # modules to hot-reload when the agent edits a twin, so the GUI re-simulates
 # with the new code (key -> (module, class name, params class name))
-from ecfet import model_v1 as _m_v1, model_v2 as _m_v2, model_fefet as _m_fefet
+from ecfet import (model_v1 as _m_v1, model_v2 as _m_v2,
+                   model_v3 as _m_v3, model_fefet as _m_fefet)
 RELOAD_MODULES = {
     "v1": (_m_v1, "EcfetV1", "V1Params"),
     "v2": (_m_v2, "EcfetV2", "V2Params"),
+    "v3": (_m_v3, "EcfetV3", "V3Params"),
     "fefet": (_m_fefet, "FeFET", "FeFETParams"),
 }
 
@@ -1339,7 +1342,10 @@ class App:
         self.rescan_va(startup=True)
         self.rebuild_param_panel()
         self.rebuild_gen_params()
-        self._apply_device_class(self.device_class)   # sync labels + tab visibility
+        # device class is detected from the default-checked .va files (no radio)
+        _cls = next(iter({DEVICE_OF_KEY.get(k) for k in self._enabled_keys()}
+                         - {None}), self.device_class)
+        self._sync_class_ui(_cls)                      # init labels + tab visibility
         self.log(f"workspace: {self.workdir}")
         self.log(f"agent backend: {self.agent.backend_label()}")
         self.append_chat("agent",
@@ -1473,19 +1479,6 @@ class App:
         with dpg.child_window(width=LEFT_W, tag="left_child", border=False):
             dpg.add_spacer(height=2)
 
-            with self._pad():
-                with dpg.child_window(auto_resize_y=True, border=True) as dc:
-                    self._small("DEVICE CLASS", color=C_ACC)
-                    dpg.add_radio_button(list(DEVICE_FAMILIES), horizontal=True,
-                                         default_value=self.device_class,
-                                         tag="device_class_sel",
-                                         callback=self._on_device_class)
-                    self._small("switches drive (current/voltage), the STDP "
-                                "quantity (dG/dVt) and FeFET polarization",
-                                tag="device_class_hint", color=C_MUTED,
-                                wrap=LEFT_W - 40)
-                dpg.bind_item_theme(dc, self.themes["card"])
-
             with dpg.collapsing_header(label="Verilog-A files",
                                        default_open=True) as h:
                 if "bold" in self.fonts:
@@ -1497,7 +1490,10 @@ class App:
                     dpg.bind_item_theme(vc, self.themes["card"])
                     with dpg.tooltip(vc):
                         dpg.add_text("check = simulate   ·   click = load "
-                                     "params   ·   double-click = edit source")
+                                     "params   ·   double-click = edit source\n"
+                                     "one device class at a time - checking a "
+                                     "FeFET unchecks ECFET (and vice versa); "
+                                     "the GUI auto-switches drive + plots")
 
             with dpg.collapsing_header(label="Parameters",
                                        default_open=True) as h:
@@ -1757,12 +1753,11 @@ class App:
 
     # ---------------- device class + polarization --------------------
 
-    def _on_device_class(self, sender, value):
-        self._apply_device_class(value)
-
     def _apply_device_class(self, cls):
-        """Full device-class switch (from the selector): ENABLE that family's
-        models, then reconfigure drive/labels/tabs to match."""
+        """Programmatic device-class switch: ENABLE that family's models (so
+        only one class is checked), then reconfigure drive/labels/tabs. The UI
+        has no class selector - users switch by checking a .va; this is for
+        startup defaults, the agent, and tests."""
         if cls not in DEVICE_FAMILIES:
             return
         keys = DEVICE_FAMILIES[cls]
@@ -1795,8 +1790,6 @@ class App:
                         for k in keys if k in SPEC_BY_KEY)
         if dpg.does_item_exist("tab_polar"):
             dpg.configure_item("tab_polar", show=has_polar)
-        if dpg.does_item_exist("device_class_sel"):
-            dpg.set_value("device_class_sel", cls)
         self._refresh_stdp_labels()
         # the per-pulse Analysis metric set also changes (G/R vs Vth/P)
         metrics = self._ana_metrics()
@@ -3048,7 +3041,7 @@ class App:
                 with dpg.table_row():
                     if v.model_key:
                         default = self.file_enabled.get(
-                            v.name, v.model_key in ("v1", "v2"))
+                            v.name, v.model_key in ("v1", "v2", "v3"))
                         self.file_enabled[v.name] = default
                         dpg.add_checkbox(tag=f"cb_file_{v.name}",
                                          default_value=default,
@@ -3082,18 +3075,40 @@ class App:
 
     def _on_file_toggle(self, sender, value, user_data):
         self.file_enabled[user_data] = value
-        # auto-sync the drive (current/voltage) to the enabled models so a
-        # voltage device (FeFET) is never silently fed a current stimulus
-        # (and vice versa) - that would just produce a flat, "not working" run
+        if value:
+            # ONE device class at a time: checking a model of a different class
+            # auto-unchecks the others (no ECFET+FeFET mix).  The checkmarks are
+            # the device-class selector - no separate control needed.
+            va = self._va_by_name(user_data)
+            new_cls = DEVICE_OF_KEY.get(va.model_key) if va else None
+            if new_cls:
+                dropped = []
+                for v in self.va_files:
+                    if v.name == user_data or not v.model_key:
+                        continue
+                    if (self.file_enabled.get(v.name)
+                            and DEVICE_OF_KEY.get(v.model_key) != new_cls):
+                        tag = f"cb_file_{v.name}"
+                        if dpg.does_item_exist(tag):
+                            dpg.set_value(tag, False)
+                        self.file_enabled[v.name] = False
+                        dropped.append(v.name)
+                if dropped:
+                    self.append_chat("sys", f"Switched to {new_cls} - unchecked "
+                                     f"{', '.join(dropped)} (one device class at "
+                                     f"a time).")
+        # sync drive (current/voltage) + labels/tabs to the now-coherent class
+        self._sync_class_from_checked()
+
+    def _sync_class_from_checked(self):
+        """Detect the device class from the checked .va files and reconfigure
+        the GUI to match (drive kind, STDP/Analysis labels, Polarization tab)."""
         classes = {DEVICE_OF_KEY.get(k) for k in self._enabled_keys()}
         classes.discard(None)
         if len(classes) == 1:
             cls = classes.pop()
             if cls != self.device_class:
                 self._sync_class_ui(cls, log=True)
-                self.append_chat("sys", f"Switched drive to {cls} "
-                                 f"({DEVICE_KIND[cls]}) to match the enabled "
-                                 f"model.")
 
     def _enabled_keys(self):
         """Model twin keys enabled via checked .va files (deduped)."""
@@ -3951,17 +3966,20 @@ class App:
         kept.  Without this, sims after a reload silently run new code with
         the stale startup parameter snapshot."""
         for key, (mod, clsname, pname) in RELOAD_MODULES.items():
-            old_defaults = _defaults_of(SPEC_BY_KEY[key].params_cls)
-            importlib.reload(mod)
-            spec = SPEC_BY_KEY[key]
-            spec.cls = getattr(mod, clsname)
-            spec.params_cls = getattr(mod, pname)
-            new_defaults = _defaults_of(spec.params_cls)
-            cur = self.param_values.get(key, {})
-            self.param_values[key] = {
-                name: (cur[name] if name in cur and name in old_defaults
-                       and cur[name] != old_defaults[name] else new_val)
-                for name, new_val in new_defaults.items()}
+            try:
+                old_defaults = _defaults_of(SPEC_BY_KEY[key].params_cls)
+                importlib.reload(mod)
+                spec = SPEC_BY_KEY[key]
+                spec.cls = getattr(mod, clsname)
+                spec.params_cls = getattr(mod, pname)
+                new_defaults = _defaults_of(spec.params_cls)
+                cur = self.param_values.get(key, {})
+                self.param_values[key] = {
+                    name: (cur[name] if name in cur and name in old_defaults
+                           and cur[name] != old_defaults[name] else new_val)
+                    for name, new_val in new_defaults.items()}
+            except Exception as e:                   # one bad twin must not
+                self.log(f"[reload] {key} failed: {e!r}")   # break the others
         importlib.reload(analysis)        # hot-swap the measurement layer too
         self.rebuild_param_panel()
 

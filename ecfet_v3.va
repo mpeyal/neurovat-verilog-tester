@@ -74,7 +74,7 @@ parameter real Rinit = 4400  from (0:inf);    // -> G_init = 227 uS (Fig.3a/b bi
 parameter real Q_ref  = 0.5p from (0:inf);    // C per unit pulse (= 50 pA x 10 ms)
 // Q_full: charge to traverse the WHOLE intercalation window x: 0 -> 1.  A full
 //   sweep at 50 pA/10 ms takes Q_full/Q_ref ~ 1461 pulses -> >250 nv states.
-parameter real Q_full = 0.7305155266508837n from (0:inf);   // 7.305e-10 C
+parameter real Q_full = 0.8034n from (0:inf);   // 8.034e-10 C (retained step -10 ohm)
 // k: logistic steepness.  k=6 gives concave-down potentiation (saturates near
 //   Gmax), concave-up depression (saturates near Gmin), ~linear 10-90% middle,
 //   and a bell-shaped per-pulse step (small at the rails, large mid-range).
@@ -83,14 +83,14 @@ parameter real polarity = -1.0 from [-1:1];   // -1: positive (intercalation) I 
 
 // ---- volatile EDL split + 3-pool relaxation -------------------------------
 // The EDL injected is (kappa_v/(1-kappa_v)) * |dG_nv| (proportional to the actual
-// retained step).  kappa_v ~ 0.673 makes the OBSERVED instantaneous step -30 ohm
-// @ 227 uS, relaxing to the retained -11 ohm.  Pools: tau1 = w^2/2D = 22 ms (FAST
+// retained step).  kappa_v ~ 0.704 makes the OBSERVED instantaneous step -30 ohm
+// @ 227 uS, relaxing to the retained -10 ohm.  Pools: tau1 = w^2/2D = 22 ms (FAST
 // in-plane / EDL gating), tau2 = l^2/2D = 315 ms, tau3 = 19 s (LFP exchange tail).
 // FAST-dominant (most weight on tau1=22 ms so it is present within the 10 ms read
 // pulse and drops fast after) with a small slow tail on tau3 (Fig.3a recovery).
 // Because the EDL scales by the ACTUAL retained step dG_nv (itself bell-shaped),
 // it tapers at the rails too -> no separate soft window is needed.
-parameter real kappa_v = 0.673 from [0:1);
+parameter real kappa_v = 0.704 from [0:1);
 parameter real w    = 4u   from (0:inf);      // device width  (Fig.4b)
 parameter real l    = 15u  from (0:inf);      // device length (Fig.4b)
 parameter real D    = 360p from (0:inf);      // 3.6e-10 m^2/s -> tau1 22 ms, tau2 315 ms
