@@ -1,0 +1,25 @@
+// example_rram.va - minimal RRAM/memristor source paired with the
+// twins/example_rram.py twin (matched by the "rram" keyword).  This is just a
+// demonstration source so the example device is runnable end-to-end; the GUI
+// simulates the Python twin, this .va is parsed for params + mapping only.
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module example_rram(p, n);
+    inout p, n;
+    electrical p, n;
+
+    parameter real Rmin   = 1k    from (0:inf);   // LRS
+    parameter real Rmax   = 100k  from (0:inf);   // HRS
+    parameter real Vset   = 1.0   from (0:inf);   // set threshold (V)
+    parameter real Vreset = 0.8   from (0:inf);   // reset threshold (V)
+
+    real G;
+
+    analog begin
+        @(initial_step) G = 1.0 / Rmax;
+        // (illustrative only - real dynamics live in the Python twin)
+        I(p, n) <+ G * V(p, n);
+    end
+endmodule

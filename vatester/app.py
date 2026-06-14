@@ -12,6 +12,7 @@ import contextlib
 import dataclasses
 import importlib
 import json
+import math
 import os
 import queue
 import re
@@ -66,22 +67,13 @@ MODEL_CHOICES = [
     ("Sonnet 4.6", "claude-sonnet-4-6", "fast + smart"),
     ("Haiku 4.5", "claude-haiku-4-5", "fastest, cheapest"),
 ]
-
-QUICK_CHIPS = [
-    ("Poisson train",
-     "Generate a potentiating Poisson spike train: 50 Hz, 1 s, -100 pA, 2 ms spikes."),
-    ("STDP pairs",
-     "Create an STDP experiment: 20 pre/post pairs, dt = +20 ms, +-100 pA, 5 ms width."),
-    ("FeFET LTP/LTD",
-     "Generate a FeFET voltage pattern: 15 potentiating +1.5 V / 10 ms pulses then 15 of -1.5 V."),
-    ("Explain .va",
-     "Explain the selected Verilog-A file and summarize its parameters."),
-    ("Review v2",
-     "Review ecfet_v2.va for convergence hazards or sign-convention bugs."),
-    ("Linear LTP",
-     "Suggest v2 parameter values for a more linear LTP curve (nu_p, nu_d, n_states)."),
+OPENAI_MODEL_CHOICES = [
+    ("Default", None, "gpt-5.1"),
+    ("GPT-5.1", "gpt-5.1", "flagship"),
+    ("GPT-5.1 mini", "gpt-5.1-mini", "fast, cheap"),
 ]
-
+PROVIDER_MODELS = {"claude": MODEL_CHOICES, "openai": OPENAI_MODEL_CHOICES}
+PROVIDER_TITLES = {"claude": "Claude Agent", "openai": "OpenAI Agent"}
 
 @dataclasses.dataclass
 class ModelSpec:
@@ -100,6 +92,12 @@ MODEL_SPECS = [
 SPEC_BY_KEY = {s.key: s for s in MODEL_SPECS}
 GEN_BY_NAME = {g.name: g for g in sf.GENERATORS}
 
+# device classes group the model keys; selecting a class reconfigures the GUI
+# (which models are enabled, current vs voltage drive, ΔG vs ΔVt, polarization)
+DEVICE_FAMILIES = {"ECFET": ("v1", "v2"), "FeFET": ("fefet",)}
+DEVICE_OF_KEY = {k: dev for dev, keys in DEVICE_FAMILIES.items() for k in keys}
+DEVICE_KIND = {"ECFET": "current", "FeFET": "voltage"}   # default drive
+
 # model_key -> the Python "twin" source the GUI actually simulates
 TWIN_FILE = {"v1": "ecfet/model_v1.py", "v2": "ecfet/model_v2.py",
              "fefet": "ecfet/model_fefet.py"}
@@ -114,6 +112,74 @@ RELOAD_MODULES = {
     "fefet": (_m_fefet, "FeFET", "FeFETParams"),
 }
 
+# The MEASUREMENT layer (STDP sweep, per-pulse sampling) lives in
+# vatester/analysis.py and is hot-reloaded LIVE like the twins, so editing the
+# analysis math takes effect with no restart.  app.py always calls it as
+# `analysis.func(...)` (attribute lookup) so importlib.reload swaps in new code.
+from vatester import analysis
+# every file the live watcher polls + reloads (twins + the analysis layer)
+WATCH_FILES = list(TWIN_FILE.values()) + ["vatester/analysis.py"]
+
+# ---- dynamic device twins (the user/agent-extensible `twins/` folder) --------
+# New devices live OUTSIDE the app source in a top-level `twins/` directory and
+# are registered at startup, so users never edit the GUI/core to add a model.
+from . import va_scan as _va_scan_mod
+from . import twin_loader
+
+
+def _register_twin(mod, ts):
+    """Register one dynamic twin (its TWIN_SPEC) into the model registry."""
+    key = ts["key"]
+    if key in SPEC_BY_KEY:
+        return key                                  # built-in or already loaded
+    mcls, pcls = ts["model_class"], ts["params_class"]
+    kind = ts.get("input_kind", "current")
+    spec = ModelSpec(key, ts["label"], mcls, pcls, kind)
+    MODEL_SPECS.append(spec)
+    SPEC_BY_KEY[key] = spec
+    LABEL_TO_KEY[spec.label] = key
+    RELOAD_MODULES[key] = (mod, mcls.__name__, pcls.__name__)
+    if getattr(mod, "__file__", None):
+        TWIN_FILE[key] = mod.__file__
+        WATCH_FILES.append(mod.__file__)
+    dev = ts.get("device_class", "ECFET")
+    DEVICE_FAMILIES[dev] = tuple(DEVICE_FAMILIES.get(dev, ())) + (key,)
+    DEVICE_OF_KEY[key] = dev
+    DEVICE_KIND.setdefault(dev, kind)
+    _va_scan_mod.MODEL_HINTS.insert(0, (key, tuple(ts.get("va_keywords", (key,)))))
+    # optional profile -> set as class attributes the GUI already reads
+    p = ts.get("stdp")
+    if p:
+        mcls.STDP_OBS = p.get("obs", "G")
+        mcls.STDP_LABEL = p.get("label", "dG")
+        mcls.STDP_UNIT = p.get("unit", "uS")
+        mcls.STDP_SCALE = p.get("scale", 1e6)
+    if ts.get("result_plots"):
+        mcls.RESULT_PLOTS = tuple(tuple(x) for x in ts["result_plots"])
+    if ts.get("analysis_metrics"):
+        mcls.ANALYSIS_METRICS = tuple(tuple(x) for x in ts["analysis_metrics"])
+    if ts.get("polar_obs"):
+        mcls.POLAR_OBS = ts["polar_obs"]
+    if ts.get("analyses"):
+        mcls.ANALYSES = tuple(ts["analyses"])
+    return key
+
+
+def register_dynamic_twins(workdir):
+    """Load + register every twin under <workdir>/twins. (loaded, errors)."""
+    loaded, errors = [], []
+    for path, payload, err in twin_loader.load_twins(
+            os.path.join(workdir, "twins")):
+        if err:
+            errors.append((os.path.basename(path), err))
+            continue
+        mod, ts = payload
+        try:
+            loaded.append(_register_twin(mod, ts))
+        except Exception as e:                       # noqa: BLE001
+            errors.append((os.path.basename(path), f"register failed: {e}"))
+    return loaded, errors
+
 
 def _defaults_of(params_cls):
     inst = params_cls()
@@ -124,12 +190,18 @@ def _defaults_of(params_cls):
 class App:
     def __init__(self, workdir):
         self.workdir = os.path.abspath(workdir)
+        # register user/agent twins from the separate twins/ folder BEFORE the
+        # model registry is consumed below
+        self.dynamic_twins, self.twin_errors = register_dynamic_twins(self.workdir)
         self.q = queue.Queue()
         self.agent = ClaudeAgent(self.workdir)
         self.va_files = []
         self.selected_va = None
         self.editor_path = None
         self.editor_mtime = 0.0
+        self.editor_remote = None   # (lib, cell, view) when the buffer is remote
+        self.device_class = "ECFET"  # ECFET (dG, current) | FeFET (dVt, voltage)
+        self._untwinned_prompted = None   # last set of .va shown in the prompt
         self.param_values = {s.key: _defaults_of(s.params_cls)
                              for s in MODEL_SPECS}
         self.gen_values = {}
@@ -152,17 +224,29 @@ class App:
         self.chat_busy = False
         self.virtuoso = VirtuosoLink()
         self.virt_busy = False
-        self.agent_model_label = "Default"
-        self.agent_model_id = None
+        # per-provider model selection: provider -> (label, id-or-None).
+        # Default Claude to Opus 4.8 explicitly (otherwise the CLI's own default
+        # may pick Fable 5).
+        self.model_sel = {"claude": ("Opus 4.8", "claude-opus-4-8"),
+                          "openai": ("Default", None)}
+        self.attachments = []      # absolute paths queued for the next message
         self.fonts = {}
         self.themes = {}
         self._zoom_anim = {}       # axis -> [cur_lo, cur_hi, tgt_lo, tgt_hi]
         self._zoom_release = []    # axes to unlock next frame
         self._probes = {}          # plot -> {"A"/"B": {pt, ann, sid, x, y}}
         self._probe_armed = None   # "A"/"B" while waiting for placement click
+        self._dragging = None      # (plot, which) while a probe is dragged
+        self._drag_anchor = None   # (gx, gy, mx, my, ux, uy) at grab time
+        self._hover_hist = {}      # plot -> [(px, py, mx, my)] for px->unit
+        self._pan_disabled = set() # plots with pan parked (cursor on a probe)
         self._stdp_series = []
+        self._polar_series = []
         self._stdp_ctx = None
         self._stdp_summary = []
+        self._stdp_dts_ms = []     # last sweep's dt points (ms), for copy menu
+        self._stdp_curves = {}     # last sweep's {model: [dG_uS]}, for copy menu
+        self._menu_size = (216, 300)   # STDP context-menu size (measured in build)
         self._tip_frame = -10
         self._hover_ann = {}       # plot -> in-canvas hover bubble annotation
         self._hover_cache = {}     # plot -> [(label, xs, ys)] for fast hover
@@ -309,6 +393,21 @@ class App:
             ("mvThemeCol_Border", C_BORDER),
         ], styles=[("mvStyleVar_ChildRounding", 9),
                    ("mvStyleVar_WindowPadding", (10, 8))])
+
+        # right-click context menu on the STDP plot: rounded dark popup with
+        # full-width hover-highlighted rows
+        self._mk_theme("stdp_menu", colors=[
+            ("mvThemeCol_WindowBg", (24, 27, 36)),
+            ("mvThemeCol_Border", (70, 96, 168)),
+            ("mvThemeCol_Header", (40, 54, 92)),
+            ("mvThemeCol_HeaderHovered", (52, 70, 118)),
+            ("mvThemeCol_HeaderActive", (60, 80, 132)),
+            ("mvThemeCol_Text", C_TEXT),
+        ], styles=[("mvStyleVar_WindowRounding", 10),
+                   ("mvStyleVar_WindowBorderSize", 1),
+                   ("mvStyleVar_WindowPadding", (10, 10)),
+                   ("mvStyleVar_FrameRounding", 6),
+                   ("mvStyleVar_ItemSpacing", (6, 5))])
 
         self._mk_theme("bub_user", colors=[
             ("mvThemeCol_ChildBg", C_BUB_USER),
@@ -596,9 +695,101 @@ class App:
             hi += 1
         return best
 
+    def _probe_near(self, plot, mx, my, px_radius=16.0):
+        """'A'/'B' if the cursor is within px_radius pixels of that probe."""
+        probes = self._probes.get(plot)
+        if not probes:
+            return None
+        xax, yax = self.PROBE_AXES[plot]
+        x0, x1 = dpg.get_axis_limits(xax)
+        y0, y1 = dpg.get_axis_limits(yax)
+        w, h = dpg.get_item_rect_size(plot) or (1, 1)
+        pxx = (w or 1) / ((x1 - x0) or 1.0)
+        pxy = (h or 1) / ((y1 - y0) or 1.0)
+        best = None
+        for which in ("A", "B"):
+            m = probes.get(which)
+            if not m:
+                continue
+            d2 = ((m["x"] - mx) * pxx) ** 2 + ((m["y"] - my) * pxy) ** 2
+            if d2 <= px_radius ** 2 and (best is None or d2 < best[0]):
+                best = (d2, which)
+        return best[1] if best else None
+
+    def _set_plot_pan_disabled(self, plot, disabled):
+        """Park the plot's pan on an unused button while the cursor is on a
+        probe, so pressing the mouse grabs the probe instead of panning."""
+        if (plot in self._pan_disabled) == bool(disabled):
+            return
+        try:
+            dpg.configure_item(plot, pan_button=(dpg.mvMouseButton_X2
+                                                 if disabled else
+                                                 dpg.mvMouseButton_Left))
+        except Exception:
+            return
+        if disabled:
+            self._pan_disabled.add(plot)
+        else:
+            self._pan_disabled.discard(plot)
+
+    def _drag_probe_to(self, plot, which, mx, my):
+        m = self._probes.get(plot, {}).get(which)
+        if not m:
+            return
+        dpg.set_value(m["pt"], (mx, my))
+        if m.get("ann"):
+            dpg.configure_item(m["ann"], default_value=(mx, my))
+        m["x"], m["y"] = mx, my
+        self._update_probe_readout(plot)
+
+    def _units_per_px(self, plot, gx, gy, mx, my):
+        """Plot-units per screen pixel at grab time. Baseline: axis span over
+        the item rect minus typical axis-label margins (sign always right).
+        Refined by a least-squares fit over consecutive hover samples when
+        the history is consistent with that estimate."""
+        xax, yax = self.PROBE_AXES[plot]
+        x0, x1 = dpg.get_axis_limits(xax)
+        y0, y1 = dpg.get_axis_limits(yax)
+        w, h = dpg.get_item_rect_size(plot) or (1, 1)
+        ux = (x1 - x0) / max((w or 1) - 62.0, 1.0)
+        uy = -(y1 - y0) / max((h or 1) - 30.0, 1.0)  # screen y grows downward
+        hist = self._hover_hist.get(plot, [])
+        sxx = sxm = syy = sym = 0.0
+        for (g1x, g1y, m1x, m1y), (g2x, g2y, m2x, m2y) in zip(hist, hist[1:]):
+            dgx, dgy = g2x - g1x, g2y - g1y
+            sxx += dgx * dgx
+            sxm += dgx * (m2x - m1x)
+            syy += dgy * dgy
+            sym += dgy * (m2y - m1y)
+        if sxx > 25.0:
+            cand = sxm / sxx
+            if cand * ux > 0 and 0.4 < abs(cand / ux) < 2.5:
+                ux = cand
+        if syy > 25.0:
+            cand = sym / syy
+            if cand * uy > 0 and 0.4 < abs(cand / uy) < 2.5:
+                uy = cand
+        return ux, uy
+
+    def _tick_probe_drag(self):
+        """Render-loop drag driver: while a probe is grabbed, move it with
+        the GLOBAL mouse position (which stays live during the hold, unlike
+        the plot-space mouse position)."""
+        if not self._dragging or not self._drag_anchor:
+            return
+        if not dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
+            return                       # the release handler finishes up
+        plot, which = self._dragging
+        gx0, gy0, mx0, my0, ux, uy = self._drag_anchor
+        gx, gy = dpg.get_mouse_pos(local=False)
+        self._drag_probe_to(plot, which,
+                            mx0 + (gx - gx0) * ux,
+                            my0 + (gy - gy0) * uy)
+
     def _on_plot_hover(self, sender, app_data, user_data):
         """Draw an in-canvas bubble at the nearest data point, showing its
-        x / y values with units. Fires while the plot is hovered."""
+        x / y values with units. Fires while the plot is hovered. Also drives
+        the manual probe drag (independent of ImPlot's native grab)."""
         plot = user_data
         if plot not in self.HOVER_FMT:
             return
@@ -606,6 +797,30 @@ class App:
             mx, my = dpg.get_plot_mouse_pos()
         except Exception:
             self._hide_hover_bubble()
+            return
+        down = dpg.is_mouse_button_down(dpg.mvMouseButton_Left)
+        if down:
+            # drag motion is driven by _tick_probe_drag (the plot-space mouse
+            # pos FREEZES while the button is held, so it is useless here);
+            # just keep the bubble out of the way
+            self._hide_hover_bubble()
+            self._hover_last = None
+            return
+        # button up: remember px<->plot-unit samples for the drag mapping
+        gx, gy = dpg.get_mouse_pos(local=False)
+        hist = self._hover_hist.setdefault(plot, [])
+        if not hist or (abs(gx - hist[-1][0]) + abs(gy - hist[-1][1])) >= 3:
+            hist.append((gx, gy, mx, my))
+            if len(hist) > 24:
+                del hist[0]
+        # when the cursor sits on a probe, park the plot's pan so the next
+        # press grabs the probe (not the canvas)
+        near = self._probe_near(plot, mx, my)
+        self._set_plot_pan_disabled(plot, near is not None)
+        if near:
+            self._hide_hover_bubble()
+            self._hover_last = None
+            self._tip_frame = dpg.get_frame_count()
             return
         xax, yax = self.PROBE_AXES[plot]
         x0, x1 = dpg.get_axis_limits(xax)
@@ -631,6 +846,10 @@ class App:
             return
         _, x, y, lbl = best
         xname, xunit, yname, yunit = self.HOVER_FMT[plot]
+        # the two transient plots relabel per device profile (R/G vs Vth/P)
+        ro = getattr(self, "_result_obs", None)
+        if ro and plot in ("plot_r", "plot_g"):
+            _, yname, yunit = ro[0 if plot == "plot_r" else 1]
         unit = dpg.get_value("unit_combo") if dpg.does_item_exist(
             "unit_combo") else ""
         xunit = xunit.replace("{unit}", unit)
@@ -703,38 +922,57 @@ class App:
         m = probes.get(which)
         if m:
             dpg.set_value(m["pt"], (x, y))
-            dpg.configure_item(m["ann"], default_value=(x, y))
+            if m.get("ann"):
+                dpg.configure_item(m["ann"], default_value=(x, y))
         else:
+            # no_inputs: the native ImPlot grab is disabled on purpose - it
+            # takes ActiveId on press, which FREEZES the plot's mouse-position
+            # updates and breaks the drag. The marker is visual-only; all
+            # drag motion is driven manually in _on_plot_hover with live
+            # get_plot_mouse_pos coordinates.
             pt = dpg.add_drag_point(parent=plot, default_value=(x, y),
-                                    color=color, thickness=2,
-                                    callback=self._on_probe_drag,
-                                    user_data=(plot, which))
+                                    color=color, thickness=4,
+                                    no_inputs=True)
+            # the A / B label bubble that rides next to the marker
             ann = dpg.add_plot_annotation(parent=plot, label=which,
                                           default_value=(x, y),
-                                          offset=(10, -10), color=color,
+                                          offset=(12, -12), color=color,
                                           clamped=True)
             probes[which] = m = {"pt": pt, "ann": ann}
         m.update(x=x, y=y, series=slabel, sid=sid)
         self._update_probe_readout(plot)
 
-    def _on_probe_drag(self, sender, app_data, user_data):
-        plot, which = user_data
+    def _on_probe_release(self, sender, app_data):
+        """On mouse-up after a drag, snap the moved probe onto the nearest
+        curve point."""
+        d = self._dragging
+        self._dragging = None
+        self._drag_anchor = None
+        if not d:
+            return
+        plot, which = d
+        self._set_plot_pan_disabled(plot, False)
         m = self._probes.get(plot, {}).get(which)
         if not m:
             return
-        val = dpg.get_value(sender)
-        x, y = float(val[0]), float(val[1])
-        sid = m.get("sid")
-        if sid and dpg.does_item_exist(sid):
-            data = dpg.get_value(sid)
-            if data and len(data) >= 2 and data[0]:
-                xs, ys = data[0], data[1]
-                i = min(range(len(xs)), key=lambda k: abs(xs[k] - x))
-                x, y = float(xs[i]), float(ys[i])
-                dpg.set_value(sender, (x, y))
-        dpg.configure_item(m["ann"], default_value=(x, y))
-        m["x"], m["y"] = x, y
-        self._update_probe_readout(plot)
+        xax, yax = self.PROBE_AXES[plot]
+        x0, x1 = dpg.get_axis_limits(xax)
+        y0, y1 = dpg.get_axis_limits(yax)
+        xs_span = (x1 - x0) or 1.0
+        ys_span = (y1 - y0) or 1.0
+        best, best_lbl = None, None
+        for lbl, xs, ys in self._get_hover_data(plot):
+            cand = self._nearest_on_series(xs, ys, m["x"], m["y"],
+                                           xs_span, ys_span)
+            if cand is not None and (best is None or cand[0] < best[0]):
+                best, best_lbl = cand, lbl
+        if best is not None:
+            _, x, y = best
+            dpg.set_value(m["pt"], (x, y))
+            if m.get("ann"):
+                dpg.configure_item(m["ann"], default_value=(x, y))
+            m["x"], m["y"], m["series"] = x, y, best_lbl
+            self._update_probe_readout(plot)
 
     def _hovered_probe_plot(self):
         return next((p for p in self.PROBE_AXES
@@ -773,6 +1011,20 @@ class App:
     def _on_probe_click(self, sender, app_data):
         plot = self._hovered_probe_plot()
         if not self._probe_armed:
+            if not plot:
+                return
+            try:
+                mx, my = dpg.get_plot_mouse_pos()
+            except Exception:
+                return
+            # click on an existing probe = grab it (manual drag starts)
+            which = self._probe_near(plot, mx, my)
+            if which:
+                gx, gy = dpg.get_mouse_pos(local=False)
+                ux, uy = self._units_per_px(plot, gx, gy, mx, my)
+                self._dragging = (plot, which)
+                self._drag_anchor = (gx, gy, mx, my, ux, uy)
+                return
             # un-armed click on the STDP curve = drill into that timing point
             if plot == "stdp_plot":
                 self._stdp_drilldown()
@@ -918,6 +1170,14 @@ class App:
                                       user_data="ESC")
             dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Left,
                                         callback=self._on_probe_click)
+            dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left,
+                                          callback=self._on_probe_release)
+            # STDP copy menu: right-click over the plot (labels included) opens
+            # it; a left-click elsewhere dismisses it
+            dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right,
+                                        callback=self._on_stdp_rclick)
+            dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Left,
+                                        callback=self._dismiss_copy_menu)
 
         dpg.add_file_dialog(directory_selector=True, show=False, modal=True,
                             callback=self._on_dir_picked, tag="dir_dialog",
@@ -973,8 +1233,91 @@ class App:
                         "Nothing is written to disk - it lives only in this "
                         "running app.", wrap=440)
             dpg.add_separator()
+            self._small("OpenAI provider (/provider openai): API key for the "
+                        "OpenAI SDK backend (also read from OPENAI_API_KEY):",
+                        wrap=440)
+            with dpg.group(horizontal=True):
+                dpg.add_input_text(tag="openai_key_in", password=True,
+                                   width=304, hint="paste sk-...")
+                bo = dpg.add_button(label="Apply",
+                                    callback=self.on_openai_key_apply)
+                dpg.bind_item_theme(bo, self.themes["primary"])
+                dpg.add_button(label="Clear",
+                               callback=self.on_openai_key_clear)
+            dpg.add_separator()
             dpg.add_button(label="Close", width=90, callback=lambda:
                            dpg.configure_item("account_modal", show=False))
+
+        with dpg.file_dialog(directory_selector=False, show=False, modal=True,
+                             width=620, height=420, tag="attach_dialog",
+                             callback=self._on_attach_picked, file_count=8,
+                             default_path=self.workdir):
+            dpg.add_file_extension(".*")
+            dpg.add_file_extension(".pdf", color=(255, 150, 130, 255))
+            dpg.add_file_extension(".csv", color=(150, 220, 160, 255))
+            dpg.add_file_extension(".png", color=(150, 180, 255, 255))
+            dpg.add_file_extension(".jpg", color=(150, 180, 255, 255))
+            dpg.add_file_extension(".jpeg", color=(150, 180, 255, 255))
+            dpg.add_file_extension(".txt", color=(200, 200, 200, 255))
+            dpg.add_file_extension(".md", color=(200, 200, 200, 255))
+            dpg.add_file_extension(".json", color=(220, 200, 140, 255))
+            dpg.add_file_extension(".va", color=(220, 170, 255, 255))
+
+        # right-click context menu for the STDP plot (shown at the cursor by
+        # _on_stdp_rclick when the right button is pressed over the plot rect,
+        # axis labels included)
+        with dpg.window(tag="stdp_copy_menu", show=False, no_title_bar=True,
+                        no_resize=True, no_move=True, no_collapse=True,
+                        no_scrollbar=True, autosize=True):
+            self._small("COPY POINTS", color=C_ACC)
+            self._menu_row("dt  (delta-T) values", "copy_dt")
+            self._menu_row("dG  values", "copy_dg")
+            self._menu_row("dt, dG pairs  (CSV)", "copy_pairs")
+            dpg.add_separator()
+            self._small("VIEW", color=C_ACC)
+            self._menu_row("Fit all", "fit")
+            self._menu_row("Fit X", "fit_x")
+            self._menu_row("Fit Y", "fit_y")
+            self._menu_row("Zoom in", "zoom_in")
+            self._menu_row("Zoom out", "zoom_out")
+            dpg.add_separator()
+            self._menu_row("Clear A / B probes", "clear_probes")
+        if "stdp_menu" in self.themes:
+            dpg.bind_item_theme("stdp_copy_menu", self.themes["stdp_menu"])
+
+        # "Save as..." target picker for the Verilog-A editor
+        with dpg.file_dialog(directory_selector=False, show=False, modal=True,
+                             width=620, height=420, tag="save_va_dialog",
+                             callback=self._on_save_va_picked,
+                             default_path=self.workdir,
+                             default_filename="model.va"):
+            dpg.add_file_extension(".va", color=(220, 170, 255, 255))
+            dpg.add_file_extension(".*")
+
+        # confirm dialog for writing source back into a Virtuoso cellview
+        with dpg.window(label="Write back to Virtuoso", tag="virt_write_modal",
+                        modal=True, show=False, no_resize=True, width=470,
+                        autosize=True):
+            dpg.add_text("", tag="virt_write_msg", wrap=440)
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                cb = dpg.add_button(label="Write to library",
+                                    callback=self._do_virt_write_back)
+                dpg.bind_item_theme(cb, self.themes["primary"])
+                dpg.add_button(label="Cancel", callback=lambda: dpg.configure_item(
+                    "virt_write_modal", show=False))
+
+        # auto-prompt: Verilog-A files that have no Python twin yet
+        with dpg.window(label="Verilog-A without a twin", tag="untwin_modal",
+                        modal=True, show=False, no_resize=True, width=540,
+                        autosize=True):
+            dpg.add_text("", tag="untwin_msg", wrap=510)
+            with dpg.child_window(tag="untwin_list", auto_resize_y=True,
+                                  border=False):
+                pass
+            dpg.add_separator()
+            dpg.add_button(label="Not now", callback=lambda: dpg.configure_item(
+                "untwin_modal", show=False))
 
         dpg.create_viewport(title=APP_TITLE, width=1600, height=980,
                             min_width=1160, min_height=720)
@@ -983,9 +1326,20 @@ class App:
         dpg.show_viewport()
         dpg.set_primary_window("main", True)
 
+        # measure the context menu once so it can be kept on-screen when opened
+        # near an edge (autosize windows only report a size after rendering)
+        dpg.configure_item("stdp_copy_menu", show=True, pos=[0, 0])
+        for _ in range(3):
+            dpg.render_dearpygui_frame()
+        ms = dpg.get_item_rect_size("stdp_copy_menu") or [0, 0]
+        if ms and ms[0] > 0:
+            self._menu_size = (int(ms[0]), int(ms[1]))
+        dpg.configure_item("stdp_copy_menu", show=False)
+
         self.rescan_va(startup=True)
         self.rebuild_param_panel()
         self.rebuild_gen_params()
+        self._apply_device_class(self.device_class)   # sync labels + tab visibility
         self.log(f"workspace: {self.workdir}")
         self.log(f"agent backend: {self.agent.backend_label()}")
         self.append_chat("agent",
@@ -1017,12 +1371,12 @@ class App:
                 dpg.add_menu_item(label="Fit plot axes", callback=self.fit_axes)
                 dpg.add_separator()
                 dpg.add_text("Analyze quantity:")
-                dpg.add_menu_item(label="Conductance  G (uS)", check=True,
-                                  default_value=True, tag="ana_menu_G",
-                                  callback=lambda: self.on_analysis_metric("G"))
-                dpg.add_menu_item(label="Resistance  R_mem (ohm)", check=True,
-                                  default_value=False, tag="ana_menu_R",
-                                  callback=lambda: self.on_analysis_metric("R"))
+                dpg.add_menu_item(label="G (uS)", check=True,
+                                  default_value=True, tag="ana_menu_0",
+                                  user_data=0, callback=self._on_ana_menu)
+                dpg.add_menu_item(label="R_mem (ohm)", check=True,
+                                  default_value=False, tag="ana_menu_1",
+                                  user_data=1, callback=self._on_ana_menu)
             with dpg.menu(label="Virtuoso", tag="menu_virtuoso"):
                 dpg.add_menu_item(label="Connect (tunnel + skillbridge)",
                                   callback=self.on_virtuoso_connect)
@@ -1119,6 +1473,19 @@ class App:
         with dpg.child_window(width=LEFT_W, tag="left_child", border=False):
             dpg.add_spacer(height=2)
 
+            with self._pad():
+                with dpg.child_window(auto_resize_y=True, border=True) as dc:
+                    self._small("DEVICE CLASS", color=C_ACC)
+                    dpg.add_radio_button(list(DEVICE_FAMILIES), horizontal=True,
+                                         default_value=self.device_class,
+                                         tag="device_class_sel",
+                                         callback=self._on_device_class)
+                    self._small("switches drive (current/voltage), the STDP "
+                                "quantity (dG/dVt) and FeFET polarization",
+                                tag="device_class_hint", color=C_MUTED,
+                                wrap=LEFT_W - 40)
+                dpg.bind_item_theme(dc, self.themes["card"])
+
             with dpg.collapsing_header(label="Verilog-A files",
                                        default_open=True) as h:
                 if "bold" in self.fonts:
@@ -1160,8 +1527,10 @@ class App:
                         with dpg.table_row():
                             dpg.add_text("post-stimulus tail (s)",
                                          color=C_TEXT2)
+                            # 60 s so a single pulse's slow (19 s tail) recovery
+                            # fully settles to +/-10 in view; lower for quick runs
                             dpg.add_input_double(tag="tail_input",
-                                                 default_value=1.0,
+                                                 default_value=60.0,
                                                  width=-1, format="%.4g",
                                                  step=0)
                         with dpg.table_row():
@@ -1213,6 +1582,9 @@ class App:
                     self._analysis_tab()
                 with dpg.tab(label="  STDP  ", tag="tab_stdp"):
                     self._stdp_tab()
+                with dpg.tab(label="  Polarization  ", tag="tab_polar",
+                             show=False):
+                    self._polar_tab()
                 with dpg.tab(label="  Verilog-A Source  ", tag="tab_source"):
                     self._source_tab()
                 with dpg.tab(label="  Log  ", tag="tab_log"):
@@ -1299,11 +1671,10 @@ class App:
         with self._pad(left=8, top=8, bottom=0):
             with dpg.group(horizontal=True):
                 self._caption("ANALYZE")
-                dpg.add_combo(["Conductance G", "Resistance R_mem"],
-                              default_value="Conductance G",
+                dpg.add_combo(["G (uS)", "R_mem (ohm)"],
+                              default_value="G (uS)",
                               tag="ana_metric_combo", width=180,
-                              callback=lambda s, a: self.on_analysis_metric(
-                                  "R" if a == "Resistance R_mem" else "G"))
+                              callback=lambda s, a: self.on_analysis_metric(a))
                 self._small("retained value sampled after each pulse",
                             tag="ana_caption")
             dpg.add_text("", tag="ana_text", wrap=940, color=C_TEXT2)
@@ -1315,21 +1686,36 @@ class App:
 
     def _stdp_tab(self):
         with self._pad(left=8, top=8, bottom=0):
-            self._small("spike-timing-dependent plasticity: one pre/post "
-                        "spike pair per point, dG = retained G change after "
-                        "settling. dt > 0 means post follows pre. |dt| is "
-                        "swept from the pulse width (no overlap) to +-1000 ms.")
+            self._small("spike-timing-dependent plasticity: one pre/post pulse "
+                        "pair per point. ANTI-SYMMETRIC - dt > 0 (post after "
+                        "pre) potentiates (+dG), dt < 0 depresses (-dG). The "
+                        "POSITIVE side follows the paper Fig.4b 3-exp "
+                        "(tau=22ms/315ms/19s; the 19s tail holds |dG|~0.7 uS "
+                        "out to ~1800 ms). Use OPPOSITE-polarity PRE/POST "
+                        "(swap signs to flip LTP side). Window height = A_stdp, "
+                        "AMPLITUDE-INDEPENDENT, so use SMALL probes (~20 pA); "
+                        "set DT RANGE ~1800 ms to see the full curve.")
             with dpg.group(horizontal=True):
+                # anti-symmetric STDP needs OPPOSITE-polarity pulses so each
+                # meets the other's surviving 3-exp trace (the A_stdp lock-in);
+                # with pre=-/post=+, dt>0 (causal pre->post) potentiates.  SMALL
+                # probe amplitude keeps the +/- window symmetric (the lock-in
+                # is per-spike, so amplitude doesn't change the window height).
                 for tag, cap, default, w in (
-                        ("stdp_amp_pre", "PRE AMP", -100.0, 84),
-                        ("stdp_amp_post", "POST AMP", 100.0, 84),
+                        ("stdp_amp_pre", "PRE AMP", -20.0, 84),
+                        ("stdp_amp_post", "POST AMP", 20.0, 84),
                         ("stdp_width_ms", "WIDTH (ms)", 5.0, 84),
-                        ("stdp_range_ms", "DT RANGE (+-ms)", 1000.0, 96),
+                        ("stdp_range_ms", "DT RANGE (+-ms)", 1800.0, 96),
                         ("stdp_settle_ms", "SETTLE (ms)", 1000.0, 90)):
                     with dpg.group():
                         self._caption(cap)
                         dpg.add_input_double(tag=tag, default_value=default,
                                              width=w, format="%.4g", step=0)
+                with dpg.group():
+                    self._caption("POINTS")
+                    dpg.add_input_int(tag="stdp_npts", default_value=80,
+                                      width=72, min_value=6, min_clamped=True,
+                                      max_value=600, max_clamped=True, step=0)
                 with dpg.group():
                     self._caption("AMP UNIT")
                     self._small("", tag="stdp_unit_lbl", color=C_TEXT2)
@@ -1340,33 +1726,220 @@ class App:
                     dpg.bind_item_theme(b, self.themes["primary"])
             with dpg.tooltip("stdp_amp_pre"):
                 dpg.add_text("PRE/POST AMP: the two spike amplitudes (in the "
-                             "Signal Designer's unit + current/voltage mode).\n"
+                             "Signal Designer's unit + current/voltage mode). "
+                             "Use OPPOSITE signs - the anti-symmetric window "
+                             "comes from each pulse meeting the other's "
+                             "surviving trace; swap the signs to flip which "
+                             "timing side is LTP.\n"
                              "WIDTH: pulse width; the sweep skips any |dt| "
                              "smaller than it.\n"
                              "DT RANGE: sweep dt from -range..+range ms "
                              "(e.g. 200 = -200..+200 ms, 1000 = -1..+1 s).\n"
-                             "SETTLE: wait time after the pair before reading "
-                             "dG, so the volatile component has relaxed and "
-                             "you measure the RETAINED change, not the "
-                             "transient overshoot.")
+                             "POINTS: total dt points to simulate (both signs); "
+                             "log-spaced. Fewer = faster, more = smoother.\n"
+                             "SETTLE: tail after the pair before reading dG, so "
+                             "the volatile part has relaxed and you measure the "
+                             "RETAINED change locked in by the timing.")
             self._plot_toolbar(("stdp_x",), ("stdp_y",),
                                probe_tag="probe_stdp")
             with dpg.plot(height=-1, width=-1, tag="stdp_plot"):
                 dpg.add_plot_legend()
+                # no_menus frees the right mouse button from ImPlot's default
+                # axis context menu so our copy menu can use it (a popup can't
+                # bind to an axis, so the copy menu is driven from a global
+                # right-click handler that hit-tests the whole plot rect -
+                # including the axis-label margins; see _on_stdp_rclick)
                 dpg.add_plot_axis(dpg.mvXAxis,
                                   label="dt = t_post - t_pre (ms)",
-                                  tag="stdp_x")
-                dpg.add_plot_axis(dpg.mvYAxis, label="dG (uS)", tag="stdp_y")
+                                  tag="stdp_x", no_menus=True)
+                dpg.add_plot_axis(dpg.mvYAxis, label="dG (uS)", tag="stdp_y",
+                                  no_menus=True)
+
+    # ---------------- device class + polarization --------------------
+
+    def _on_device_class(self, sender, value):
+        self._apply_device_class(value)
+
+    def _apply_device_class(self, cls):
+        """Full device-class switch (from the selector): ENABLE that family's
+        models, then reconfigure drive/labels/tabs to match."""
+        if cls not in DEVICE_FAMILIES:
+            return
+        keys = DEVICE_FAMILIES[cls]
+        for v in self.va_files:
+            tag = f"cb_file_{v.name}"
+            if v.model_key and dpg.does_item_exist(tag):
+                on = v.model_key in keys
+                dpg.set_value(tag, on)
+                self.file_enabled[v.name] = on
+        self._sync_class_ui(cls, log=True)
+
+    def _sync_class_ui(self, cls, log=False):
+        """Reconfigure the drive kind, parameter panel, STDP labels and the
+        Polarization tab for a device class WITHOUT touching the model
+        checkboxes (so it's safe to call when the user toggles a model)."""
+        if cls not in DEVICE_FAMILIES:
+            return
+        self.device_class = cls
+        keys = DEVICE_FAMILIES[cls]
+        kind = DEVICE_KIND.get(cls, "current")
+        if dpg.does_item_exist("kind_combo"):
+            dpg.set_value("kind_combo", kind)
+            self._sync_unit_combo()
+        spec = next((s for s in MODEL_SPECS if s.key in keys), None)
+        if spec and dpg.does_item_exist("param_model_sel"):
+            dpg.set_value("param_model_sel", spec.label)
+            self.rebuild_param_panel()
+        has_polar = any("polarization" in getattr(SPEC_BY_KEY[k].cls,
+                                                   "ANALYSES", ())
+                        for k in keys if k in SPEC_BY_KEY)
+        if dpg.does_item_exist("tab_polar"):
+            dpg.configure_item("tab_polar", show=has_polar)
+        if dpg.does_item_exist("device_class_sel"):
+            dpg.set_value("device_class_sel", cls)
+        self._refresh_stdp_labels()
+        # the per-pulse Analysis metric set also changes (G/R vs Vth/P)
+        metrics = self._ana_metrics()
+        if self.analysis_metric not in [m[0] for m in metrics]:
+            self.analysis_metric = metrics[0][0]
+        self._rebuild_ana_metric_combo()
+        sp = self._ana_spec()
+        App.HOVER_FMT["ana_plot"] = ("pulse", "", sp[1], sp[2])
+        if log:
+            self.log(f"[device] class -> {cls} "
+                     f"(models: {', '.join(keys)}, drive: {kind})")
+
+    # default transient plots = R_mem / G (ECFET); FeFET overrides via RESULT_PLOTS
+    DEFAULT_RESULT_PLOTS = (("R", "R_mem", "ohm", 1.0), ("G", "G", "uS", 1e6))
+
+    def _result_plots(self):
+        models = self._checked_models()
+        if models:
+            return getattr(models[0], "RESULT_PLOTS", self.DEFAULT_RESULT_PLOTS)
+        return self.DEFAULT_RESULT_PLOTS
+
+    @staticmethod
+    def _obs_arr(r, obs):
+        """Array for a result observable: 'R'/'G' from the SimResult, else an
+        extras key (e.g. 'Vth (V)', 'P (uC/cm2)')."""
+        if obs == "R":
+            return r.R
+        if obs == "G":
+            return r.G
+        extras = getattr(r, "extras", None) or {}
+        return extras.get(obs, r.R)
+
+    def _active_stdp_profile(self):
+        models = self._checked_models()
+        if models:
+            return analysis.state_profile(models[0])
+        return ("dG", "uS", 1e6)
+
+    def _refresh_stdp_labels(self):
+        label, unit, _ = self._active_stdp_profile()
+        if dpg.does_item_exist("stdp_y"):
+            dpg.configure_item("stdp_y", label=f"{label} ({unit})")
+
+    def on_plot_polar(self, *_):
+        if self.sim_running:
+            return
+        models = [m for m in self._checked_models()
+                  if hasattr(m, "P") or getattr(m, "POLAR_OBS", None)]
+        if not models:
+            self.log("[polar] select a FeFET model (no polarization observable)")
+            self._busy(False, "Polarization needs a FeFET model")
+            return
+        v_amp = abs(dpg.get_value("polar_vamp"))
+        period = max(dpg.get_value("polar_period"), 1e-3)
+        n_pts = max(int(dpg.get_value("polar_pts")), 20)
+        n_cycles = max(int(dpg.get_value("polar_cycles")), 1)
+        self.sim_running = True
+        self._busy(True, f"polarization sweep ({n_cycles} cycles)...")
+        threading.Thread(target=self._polar_worker,
+                         args=(models, v_amp, period, n_pts, n_cycles),
+                         daemon=True).start()
+
+    def _polar_worker(self, models, v_amp, period, n_pts, n_cycles):
+        try:
+            loops = analysis.polarization_loop(models, v_amp=v_amp,
+                                               period=period, n_pts=n_pts,
+                                               n_cycles=n_cycles)
+        except Exception as e:
+            loops = {}
+            self.q.put(("log", f"[polar] FAILED: {e!r}"))
+        self.q.put(("polar", loops))
+
+    def _show_polar(self, loops):
+        self.sim_running = False
+        for s in self._polar_series:
+            if dpg.does_item_exist(s):
+                dpg.delete_item(s)
+        self._polar_series = []
+        if not loops:
+            self._busy(False, "polarization: no data")
+            return
+        unit = "norm."
+        for label, d in loops.items():
+            unit = d["unit"]
+            self._polar_series.append(dpg.add_line_series(
+                d["V"], d["P"], parent="polar_y", label=label))
+            self.log(f"  [polar] {label}: P {min(d['P']):+.3g}.."
+                     f"{max(d['P']):+.3g} {unit}")
+        dpg.configure_item("polar_y", label=f"P ({unit})")
+        self._fit_axes_of(("polar_x", "polar_y"))
+        self._busy(False, f"P-V loop ready - {len(loops)} model(s)")
+        dpg.set_value("center_tabs", "tab_polar")
+
+    def _polar_tab(self):
+        with self._pad(left=8, top=8, bottom=0):
+            self._small("ferroelectric polarization-voltage hysteresis loop "
+                        "(FeFET): a triangular gate sweep switches the domains; "
+                        "the loop area is the remanent / coercive signature.")
+            with dpg.group(horizontal=True):
+                for tag, cap, default in (("polar_vamp", "V AMP (V)", 3.0),
+                                          ("polar_period", "SWEEP (s)", 0.3),
+                                          ("polar_cycles", "CYCLES", 4),
+                                          ("polar_pts", "POINTS/CYC", 300)):
+                    with dpg.group():
+                        self._caption(cap)
+                        if tag in ("polar_cycles", "polar_pts"):
+                            dpg.add_input_int(tag=tag, default_value=int(default),
+                                              width=84, step=0, min_value=1,
+                                              min_clamped=True)
+                        else:
+                            dpg.add_input_double(tag=tag, default_value=default,
+                                                 width=84, format="%.4g", step=0)
+                with dpg.group():
+                    dpg.add_spacer(height=18)
+                    b = dpg.add_button(label="Plot P-V loop",
+                                       callback=self.on_plot_polar)
+                    dpg.bind_item_theme(b, self.themes["primary"])
+            self._plot_toolbar(("polar_x",), ("polar_y",), probe_tag="probe_polar")
+            with dpg.plot(height=-1, width=-1, tag="polar_plot"):
+                dpg.add_plot_legend()
+                dpg.add_plot_axis(dpg.mvXAxis, label="gate voltage (V)",
+                                  tag="polar_x")
+                dpg.add_plot_axis(dpg.mvYAxis, label="P (uC/cm^2)", tag="polar_y")
 
     def _source_tab(self):
         with self._pad(left=8, top=8, bottom=0):
             with dpg.group(horizontal=True):
                 dpg.add_combo([], tag="va_edit_sel", width=300,
                               callback=self.on_editor_file_change)
-                dpg.add_button(label="Save", callback=self.on_editor_save)
+                sb = dpg.add_button(label="Save", callback=self.on_editor_save)
+                dpg.bind_item_theme(sb, self.themes["primary"])
+                dpg.add_button(label="Save as...",
+                               callback=self.on_editor_save_as)
                 dpg.add_button(label="Reload", callback=self.on_editor_reload)
                 dpg.add_button(label="Ask agent about this file",
                                callback=self.on_ask_about_file)
+                tb = dpg.add_button(label="Build twin & run",
+                                    callback=self.on_agent_build_twin)
+                dpg.bind_item_theme(tb, self.themes["primary"])
+                with dpg.tooltip(tb):
+                    dpg.add_text("Ask the agent to read this Verilog-A, build/"
+                                 "update its Python twin, and run a simulation "
+                                 "in the GUI (needs Agent > Autonomous on)")
                 self._small("", tag="editor_status")
 
             # --- open source straight from Cadence Virtuoso -----------
@@ -1378,20 +1951,31 @@ class App:
                                      callback=lambda *_: self._virt_lib_changed())
                 with dpg.group(horizontal=True):
                     self._caption("library")
-                    dpg.add_combo([], tag="virt_lib_combo", width=190,
+                    dpg.add_combo([], tag="virt_lib_combo", width=130,
                                   callback=lambda *_: self._virt_lib_changed())
                     self._caption("cell")
-                    dpg.add_combo([], tag="virt_cell_combo", width=170,
+                    dpg.add_combo([], tag="virt_cell_combo", width=120,
                                   callback=lambda *_: self._virt_cell_changed())
                     self._caption("view")
-                    dpg.add_combo([], tag="virt_view_combo", width=130)
-                    b = dpg.add_button(label="↓ Load source",
+                    dpg.add_combo([], tag="virt_view_combo", width=95)
+                    b = dpg.add_button(label="Load source",
                                        callback=self.on_virt_load_source)
                     dpg.bind_item_theme(b, self.themes["primary"])
-                    dpg.add_button(label="↻", tag="virt_refresh_libs",
-                                   callback=self.on_virt_refresh_libs)
+                    rb = dpg.add_button(label="Refresh",
+                                        tag="virt_refresh_libs",
+                                        callback=self.on_virt_refresh_libs)
+                    dpg.bind_item_theme(rb, self.themes["chip"])
                     with dpg.tooltip("virt_refresh_libs"):
                         dpg.add_text("Refresh library list from Virtuoso")
+                    wb = dpg.add_button(label="Write back",
+                                        tag="virt_write_back",
+                                        callback=self.on_virt_write_back)
+                    dpg.bind_item_theme(wb, self.themes["chip"])
+                    with dpg.tooltip("virt_write_back"):
+                        dpg.add_text("Write the editor's text back into the "
+                                     "selected Virtuoso library/cell/view "
+                                     "(overwrites the cellview source - "
+                                     "recompile in Cadence after)")
                 self._small("connect to Virtuoso first (left panel)",
                             tag="virt_browse_status")
             dpg.bind_item_theme(vbar, self.themes["card"])
@@ -1412,7 +1996,8 @@ class App:
                                        color=C_GREEN if online else C_RED)
                     with dpg.tooltip(dot):
                         dpg.add_text("backend: " + self.agent.backend_label())
-                    h = dpg.add_text("Claude Agent", color=C_TEXT)
+                    h = dpg.add_text("Claude Agent", tag="agent_title",
+                                     color=C_TEXT)
                     if "h2" in self.fonts:
                         dpg.bind_item_font(h, self.fonts["h2"])
                     # lower the chips so they baseline-align with the heading
@@ -1427,15 +2012,11 @@ class App:
                             with dpg.tooltip(badge):
                                 dpg.add_text("Model used for agent replies - "
                                              "click to switch, or type /model "
-                                             "in the chat")
-                            with dpg.popup(badge,
+                                             "or /provider in the chat")
+                            with dpg.popup(badge, tag="model_popup",
                                            mousebutton=dpg.mvMouseButton_Left):
-                                self._small("MODEL", color=(126, 150, 220))
-                                for label, mid, desc in MODEL_CHOICES:
-                                    dpg.add_selectable(
-                                        label=f"{label}   ·  {desc}",
-                                        user_data=(label, mid),
-                                        callback=self._on_model_pick)
+                                pass
+                            self._rebuild_model_popup()
                             acc = dpg.add_button(label="Account", small=True,
                                                  callback=self.on_account_open)
                             dpg.bind_item_theme(acc, self.themes["chip"])
@@ -1445,24 +2026,27 @@ class App:
                                 dpg.add_text("Sign in / switch Claude account, "
                                              "or run this app under a specific "
                                              "key/token")
-                with dpg.child_window(tag="chat_log", height=-122,
+                            self._small("", tag="cost_label", color=C_TEXT2)
+                with dpg.child_window(tag="chat_log", height=-56,
                                       border=False):
                     pass
-                with dpg.group(tag="chips_row"):
-                    for row in (QUICK_CHIPS[:3], QUICK_CHIPS[3:]):
-                        with dpg.group(horizontal=True):
-                            for label, prompt in row:
-                                b = dpg.add_button(
-                                    label=label, user_data=prompt, small=True,
-                                    callback=lambda s, a, u: (
-                                        dpg.set_value("chat_input", u),
-                                        dpg.focus_item("chat_input")))
-                                dpg.bind_item_theme(b, self.themes["chip"])
-                                if "small" in self.fonts:
-                                    dpg.bind_item_font(b, self.fonts["small"])
+                with dpg.group(tag="attach_row", horizontal=True, show=False):
+                    self._small("", tag="attach_label", color=C_MUTED)
+                    bx = dpg.add_button(label="x", small=True,
+                                        callback=self.on_attach_clear)
+                    dpg.bind_item_theme(bx, self.themes["chip"])
+                    with dpg.tooltip(bx):
+                        dpg.add_text("Remove attachments")
                 with dpg.group(horizontal=True):
+                    batt = dpg.add_button(label="+", width=26,
+                                          callback=self.on_attach_open)
+                    dpg.bind_item_theme(batt, self.themes["chip"])
+                    with dpg.tooltip(batt):
+                        dpg.add_text("Attach files - pdf, csv, image... The "
+                                     "agent reads them and can retune the "
+                                     "model / Verilog from their content.")
                     dpg.add_input_text(tag="chat_input", width=-78,
-                                       hint="Message Claude...  (/model, /help)",
+                                       hint="Message the agent...  (/help)",
                                        on_enter=True, callback=self.on_send)
                     b = dpg.add_button(label="Send", tag="btn_send",
                                        callback=self.on_send)
@@ -1475,10 +2059,6 @@ class App:
                 # watcher reads cb_liveplot, so keep it (hidden, in sync)
                 dpg.add_checkbox(tag="cb_liveplot", default_value=True,
                                  show=False)
-                with dpg.group(horizontal=True):
-                    self._small("autonomous · live plot — see Agent menu",
-                                color=C_MUTED)
-                    self._small("", tag="cost_label", color=C_TEXT2)
 
     # =================================================================
     # chat rendering
@@ -1539,25 +2119,79 @@ class App:
         dpg.add_spacer(height=5, parent="chat_log")
         self._scroll_bottom("chat_log")
 
-    # ---------------- slash commands & model picker -------------------
+    # ---------------- slash commands, provider & model picker ---------
+
+    @property
+    def agent_model_label(self):
+        return self.model_sel[self.agent.provider][0]
+
+    @property
+    def agent_model_id(self):
+        return self.model_sel[self.agent.provider][1]
+
+    def _provider_models(self):
+        return PROVIDER_MODELS[self.agent.provider]
+
+    def _rebuild_model_popup(self):
+        if not dpg.does_item_exist("model_popup"):
+            return
+        dpg.delete_item("model_popup", children_only=True)
+        self._small("MODEL", color=(126, 150, 220), parent="model_popup")
+        for label, mid, desc in self._provider_models():
+            dpg.add_selectable(label=f"{label}   ·  {desc}",
+                               user_data=(label, mid), parent="model_popup",
+                               callback=self._on_model_pick)
+        dpg.add_separator(parent="model_popup")
+        other = "openai" if self.agent.provider == "claude" else "claude"
+        dpg.add_selectable(label=f"Switch to {PROVIDER_TITLES[other]}",
+                           user_data=other, parent="model_popup",
+                           callback=lambda s, a, u: self._set_provider(u))
+
+    def _set_provider(self, name, announce=True):
+        ok, msg = self.agent.set_provider(name)
+        if not ok:
+            self.append_chat("err", msg)
+            return
+        prov = self.agent.provider
+        if dpg.does_item_exist("agent_title"):
+            dpg.set_value("agent_title", PROVIDER_TITLES[prov])
+        if dpg.does_item_exist("model_badge"):
+            dpg.configure_item("model_badge", label=self.agent_model_label)
+        self._rebuild_model_popup()
+        self._refresh_agent_status()
+        if announce:
+            note = ""
+            if self.agent.backend == "none":
+                note = ("\nNo backend available: " + self.agent.backend_label()
+                        + "\nUse /provider claude to switch back.")
+            elif prov == "openai" and self.agent.backend == "sdk":
+                note = ("\nChat-only: patterns, GUI actions and advice work; "
+                        "file edits / autonomous fixing need the codex CLI "
+                        "or the Claude provider.")
+            self.append_chat("sys", f"Provider: {PROVIDER_TITLES[prov]} "
+                                    f"({self.agent.backend_label()}){note}")
+        self.log(f"[agent] provider -> {prov} ({self.agent.backend_label()})")
 
     def _match_model(self, query):
         q = query.lower().strip()
         q = q.replace("claude-", "")
-        for label, mid, _ in MODEL_CHOICES:
+        for label, mid, _ in self._provider_models():
             hay = label.lower() + " " + (mid or "")
             if q and q in hay:
                 return label, mid
+        # OpenAI: accept any explicit model id verbatim (e.g. a new release)
+        if self.agent.provider == "openai" and q and " " not in q:
+            raw = query.strip()
+            return raw, raw
         return None
 
     def _set_model(self, label, mid, announce=True):
-        self.agent_model_label = label
-        self.agent_model_id = mid
+        self.model_sel[self.agent.provider] = (label, mid)
         if dpg.does_item_exist("model_badge"):
             dpg.configure_item("model_badge", label=label)
         if announce:
             self.append_chat("sys", f"Model set to {label}"
-                             + (f"  ({mid})" if mid else " (CLI default)"))
+                             + (f"  ({mid})" if mid else " (default)"))
         self.log(f"[agent] model -> {label}" + (f" ({mid})" if mid else ""))
 
     def _on_model_pick(self, sender, app_data, user_data):
@@ -1568,8 +2202,9 @@ class App:
         with dpg.group(parent="chat_log"):
             with dpg.child_window(width=BUBBLE_W, auto_resize_y=True,
                                   border=True) as card:
-                self._small("SELECT MODEL", color=(126, 150, 220))
-                for label, mid, desc in MODEL_CHOICES:
+                self._small(f"SELECT MODEL ({PROVIDER_TITLES[self.agent.provider]})",
+                            color=(126, 150, 220))
+                for label, mid, desc in self._provider_models():
                     current = "  ●" if label == self.agent_model_label else ""
                     b = dpg.add_button(label=f"{label}  ·  {desc}{current}",
                                        width=-1, user_data=(label, mid),
@@ -1593,20 +2228,30 @@ class App:
                     self._set_model(*hit)
                 else:
                     names = " | ".join(l.split()[0].lower()
-                                       for l, _, _ in MODEL_CHOICES)
+                                       for l, _, _ in self._provider_models())
                     self.append_chat("err",
                                      f"No model matches "
                                      f"'{' '.join(parts[1:])}'. "
                                      f"Try /model {names}")
+        elif cmd == "provider":
+            if len(parts) == 1:
+                self.append_chat(
+                    "sys", f"Provider: {PROVIDER_TITLES[self.agent.provider]} "
+                           f"({self.agent.backend_label()})\n"
+                           "Switch with /provider claude | openai")
+            else:
+                self._set_provider(parts[1])
         elif cmd in ("clear", "reset"):
             self.on_agent_reset()
         elif cmd == "help":
             self.append_chat("sys",
                              "Commands:\n"
-                             "/model            choose the model\n"
-                             "/model <name>     e.g. /model opus, /model haiku\n"
-                             "/clear            reset the conversation\n"
-                             "/help             this list")
+                             "/model              choose the model\n"
+                             "/model <name>       e.g. /model opus, /model gpt-5.1\n"
+                             "/provider           show the active provider\n"
+                             "/provider <name>    claude | openai\n"
+                             "/clear              reset the conversation\n"
+                             "/help               this list")
         else:
             self.append_chat("err", f"Unknown command /{cmd} - try /help")
 
@@ -1883,9 +2528,11 @@ class App:
         amp_post = dpg.get_value("stdp_amp_post") * scale
         width = max(dpg.get_value("stdp_width_ms"), 1e-3) * 1e-3
         tail = max(dpg.get_value("stdp_settle_ms") * 1e-3, 0.02)
-        # sweep |dt| from just past the pulse width (a 1% gap so the two
-        # pulses never touch) out to the user range: dense near the start,
-        # coarse to the edges.
+        # sweep |dt| from just past the pulse width (a 1% gap so the two pulses
+        # never touch) out to the user range. POINTS sets the total count; the
+        # spacing is LOGARITHMIC so the 3-exp window (22 ms / 315 ms / 19 s) is
+        # sampled evenly per decade - dense near the fast rise, enough out on
+        # the slow tail.
         dt_max = abs(dpg.get_value("stdp_range_ms")) * 1e-3
         dt_min = width * 1.01                      # e.g. width 10 ms -> 10.1 ms
         if dt_min >= dt_max:
@@ -1895,12 +2542,12 @@ class App:
                      f"the dt range ({dt_max * 1e3:g} ms); widen DT RANGE or "
                      f"reduce WIDTH")
             return
-        fine = min(9.0 * width, dt_max)           # dense region near the start
-        inner = [fine * k / 24 for k in range(1, 25)]
-        outer = [dt_max * k / 20 for k in range(1, 21)]
-        cand = [dt_min] + inner + outer           # sample the gap boundary
-        pos = sorted({round(d, 9) for d in cand
-                      if d >= dt_min - 1e-12})      # |dt| > pulse width
+        n_pts = int(dpg.get_value("stdp_npts")) \
+            if dpg.does_item_exist("stdp_npts") else 80
+        per_side = max(3, n_pts // 2)              # mirrored -> ~n_pts total
+        ratio = dt_max / dt_min
+        pos = [dt_min * ratio ** (k / (per_side - 1)) for k in range(per_side)]
+        pos[-1] = dt_max                          # land exactly on the range
         dts = [-d for d in reversed(pos)] + pos    # mirror; no overlap region
         self._stdp_ctx = {
             "models": models, "amp_pre": amp_pre, "amp_post": amp_post,
@@ -1936,31 +2583,14 @@ class App:
 
     def _stdp_worker(self, models, amp_pre, amp_post, width, dts, tail,
                      live=False):
-        t0c = 10e-3
-        curves = {}
+        # thread + queue plumbing only; the measurement is in the hot-reloaded
+        # analysis layer (analysis.stdp_sweep), so it can be edited live.
         t_start = time.perf_counter()
+        curves = {}
         try:
-            for m in models:
-                ys = []
-                for dt in dts:
-                    pre_t = t0c + max(0.0, -dt)
-                    post_t = pre_t + dt
-                    wf = Waveform([(pre_t, width, amp_pre),
-                                   (post_t, width, amp_post)])
-                    t_stop = max(pre_t, post_t) + width + tail
-                    r = simulate(m, wf, t_stop, label=m.name)
-                    ys.append(float((r.G[-1] - r.G[0]) * 1e6))
-                # STDP Delta-w is defined relative to the uncorrelated baseline:
-                # at large |dt| the two pulses are independent, so any residual
-                # dG there is timing-blind (single-pulse charge writes that don't
-                # cancel) and must be subtracted so the tails approach 0.
-                if len(ys) >= 2:
-                    base = 0.5 * (ys[0] + ys[-1])   # dt = -max and dt = +max
-                    ys = [y - base for y in ys]
-                curves[m.name] = ys
-                if not live:
-                    self.q.put(("log", f"  [stdp] {m.name}: dG "
-                                       f"{min(ys):+.4g}..{max(ys):+.4g} uS"))
+            curves = analysis.stdp_sweep(
+                models, amp_pre, amp_post, width, dts, tail,
+                log=None if live else (lambda msg: self.q.put(("log", msg))))
         except Exception as e:
             self.q.put(("log", f"[stdp] FAILED: {e!r}"))
         if not live:
@@ -1979,6 +2609,10 @@ class App:
         if not curves:
             self._busy(False, "STDP sweep failed")
             return
+        self._stdp_dts_ms = list(dts_ms)        # remember points for the copy menu
+        self._stdp_curves = {k: list(v) for k, v in curves.items()}
+        slabel, sunit, _ = self._active_stdp_profile()   # dG/uS or dVt/mV
+        dpg.configure_item("stdp_y", label=f"{slabel} ({sunit})")
         lines = []
         nan = float("nan")
         for label, ys in curves.items():
@@ -1993,8 +2627,8 @@ class App:
             self._stdp_series.append(dpg.add_scatter_series(
                 dts_ms, ys, parent="stdp_y", label="##pts_" + label))
             imax = max(range(len(ys)), key=lambda i: abs(ys[i]))
-            lines.append(f"{label}:  dG {min(ys):+.4g}..{max(ys):+.4g} uS"
-                         f"  |  strongest change at dt = "
+            lines.append(f"{label}:  {slabel} {min(ys):+.4g}..{max(ys):+.4g} "
+                         f"{sunit}  |  strongest change at dt = "
                          f"{dts_ms[imax]:+.3g} ms")
         self._stdp_summary = lines
         if not live:
@@ -2009,6 +2643,144 @@ class App:
         else:
             self._busy(False, f"STDP curve ready - {len(curves)} model(s)")
             dpg.set_value("center_tabs", "tab_stdp")
+
+    _SI_PREFIX = {-15: "f", -12: "p", -9: "n", -6: "u", -3: "m", 0: "",
+                  3: "k", 6: "M", 9: "G", 12: "T"}
+
+    @classmethod
+    def _eng(cls, value):
+        """Engineering SI notation (Spectre/Cadence style): mantissa in
+        [1, 1000) with a metric prefix - 0.2 -> '200m', 1.8 -> '1.8',
+        3.8e-6 -> '3.8u'.  Carries the unit via the prefix only (no symbol)."""
+        if not math.isfinite(value) or value == 0.0:
+            return "0"
+        exp3 = (int(math.floor(math.log10(abs(value)))) // 3) * 3
+        exp3 = max(-15, min(12, exp3))
+        mant = value / (10.0 ** exp3)
+        return f"{mant:.4g}{cls._SI_PREFIX.get(exp3, f'e{exp3}')}"
+
+    def _copy_stdp(self, kind):
+        """Copy the swept STDP points to the clipboard (right-click menu) in
+        Spectre/Cadence engineering units - dt as seconds (10.1 ms -> '10.1m')
+        and dG as siemens (3.8 uS -> '3.8u').
+        kind: 'dt' -> dt values, 'dg' -> dG values per model, 'pairs' -> CSV."""
+        dts = self._stdp_dts_ms
+        curves = self._stdp_curves
+        if not dts or not curves:
+            self.log("[stdp] nothing to copy yet - run Plot STDP first")
+            return
+        dt_row = lambda vals: " ".join(self._eng(v * 1e-3) for v in vals)  # ms->s
+        dg_row = lambda vals: " ".join(self._eng(v * 1e-6) for v in vals)  # uS->S
+        if kind == "dt":
+            text = dt_row(dts)
+            what = f"{len(dts)} dt values"
+        elif kind == "dg":
+            if len(curves) == 1:
+                text = dg_row(next(iter(curves.values())))
+            else:
+                text = "\n".join(f"# {label}\n{dg_row(ys)}"
+                                 for label, ys in curves.items())
+            what = f"dG values ({len(curves)} model(s))"
+        else:  # pairs CSV (dt in s, dG in S, engineering units)
+            labels = list(curves)
+            head = ["dt"] + [f"dG_{l.split()[0]}" for l in labels]
+            out = [",".join(head)]
+            for i, d in enumerate(dts):
+                out.append(",".join([self._eng(d * 1e-3)]
+                                    + [self._eng(curves[l][i] * 1e-6)
+                                       for l in labels]))
+            text = "\n".join(out)
+            what = f"{len(dts)} dt,dG rows"
+        dpg.set_clipboard_text(text)
+        self.log(f"[stdp] copied {what} to clipboard")
+        self._busy(False, f"copied {what} to clipboard")
+
+    # ---- STDP right-click copy menu (works over the axis labels too) -----
+
+    @staticmethod
+    def _in_rect(mx, my, tag):
+        """True if (mx, my) (viewport coords) is inside item `tag`'s rect."""
+        if not dpg.does_item_exist(tag):
+            return False
+        rmin = dpg.get_item_rect_min(tag)
+        rsz = dpg.get_item_rect_size(tag)
+        if not rmin or not rsz:
+            return False
+        return (rmin[0] <= mx <= rmin[0] + rsz[0]
+                and rmin[1] <= my <= rmin[1] + rsz[1])
+
+    def _menu_row(self, label, action):
+        """One full-width, hover-highlighted row of the STDP context menu."""
+        s = dpg.add_selectable(label=label, width=200, user_data=action,
+                               callback=self._menu_action)
+        if "small" in self.fonts:
+            dpg.bind_item_font(s, self.fonts["small"])
+        return s
+
+    def _menu_action(self, sender, app_data, action):
+        """Run a context-menu action, then close the menu."""
+        x = ("stdp_x",)
+        y = ("stdp_y",)
+        if action == "copy_dt":
+            self._copy_stdp("dt")
+        elif action == "copy_dg":
+            self._copy_stdp("dg")
+        elif action == "copy_pairs":
+            self._copy_stdp("pairs")
+        elif action == "fit":
+            self._fit_axes_of(x + y)
+        elif action == "fit_x":
+            self._fit_axes_of(x)
+        elif action == "fit_y":
+            self._fit_axes_of(y)
+        elif action == "zoom_in":
+            self._zoom_axes(x + y, 0.7)
+        elif action == "zoom_out":
+            self._zoom_axes(x + y, 1.45)
+        elif action == "clear_probes":
+            self._clear_probes(("stdp_plot",))
+        if sender:
+            dpg.set_value(sender, False)        # don't leave the row "selected"
+        dpg.configure_item("stdp_copy_menu", show=False)
+
+    def _on_stdp_rclick(self, sender, app_data):
+        """Right button anywhere over the STDP plot (data area OR the axis-label
+        margins) opens the context menu at the cursor."""
+        if not dpg.does_item_exist("stdp_copy_menu"):
+            return
+        active = (not dpg.does_item_exist("center_tabs")
+                  or dpg.get_value("center_tabs") == "tab_stdp")
+        mx, my = dpg.get_mouse_pos(local=False)
+        if active and self._in_rect(mx, my, "stdp_plot"):
+            for row in dpg.get_item_children("stdp_copy_menu", 1):
+                if dpg.get_item_type(row).endswith("mvSelectable"):
+                    dpg.set_value(row, False)   # clear stale highlight
+            # keep the whole menu on-screen: shift it up/left when the click is
+            # near the right or bottom edge (e.g. on the x-axis label)
+            live = dpg.get_item_rect_size("stdp_copy_menu")
+            if live and live[0] > 0:
+                self._menu_size = (int(live[0]), int(live[1]))
+            mw, mh = self._menu_size
+            vw = dpg.get_viewport_client_width()
+            vh = dpg.get_viewport_client_height()
+            px, py = int(mx), int(my)
+            if px + mw > vw - 6:
+                px = max(6, vw - mw - 6)
+            if py + mh > vh - 6:
+                py = max(6, py - mh)        # flip the menu above the cursor
+            dpg.configure_item("stdp_copy_menu", show=True, pos=[px, py])
+        else:
+            dpg.configure_item("stdp_copy_menu", show=False)
+
+    def _dismiss_copy_menu(self, sender, app_data):
+        """Left-click outside the menu closes it (clicks on it are handled by
+        the menu rows themselves)."""
+        if not dpg.does_item_exist("stdp_copy_menu") \
+                or not dpg.is_item_shown("stdp_copy_menu"):
+            return
+        mx, my = dpg.get_mouse_pos(local=False)
+        if not self._in_rect(mx, my, "stdp_copy_menu"):
+            dpg.configure_item("stdp_copy_menu", show=False)
 
     def _stdp_drilldown(self):
         """Re-run the single pre/post pair at the clicked dt and show the
@@ -2048,12 +2820,12 @@ class App:
         for m in ctx["models"]:
             r = simulate(m, wf, t_stop, label=m.name)
             results.append(r)
-            dG = (r.G[-1] - r.G[0]) * 1e6
+            dG = (r.G[-1] - r.G[0]) * 1e6      # retained STDP weight change
             dR = r.R[-1] - r.R[0]
             summary.append(f"{m.name}: dG={dG:+.4g} uS  dR={dR:+.4g} ohm")
-        order = "post after pre (potentiating side)" if dt > 0 else \
-                ("pre after post (depressing side)" if dt < 0
-                 else "simultaneous")
+        order = ("post after pre -> potentiation" if dt > 0
+                 else ("pre after post -> depression" if dt < 0
+                       else "simultaneous"))
         msg = f"dt = {dt * 1e3:+.4g} ms ({order}) | " + "  |  ".join(summary)
         self.log("[stdp] " + msg)
         self._show_results(results, {}, ctx["unit"], ctx["kind"])
@@ -2083,12 +2855,19 @@ class App:
         dpg.configure_item("ax_i_y",
                            label=("I_gate (%s)" if kind == "current"
                                   else "V_gate (%s)") % unit)
+        # the two transient plots are device-profile driven: R_mem/G for ECFET,
+        # Vth/polarization for FeFET
+        (o1, l1, u1, s1), (o2, l2, u2, s2) = self._result_plots()
+        dpg.configure_item("ax_r_y", label=f"{l1} ({u1})")
+        dpg.configure_item("ax_g_y", label=f"{l2} ({u2})")
+        self._result_obs = ((o1, l1, u1), (o2, l2, u2))   # for hover labels
         for r in results:
             self._series.append(dpg.add_line_series(
-                r.t.tolist(), r.R.tolist(), parent="ax_r_y", label=r.label))
+                r.t.tolist(), (self._obs_arr(r, o1) * s1).tolist(),
+                parent="ax_r_y", label=r.label))
             self._series.append(dpg.add_line_series(
-                r.t.tolist(), (r.G * 1e6).tolist(), parent="ax_g_y",
-                label=r.label))
+                r.t.tolist(), (self._obs_arr(r, o2) * s2).tolist(),
+                parent="ax_g_y", label=r.label))
         self.fit_axes()
         self.update_analysis()
         if live:
@@ -2104,24 +2883,74 @@ class App:
             if dpg.does_item_exist(ax):
                 dpg.fit_axis_data(ax)
 
-    def on_analysis_metric(self, metric):
-        self.analysis_metric = "R" if metric == "R" else "G"
-        if dpg.does_item_exist("ana_menu_G"):
-            dpg.set_value("ana_menu_G", self.analysis_metric == "G")
-            dpg.set_value("ana_menu_R", self.analysis_metric == "R")
+    # default per-pulse metrics (ECFET); FeFET overrides via ANALYSIS_METRICS
+    DEFAULT_ANALYSIS_METRICS = (("G", "G", "uS", 1e6),
+                                ("R", "R_mem", "ohm", 1.0))
+
+    def _ana_metrics(self):
+        models = self._checked_models()
+        if models:
+            return getattr(models[0], "ANALYSIS_METRICS",
+                           self.DEFAULT_ANALYSIS_METRICS)
+        return self.DEFAULT_ANALYSIS_METRICS
+
+    def _ana_spec(self):
+        """(obs, label, unit, scale) for the active analysis metric, falling
+        back to the profile's first metric when the current one isn't valid
+        for this device class."""
+        metrics = self._ana_metrics()
+        for m in metrics:
+            if m[0] == self.analysis_metric:
+                return m
+        return metrics[0]
+
+    def _rebuild_ana_metric_combo(self):
+        metrics = self._ana_metrics()
+        labels = [f"{lab} ({u})" for _, lab, u, _ in metrics]
+        cur = self._ana_spec()
         if dpg.does_item_exist("ana_metric_combo"):
-            dpg.set_value("ana_metric_combo",
-                          "Resistance R_mem" if self.analysis_metric == "R"
-                          else "Conductance G")
-        # keep the hover-bubble label in sync with the plotted quantity
-        name, unit = self._ana_name_unit()
-        App.HOVER_FMT["ana_plot"] = ("pulse", "", name, unit)
+            dpg.configure_item("ana_metric_combo", items=labels,
+                               default_value=f"{cur[1]} ({cur[2]})")
+            dpg.set_value("ana_metric_combo", f"{cur[1]} ({cur[2]})")
+        # relabel + re-check the Run-menu mirror items
+        for i, tag in enumerate(("ana_menu_0", "ana_menu_1")):
+            if dpg.does_item_exist(tag):
+                if i < len(metrics):
+                    dpg.configure_item(tag, label=labels[i], show=True)
+                    dpg.set_value(tag, metrics[i][0] == self.analysis_metric)
+                else:
+                    dpg.configure_item(tag, show=False)
+
+    def _on_ana_menu(self, sender, app_data, user_data):
+        metrics = self._ana_metrics()
+        idx = user_data if user_data < len(metrics) else 0
+        self.on_analysis_metric(metrics[idx][0])
+
+    def on_analysis_metric(self, metric):
+        # accept a metric label ("G (uS)" / "Vth (mV)") or an observable key
+        metrics = self._ana_metrics()
+        obs = None
+        for o, lab, u, _ in metrics:
+            if metric in (o, lab, f"{lab} ({u})"):
+                obs = o
+                break
+        self.analysis_metric = obs or metrics[0][0]
+        spec = self._ana_spec()
+        # sync the two Run-menu check items to the active metric (by index)
+        for i, tag in enumerate(("ana_menu_0", "ana_menu_1")):
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, i < len(metrics)
+                              and metrics[i][0] == self.analysis_metric)
+        if dpg.does_item_exist("ana_metric_combo"):
+            dpg.set_value("ana_metric_combo", f"{spec[1]} ({spec[2]})")
+        App.HOVER_FMT["ana_plot"] = ("pulse", "", spec[1], spec[2])
         self.update_analysis()
         if self.results:
             dpg.set_value("center_tabs", "tab_analysis")
 
     def _ana_name_unit(self):
-        return ("R_mem", "ohm") if self.analysis_metric == "R" else ("G", "uS")
+        spec = self._ana_spec()
+        return (spec[1], spec[2])
 
     def update_analysis(self):
         self._clear_probes(("ana_plot",))
@@ -2130,64 +2959,45 @@ class App:
             if dpg.does_item_exist(s):
                 dpg.delete_item(s)
         self._ana_series = []
-        name, unit = self._ana_name_unit()
+        obs, name, unit, scale = self._ana_spec()
         if dpg.does_item_exist("ana_y"):
             dpg.configure_item("ana_y", label=f"{name} ({unit})")
         if dpg.does_item_exist("ana_caption"):
-            full = "resistance" if self.analysis_metric == "R" else "conductance"
             dpg.set_value("ana_caption",
-                          f"retained {full} sampled after each pulse")
+                          f"retained {name} sampled after each pulse")
         if not self.results:
             return
-        wf = self.results[0].waveform
-        wins = wf.pulse_windows()
-        if len(wins) < 2:
+        if len(self.results[0].waveform.pulse_windows()) < 2:
             dpg.set_value("ana_text", f"need a multi-pulse stimulus for the "
                                       f"{name}-vs-pulse curve")
             return
-        ends = [t1 for _, t1 in wins]
-        starts = [t0 for t0, _ in wins]
-        t_sim = float(self.results[0].t[-1])
-        # sample each pulse's retained value relative to ITS OWN gap to the
-        # next pulse (not a single global settle), capped at the median gap
-        # so every point is read after a comparable relaxation time.
-        inter = [starts[k + 1] - ends[k] for k in range(len(ends) - 1)
-                 if starts[k + 1] > ends[k]]
-        typ = sorted(inter)[len(inter) // 2] if inter else (t_sim - ends[-1])
-        cap = max(1e-4, 0.9 * typ)
-        sample_t = []
-        for k in range(len(ends)):
-            gap = (starts[k + 1] - ends[k]) if k + 1 < len(ends) \
-                else (t_sim - ends[k])
-            s = min(max(0.9 * gap if gap > 0 else cap, 1e-5), cap)
-            sample_t.append(min(ends[k] + s, t_sim))
+        # the per-pulse sampling lives in the hot-reloaded analysis layer;
+        # here we only turn its output into plot series.
         n_each = self.results_meta.get("n_each")
+        data = analysis.per_pulse_samples(self.results, obs, scale, n_each)
+        mean = lambda v: sum(v) / len(v) if v else 0.0
         lines = []
-        for r in self.results:
-            R_s, G_s = r.at(sample_t)
-            arr = (R_s if self.analysis_metric == "R" else G_s * 1e6)
-            vals = arr.tolist()
-            n = list(range(1, len(vals) + 1))
-            if n_each and 0 < n_each < len(vals):
+        for d in data:
+            if d is None:
+                continue
+            n, vals, ne = d["n"], d["vals"], d["n_each"]
+            if ne:
                 self._ana_series.append(dpg.add_line_series(
-                    n[:n_each], vals[:n_each], parent="ana_y",
-                    label=f"{r.label} LTP"))
+                    n[:ne], vals[:ne], parent="ana_y",
+                    label=f"{d['label']} LTP"))
                 # LTD starts one point early (the last LTP point) so the two
                 # branches join with no visual gap at the turnover
                 self._ana_series.append(dpg.add_line_series(
-                    n[n_each - 1:], vals[n_each - 1:], parent="ana_y",
-                    label=f"{r.label} LTD"))
-                dl = [b - a for a, b in zip(vals[:n_each - 1], vals[1:n_each])]
-                dd = [b - a for a, b in zip(vals[n_each:-1], vals[n_each + 1:])]
-                mean = lambda v: sum(v) / len(v) if v else 0.0
+                    n[ne - 1:], vals[ne - 1:], parent="ana_y",
+                    label=f"{d['label']} LTD"))
                 lines.append(
-                    f"{r.label}:  {name} {min(vals):.4g}..{max(vals):.4g} "
-                    f"{unit} | mean d{name}  LTP {mean(dl):+.4g}  "
-                    f"LTD {mean(dd):+.4g} {unit}/pulse")
+                    f"{d['label']}:  {name} {min(vals):.4g}..{max(vals):.4g} "
+                    f"{unit} | mean d{name}  LTP {mean(d['dl']):+.4g}  "
+                    f"LTD {mean(d['dd']):+.4g} {unit}/pulse")
             else:
                 self._ana_series.append(dpg.add_line_series(
-                    n, vals, parent="ana_y", label=r.label))
-                lines.append(f"{r.label}:  {name} {min(vals):.4g}.."
+                    n, vals, parent="ana_y", label=d["label"]))
+                lines.append(f"{d['label']}:  {name} {min(vals):.4g}.."
                              f"{max(vals):.4g} {unit} over {len(vals)} pulses")
         dpg.set_value("ana_text", "\n".join(lines))
         dpg.fit_axis_data("ana_x")
@@ -2262,6 +3072,7 @@ class App:
             self.log(f"[va] auto-detected {len(names)} Verilog-A file(s)")
         if names and not self.selected_va:
             self.on_va_selected(names[0], interact=False)
+        self._check_untwinned_va()      # prompt to build twins for unmapped .va
 
     def _va_by_name(self, name):
         for v in self.va_files:
@@ -2271,6 +3082,18 @@ class App:
 
     def _on_file_toggle(self, sender, value, user_data):
         self.file_enabled[user_data] = value
+        # auto-sync the drive (current/voltage) to the enabled models so a
+        # voltage device (FeFET) is never silently fed a current stimulus
+        # (and vice versa) - that would just produce a flat, "not working" run
+        classes = {DEVICE_OF_KEY.get(k) for k in self._enabled_keys()}
+        classes.discard(None)
+        if len(classes) == 1:
+            cls = classes.pop()
+            if cls != self.device_class:
+                self._sync_class_ui(cls, log=True)
+                self.append_chat("sys", f"Switched drive to {cls} "
+                                 f"({DEVICE_KIND[cls]}) to match the enabled "
+                                 f"model.")
 
     def _enabled_keys(self):
         """Model twin keys enabled via checked .va files (deduped)."""
@@ -2339,6 +3162,7 @@ class App:
                 dpg.set_value("va_editor", f.read())
             self.editor_path = va.path
             self.editor_mtime = os.path.getmtime(va.path)
+            self.editor_remote = None
             dpg.set_value("editor_status", f"loaded {va.name}")
         except OSError as e:
             dpg.set_value("editor_status", f"error: {e}")
@@ -2357,6 +3181,39 @@ class App:
         except OSError as e:
             dpg.set_value("editor_status", f"save error: {e}")
 
+    def on_editor_save_as(self, *_):
+        """Save the editor buffer to a local .va file (works for remote buffers
+        too - it makes a tracked local copy)."""
+        name = "model.va"
+        if self.editor_path:
+            name = os.path.basename(self.editor_path)
+        elif self.editor_remote:
+            name = f"{self.editor_remote[1]}.va"     # cell name
+        dpg.configure_item("save_va_dialog", default_filename=name, show=True)
+
+    def _on_save_va_picked(self, sender, app_data):
+        path = (app_data or {}).get("file_path_name") or ""
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += ".va"
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(dpg.get_value("va_editor"))
+        except OSError as e:
+            dpg.set_value("editor_status", f"save error: {e}")
+            return
+        # if it landed in the workspace, adopt it as the live local buffer
+        in_ws = os.path.abspath(path).startswith(os.path.abspath(self.workdir))
+        if in_ws:
+            self.editor_path = path
+            self.editor_mtime = os.path.getmtime(path)
+            self.editor_remote = None
+            self.rescan_va()
+        dpg.set_value("editor_status", f"saved local: {os.path.basename(path)}")
+        self.log(f"[editor] saved local copy -> {path}"
+                 + ("  (now tracked)" if in_ws else ""))
+
     def on_editor_reload(self):
         if self.editor_path:
             self.on_editor_file_change(None, os.path.basename(self.editor_path))
@@ -2369,6 +3226,107 @@ class App:
                           f"Explain {name}: device physics, parameters, and "
                           f"any issues you notice.")
             dpg.focus_item("chat_input")
+
+    def _editor_local_path(self):
+        """A local .va path for the current editor buffer, saving a remote
+        (Virtuoso-loaded) buffer into the workspace first so the agent can read
+        it. Returns the path or None."""
+        if self.editor_path:
+            return self.editor_path
+        if self.editor_remote:                       # remote buffer -> save it
+            cell = self.editor_remote[1]
+            path = os.path.join(self.workdir, f"{cell}.va")
+            try:
+                with open(path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(dpg.get_value("va_editor"))
+                self.editor_path = path
+                self.editor_mtime = os.path.getmtime(path)
+                self.editor_remote = None
+                self.rescan_va()
+                dpg.set_value("editor_status",
+                              f"saved local: {cell}.va (so the agent can read it)")
+                self.log(f"[editor] saved remote source -> {path} for the agent")
+                return path
+            except OSError as e:
+                self.append_chat("err", f"could not save source: {e}")
+                return None
+        if self.selected_va:
+            return self.selected_va.path
+        name = dpg.get_value("va_edit_sel")
+        va = self._va_by_name(name) if name else None
+        return va.path if va else None
+
+    def on_agent_build_twin(self, *_):
+        """One click: have the agent read the current Verilog-A file, build/
+        update a Python twin for it, and run a simulation in the GUI."""
+        path = self._editor_local_path()
+        if not path:
+            self.append_chat("err",
+                             "Open or load a Verilog-A file first, then "
+                             "'Build twin & run'.")
+            return
+        rel = os.path.relpath(path, self.workdir)
+        prompt = (
+            f"Read {rel} and explain what this Verilog-A device does (physics "
+            f"and key parameters). Then make the GUI able to SIMULATE it by "
+            f"writing a NEW Python twin as a file in the twins/ folder - follow "
+            f"the contract in twins/README.md and the worked example "
+            f"twins/example_rram.py (a model class with step(t,dt,drive)/.R/.G/"
+            f"reset()/observables(), a params dataclass, and a TWIN_SPEC dict "
+            f"with key/label/device_class/input_kind/va_keywords and the "
+            f"profile so the right axes/units show). Do NOT edit the GUI "
+            f"(vatester/) or core engine (ecfet/) - twins/ only. The GUI "
+            f"auto-loads twins/ at startup, so after you add the file tell me to "
+            f"restart, then RUN a transient and show the plot, iterating until "
+            f"it's physically sensible. Summarize the device and what you wrote.")
+        dpg.set_value("chat_input", prompt)
+        auto = (dpg.get_value("menu_auto")
+                if dpg.does_item_exist("menu_auto") else True)
+        if not auto:
+            self.append_chat("sys", "Tip: enable Agent > Autonomous so the agent "
+                             "can edit the twin and run the sim itself.")
+        self.on_send()
+
+    def _check_untwinned_va(self):
+        """If any .va has no Python twin, prompt to build one (agent -> twins/)."""
+        untw = [v for v in self.va_files if not v.model_key]
+        if not untw:
+            return
+        names = tuple(sorted(v.name for v in untw))
+        if names == self._untwinned_prompted:        # don't nag repeatedly
+            return
+        self._untwinned_prompted = names
+        if not dpg.does_item_exist("untwin_modal"):
+            return
+        backend_ok = self.agent.backend != "none"
+        dpg.delete_item("untwin_list", children_only=True)
+        msg = (f"{len(untw)} Verilog-A file(s) have no Python twin yet, so the "
+               f"GUI can't simulate them. Build a twin and the agent writes a "
+               f"new model into the twins/ folder (not the app source):")
+        if not backend_ok:
+            msg += ("\n\n(no agent backend available - set up Claude/OpenAI in "
+                    "Account to enable one-click building)")
+        dpg.set_value("untwin_msg", msg)
+        for v in untw:
+            with dpg.group(parent="untwin_list", horizontal=True):
+                b = dpg.add_button(label=f"Build twin:  {v.name}",
+                                   user_data=v.name,
+                                   callback=self._on_build_twin_for,
+                                   enabled=backend_ok)
+                if backend_ok:
+                    dpg.bind_item_theme(b, self.themes["primary"])
+        vw = dpg.get_viewport_client_width()
+        dpg.configure_item("untwin_modal", show=True,
+                           pos=(max(0, (vw - 540) // 2), 150))
+
+    def _on_build_twin_for(self, sender, app_data, user_data):
+        dpg.configure_item("untwin_modal", show=False)
+        va = self._va_by_name(user_data)
+        if not va:
+            return
+        dpg.set_value("va_edit_sel", va.name)
+        self.on_editor_file_change(None, va.name)
+        self.on_agent_build_twin()
 
     def _check_external_edits(self):
         if self.editor_path and os.path.isfile(self.editor_path):
@@ -2529,6 +3487,47 @@ class App:
             lambda: dict(self.virtuoso.read_source(lib, cell, view),
                          lib=lib, cell=cell, view=view), "source")
 
+    def on_virt_write_back(self, *_):
+        """Ask to confirm writing the editor buffer back to a Virtuoso cellview."""
+        if not self.virtuoso.connected:
+            dpg.set_value("virt_browse_status",
+                          "connect to Virtuoso first (left panel)")
+            return
+        lib = dpg.get_value("virt_lib_combo")
+        cell = dpg.get_value("virt_cell_combo")
+        view = dpg.get_value("virt_view_combo")
+        if not (lib and cell and view):
+            dpg.set_value("virt_browse_status",
+                          "pick the target library, cell, and view first")
+            return
+        if not (dpg.get_value("va_editor") or "").strip():
+            dpg.set_value("virt_browse_status", "editor is empty - nothing to write")
+            return
+        self._virt_write_target = (lib, cell, view)
+        dpg.set_value("virt_write_msg",
+                      f"Overwrite the source of\n\n    {lib} / {cell} / {view}\n\n"
+                      f"with the {len(dpg.get_value('va_editor'))} characters in "
+                      f"the editor?  This replaces the cellview's source file in "
+                      f"the Cadence library. Re-netlist / recompile the cell in "
+                      f"Cadence afterwards for it to take effect.")
+        vw = dpg.get_viewport_client_width()
+        dpg.configure_item("virt_write_modal", show=True,
+                           pos=(max(0, (vw - 470) // 2), 160))
+
+    def _do_virt_write_back(self, *_):
+        dpg.configure_item("virt_write_modal", show=False)
+        target = getattr(self, "_virt_write_target", None)
+        if not target:
+            return
+        lib, cell, view = target
+        text = dpg.get_value("va_editor")
+        dpg.set_value("virt_browse_status", f"writing to {lib}/{cell}/{view}...")
+        self.log(f"[virtuoso] writing editor -> {lib}/{cell}/{view} "
+                 f"({len(text)} chars)")
+        self._virt_browse(
+            lambda: dict(self.virtuoso.write_source(lib, cell, view, text),
+                         lib=lib, cell=cell, view=view), "write")
+
     def _on_virt_browse(self, kind, payload):
         if kind == "error":
             dpg.set_value("virt_browse_status", f"error: {payload}")
@@ -2562,6 +3561,22 @@ class App:
                 dpg.set_value("virt_browse_status", "cell has no views")
         elif kind == "source":
             self._load_virt_source(payload)
+        elif kind == "write":
+            tag = f"{payload['lib']}/{payload['cell']}/{payload['view']}"
+            if payload.get("ok"):
+                dpg.set_value("virt_browse_status",
+                              f"wrote {tag} -> {payload['path']} "
+                              f"(recompile in Cadence)")
+                self.log(f"[virtuoso] wrote {tag} -> {payload['path']}")
+                self._virt_dialog(True, "Written to Virtuoso",
+                                  f"Saved the editor's source into\n{tag}\n\n"
+                                  f"{payload['path']}\n\nRe-netlist / recompile "
+                                  f"the cell in Cadence for the change to apply.")
+            else:
+                note = payload.get("note", "write failed")
+                dpg.set_value("virt_browse_status", f"{tag}: {note}")
+                self.log(f"[virtuoso] write FAILED {tag}: {note}")
+                self._virt_dialog(False, "Write failed", f"{tag}\n{note}")
 
     def _load_virt_source(self, res):
         lib, cell, view = res["lib"], res["cell"], res["view"]
@@ -2577,13 +3592,16 @@ class App:
                                  if res["files"] else ""))
             return
         dpg.set_value("va_editor", res["text"])
-        # Remote buffer: detach from any local path so Save can't clobber a
-        # local file with remote content.
+        # Remote buffer: detach from any local path so the plain Save can't
+        # clobber a local file with remote content.  "Write back" targets the
+        # cellview, "Save as..." writes a local copy.
         self.editor_path = None
         self.editor_mtime = 0.0
+        self.editor_remote = (lib, cell, view)
         dpg.set_value("va_edit_sel", "")
         dpg.set_value("editor_status",
-                      f"remote: {tag}  (read-only — {res['path']})")
+                      f"remote: {tag}  (Write back -> Virtuoso, "
+                      f"or Save as... -> local file)")
         dpg.set_value("virt_browse_status",
                       f"loaded {tag} · {len(res['text'])} chars")
         dpg.set_value("center_tabs", "tab_source")
@@ -2738,6 +3756,66 @@ class App:
                 pass
         return "\n".join(lines)
 
+    # ---- attachments --------------------------------------------------
+
+    def on_attach_open(self, *_):
+        dpg.configure_item("attach_dialog", show=True)
+
+    def _on_attach_picked(self, sender, app_data):
+        picks = list((app_data or {}).get("selections", {}).values())
+        for p in picks:
+            if os.path.isfile(p) and p not in self.attachments:
+                self.attachments.append(p)
+        self._update_attach_row()
+
+    def on_attach_clear(self, *_):
+        self.attachments = []
+        self._update_attach_row()
+
+    def _update_attach_row(self):
+        names = ", ".join(os.path.basename(p) for p in self.attachments)
+        if dpg.does_item_exist("attach_label"):
+            dpg.set_value("attach_label", f"attached: {names}"[:120])
+        if dpg.does_item_exist("attach_row"):
+            dpg.configure_item("attach_row", show=bool(self.attachments))
+
+    _TEXT_ATTACH_EXT = (".csv", ".txt", ".md", ".json", ".va", ".py", ".log")
+
+    def _attachment_context(self):
+        """Context block describing queued attachments. Agentic backends read
+        the files themselves; chat-only (SDK) backends get small text files
+        inlined since they have no Read tool."""
+        if not self.attachments:
+            return ""
+        lines = ["", "ATTACHED FILES (provided by the user for THIS request):"]
+        inline = self.agent.backend == "sdk"
+        for p in self.attachments:
+            lines.append(f"- {p}")
+            ext = os.path.splitext(p)[1].lower()
+            if inline:
+                if ext in self._TEXT_ATTACH_EXT:
+                    try:
+                        with open(p, "r", encoding="utf-8",
+                                  errors="replace") as f:
+                            body = f.read(16000)
+                        lines.append(f"--- content of {os.path.basename(p)} "
+                                     f"(may be truncated) ---\n{body}\n---")
+                    except OSError as e:
+                        lines.append(f"  (could not read: {e})")
+                else:
+                    lines.append("  (binary file - NOT readable on this "
+                                 "chat-only backend; tell the user to use the "
+                                 "Claude provider for pdf/image analysis)")
+        if not inline:
+            lines.append("Read them with your Read tool (it understands PDF, "
+                         "images, CSV and text). Typical jobs: extract device "
+                         "parameters / measured curves from a paper or "
+                         "datasheet and retune the matching twin + .va, or "
+                         "compare measured CSV data against the simulation.")
+        return "\n".join(lines)
+
+    # -------------------------------------------------------------------
+
     def on_send(self, *_):
         if self.chat_busy:
             return
@@ -2745,14 +3823,20 @@ class App:
         if not text:
             return
         dpg.set_value("chat_input", "")
-        self.append_chat("you", text)
+        shown = text
+        if self.attachments and not text.startswith("/"):
+            shown += "\n[attached: " + ", ".join(
+                os.path.basename(p) for p in self.attachments) + "]"
+        self.append_chat("you", shown)
         if text.startswith("/"):
             self._handle_command(text)
             return
         self.chat_busy = True
         dpg.configure_item("btn_send", enabled=False)
         self._chat_pending(True)
-        ctx = self._agent_context()
+        ctx = self._agent_context() + self._attachment_context()
+        self.attachments = []
+        self._update_attach_row()
         auto = (dpg.get_value("menu_auto")
                 if dpg.does_item_exist("menu_auto") else True)
         edits = bash = auto
@@ -2859,16 +3943,31 @@ class App:
     # ---- live re-plot on code change --------------------------------
 
     def _reload_models(self):
-        """Hot-reload the edited model twins so the GUI simulates new code."""
+        """Hot-reload the edited model twins so the GUI simulates new code.
+
+        Parameter values are refreshed too: anything still at the OLD class
+        default adopts the NEW default (so edited defaults in the twin take
+        effect), while values the user explicitly changed in the panel are
+        kept.  Without this, sims after a reload silently run new code with
+        the stale startup parameter snapshot."""
         for key, (mod, clsname, pname) in RELOAD_MODULES.items():
+            old_defaults = _defaults_of(SPEC_BY_KEY[key].params_cls)
             importlib.reload(mod)
             spec = SPEC_BY_KEY[key]
             spec.cls = getattr(mod, clsname)
             spec.params_cls = getattr(mod, pname)
+            new_defaults = _defaults_of(spec.params_cls)
+            cur = self.param_values.get(key, {})
+            self.param_values[key] = {
+                name: (cur[name] if name in cur and name in old_defaults
+                       and cur[name] != old_defaults[name] else new_val)
+                for name, new_val in new_defaults.items()}
+        importlib.reload(analysis)        # hot-swap the measurement layer too
+        self.rebuild_param_panel()
 
     def _twin_mtime_map(self):
         m = {}
-        for rel in TWIN_FILE.values():
+        for rel in WATCH_FILES:
             p = os.path.join(self.workdir, rel)
             try:
                 m[rel] = os.path.getmtime(p)
@@ -2877,8 +3976,9 @@ class App:
         return m
 
     def _watch_code(self):
-        """Poll the model twins; when one changes (and is stable across two
-        polls), hot-reload and re-simulate so the plot tracks the agent."""
+        """Poll the model twins + the analysis layer; when one changes (and is
+        stable across two polls), hot-reload and re-plot so the view tracks the
+        edit with no restart."""
         if not dpg.does_item_exist("cb_liveplot") \
                 or not dpg.get_value("cb_liveplot"):
             return
@@ -2895,22 +3995,26 @@ class App:
         stable = cur == self._prev_mtimes
         self._prev_mtimes, self._twin_mtimes = self._twin_mtimes, cur
         if changed and stable and not self.sim_running:
-            self.log("[live] model code changed - reloading + re-plotting")
+            self.log("[live] code changed (twin/analysis) - reloading + re-plotting")
             try:
                 self._reload_models()
             except Exception as e:
-                self.log(f"[live] reload failed (syntax error in twin?): {e}")
+                self.log(f"[live] reload failed (syntax error?): {e}")
                 return
             # re-run whatever the user last computed (STDP sweep or transient)
             if self._last_compute == "stdp" and self._stdp_ctx is not None:
                 self.on_plot_stdp(live=True)
             else:
                 self.on_run(live=True)
+            # refresh the per-pulse Analysis curve from existing results so edits
+            # to analysis.per_pulse_samples show live without a re-sim
+            if self.results:
+                self.update_analysis()
 
     # ---- backup / revert agent edits --------------------------------
 
     def _editable_files(self):
-        files = list(TWIN_FILE.values())
+        files = list(TWIN_FILE.values()) + ["vatester/analysis.py"]
         for v in self.va_files:
             rel = os.path.relpath(v.path, self.workdir)
             files.append(rel)
@@ -3013,6 +4117,24 @@ class App:
         self.on_account_refresh()
         self.log("[account] app override cleared")
 
+    def on_openai_key_apply(self):
+        val = (dpg.get_value("openai_key_in") or "").strip()
+        if not val:
+            self._account_busy("paste an OpenAI API key first, then Apply.")
+            return
+        self.agent.set_openai_key(val)
+        self._refresh_agent_status()
+        self.log("[account] OpenAI key set for this app "
+                 f"(...{val[-4:]}); switch with /provider openai")
+        self._account_busy(f"OpenAI key applied (...{val[-4:]}). "
+                           "Use /provider openai in the chat.")
+
+    def on_openai_key_clear(self):
+        self.agent.set_openai_key(None)
+        dpg.set_value("openai_key_in", "")
+        self._refresh_agent_status()
+        self.log("[account] OpenAI key cleared")
+
     def _refresh_agent_status(self):
         online = self.agent.backend != "none"
         if dpg.does_item_exist("agent_dot"):
@@ -3091,6 +4213,8 @@ class App:
                 elif kind == "stdp":
                     self._show_stdp(item[1], item[2],
                                     live=(len(item) > 3 and item[3]))
+                elif kind == "polar":
+                    self._show_polar(item[1])
                 elif kind == "chat":
                     self._on_chat_done(item[1], item[2])
                 elif kind == "account":
@@ -3108,6 +4232,7 @@ class App:
         while dpg.is_dearpygui_running():
             self._process_queue()
             self._tick_zoom_anim()
+            self._tick_probe_drag()
             self._hide_tip_if_stale()
             self._watch_code()
             dpg.render_dearpygui_frame()

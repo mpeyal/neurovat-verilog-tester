@@ -9,8 +9,11 @@ Examples:
   python run_ecfet.py retention  --hold-s 60
   python run_ecfet.py compare                     # v1 vs v2, same stimulus
 
-Sign convention (matches the .va): positive gate current RAISES R_mem.
-'potentiate' = conductance up = negative current pulses.
+Sign convention is model-dependent after the Fig. 3 retune: the paper-matched
+v2 .va potentiates (G up / R down) on POSITIVE current; the legacy v1 port is
+the opposite.  NOTE: the scenario sign logic in this CLI still follows the v1
+convention ('potentiate' = negative current), so v2 curves here are INVERTED
+relative to their labels - use run_fig3.py for the paper-faithful v2 panels.
 All plots land in results/.
 """
 

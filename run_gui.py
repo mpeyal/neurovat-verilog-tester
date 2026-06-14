@@ -25,6 +25,6 @@ if __name__ == "__main__":
                     default=os.path.dirname(os.path.abspath(__file__)),
                     help="folder to scan for .va files (default: app folder)")
     ap.add_argument("--smoke", type=int, default=0, metavar="N",
-                    help="render N frames then exit (self-test)")
+                    help="render N framessstarts then exit (self-test)")
     args = ap.parse_args()
     main(args.workspace, smoke_frames=args.smoke)

@@ -1,13 +1,18 @@
-"""Claude agent backend for the GUI chat panel.
+"""Agent backend for the GUI chat panel (Claude or OpenAI, user-switchable).
 
-Primary backend: the `claude` CLI in headless print mode
-(`claude -p --output-format json`), which gives the agent real file tools so
-it can read and (when allowed) modify the Verilog-A sources in the
-workspace.  Conversation continuity uses --resume <session_id>.
+Claude provider (default):
+  - `claude` CLI headless (`claude -p --output-format json`): full agentic
+    backend with real file tools / shell; conversation via --resume.
+  - Anthropic SDK fallback (claude-opus-4-8): chat + patterns only.
 
-Fallback: the Anthropic Python SDK (model claude-opus-4-8) when the CLI is
-not installed but ANTHROPIC_API_KEY is set - chat + pattern generation only
-(no file tools; the GUI inlines the selected .va source into the context).
+OpenAI provider:
+  - `codex` CLI headless (`codex exec`) when installed: agentic backend with
+    file/shell access (best-effort flag mapping).
+  - OpenAI SDK fallback (gpt-5.1): chat + patterns + GUI-action blocks only -
+    no file tools, so the autonomous edit loop is unavailable on this path.
+
+The waveform / GUI-action json blocks are plain text conventions, so they
+work identically with every backend.
 """
 
 import glob
@@ -30,15 +35,20 @@ The plotted curves come from the PYTHON twins. To change what the GUI shows,
 edit the matching twin; to change the Verilog model, edit the .va so the two
 stay in sync. Each model exposes step(t, dt, I), .R, .G, reset(), observables().
 
-REAL-TIME RULE - put ALL device and analysis behavior in the TWINS. The GUI
-hot-reloads ecfet/model_*.py on every edit, so changes there appear LIVE with
-no restart. It does NOT reload its own code: editing vatester/app.py (e.g. the
-STDP worker, the analysis sampling, plotting) does NOTHING until the app is
-manually restarted, so DO NOT put model fixes there. If a measured curve is
-wrong (STDP not antisymmetric, tails not returning to 0, LTP/LTD imbalance,
-baseline pedestal), the cause and the fix live in the device equations of the
-twin - fix model_v2.py (and mirror to ecfet_v2.va), never patch app.py. Keep
-the simulator/GUI untouched.
+REAL-TIME RULE - put DEVICE behavior in the TWINS and MEASUREMENT logic in the
+analysis layer; both hot-reload LIVE. The GUI reloads ecfet/model_*.py and
+vatester/analysis.py on every edit, so changes there appear with no restart:
+  * ecfet/model_*.py     - device equations (R/G dynamics, the dR write-then-relax,
+                           retention, noise). Fix model behavior here, mirror to .va.
+  * vatester/analysis.py - how results are MEASURED: stdp_sweep (the anti-symmetric
+                           STDP window) and per_pulse_samples (LTP/LTD sampling). Fix
+                           how a curve is computed/sampled here.
+The GUI does NOT reload its own shell: editing vatester/app.py (widgets, layout,
+threads/queue plumbing) does NOTHING until the app is manually restarted, so DO
+NOT put model or measurement logic there. If a measured curve is wrong: a wrong
+DEVICE response (LTP/LTD imbalance, retention, dR magnitude) -> fix the twin and
+mirror to .va; a wrong MEASUREMENT (sampling time, pairing definition, baseline
+subtraction) -> fix vatester/analysis.py. Never patch app.py for either.
 
 RUNNING THINGS IN THE GUI. You CANNOT click buttons. When the user asks you
 to run, plot, or switch a view in the app ("run", "plot the STDP", "run STDP",
@@ -62,9 +72,11 @@ briefly and include exactly ONE fenced json block:
  "pulses": [[t_start_s, width_s, amplitude], ...]}
 ```
 kind "current" (ECFET) or "voltage" (FeFET); unit pA,nA,uA,mA,A,mV,V; times in
-seconds; <=2000 pulses. ECFET sign convention: positive gate current RAISES R
-(depresses); potentiation uses negative current. FeFET: positive gate voltage
-potentiates. The GUI turns that block into a one-click "Load pattern" card.
+seconds; <=2000 pulses. ECFET sign convention is MODEL-DEPENDENT: the
+paper-matched v2 (default) POTENTIATES on POSITIVE intercalation current (G up
+/ R down); the legacy v1 port is the opposite (positive current raises R).
+FeFET: positive gate voltage potentiates. The GUI turns that block into a
+one-click "Load pattern" card.
 
 AUTONOMOUS EDIT -> SIMULATE -> VERIFY -> FIX LOOP. When the user asks you to
 change device behavior or fix a model (and file edits are enabled), DO THE FULL
@@ -89,6 +101,16 @@ LOOP yourself, in this turn, until it works - don't just describe the change:
      you changed and the measured result.
 You may also write and run ad-hoc Python that imports the ecfet package (see
 my_test.py / README.md) when the runner is not flexible enough.
+
+ATTACHED FILES. The context may list files the user attached in the GUI (PDF
+papers, CSV measurement data, images of plots, datasheets). FIRST read every
+attached file with your Read tool - it understands PDF, images and text/CSV.
+Typical jobs: extract device physics, parameter values or measured curves from
+a paper and apply them to the matching twin + .va (run the full
+edit->simulate->verify loop against the extracted targets); or compare a
+measured CSV against the simulated curves and report/fit the differences.
+Quote the extracted numbers (with units and source page/figure) in your reply
+so the user can check them.
 
 OTHER TOOLS (when shell is enabled). You have a real shell. The project root has
 Virtuoso connection helpers: virtuoso_connect.bat and connect_test.py (SSH
@@ -128,19 +150,69 @@ def find_claude_cli():
     return None
 
 
+def find_codex_cli():
+    """Locate OpenAI's codex CLI, if installed."""
+    exe = shutil.which("codex")
+    if exe:
+        return exe
+    cand = os.path.expanduser(r"~/.codex/bin/codex.exe")
+    return cand if os.path.isfile(cand) else None
+
+# appended to the system prompt on SDK-only paths (no tools available there)
+SDK_CHAT_NOTE = """
+
+NOTE - CHAT-ONLY MODE: this backend has NO file tools and NO shell. Skip the
+autonomous edit loop entirely; do not claim to have edited or run anything.
+You can still produce waveform json blocks, GUI action blocks, and advice.
+"""
+
+
 class ClaudeAgent:
     def __init__(self, workdir):
         self.workdir = workdir
         self.session_id = None
         self.total_cost = 0.0
-        self._history = []          # SDK fallback conversation
+        self._history = []          # Anthropic SDK conversation
         self.cli = find_claude_cli()
         # per-app credential override (does NOT touch the global CLI login)
         self.override_kind = None   # "api_key" | "oauth" | None
         self.override_value = None
         self._proc = None           # running CLI process (for Stop)
         self._stop_requested = False
+        # provider switch (claude | openai)
+        self.provider = "claude"
+        self.codex = find_codex_cli()
+        self.openai_key = None      # per-app override for OPENAI_API_KEY
+        self._openai_history = []
+        self._codex_started = False
         self._refresh_sdk_ok()
+        self._refresh_openai_ok()
+
+    # ---- provider ----------------------------------------------------
+
+    def set_provider(self, name):
+        name = (name or "").strip().lower()
+        if name not in ("claude", "openai"):
+            return False, f"unknown provider '{name}' (claude | openai)"
+        if name != self.provider:
+            self.provider = name
+            self.reset()
+        return True, self.backend_label()
+
+    def _refresh_openai_ok(self):
+        self.openai_ok = False
+        try:
+            import openai  # noqa: F401
+        except ImportError:
+            return
+        self.openai_ok = bool(self.openai_key
+                              or os.environ.get("OPENAI_API_KEY"))
+
+    def set_openai_key(self, value):
+        self.openai_key = (value or "").strip() or None
+        self._refresh_openai_ok()
+        if self.provider == "openai":
+            self.reset()
 
     def stop(self):
         """Terminate the running agent process tree (Stop button)."""
@@ -259,6 +331,12 @@ class ClaudeAgent:
 
     @property
     def backend(self):
+        if self.provider == "openai":
+            if self.codex:
+                return "cli"
+            if self.openai_ok:
+                return "sdk"
+            return "none"
         if self.cli:
             return "cli"
         if self.sdk_ok:
@@ -266,6 +344,13 @@ class ClaudeAgent:
         return "none"
 
     def backend_label(self):
+        if self.provider == "openai":
+            if self.codex:
+                return "OpenAI codex CLI (agentic)"
+            if self.openai_ok:
+                return "OpenAI SDK (gpt-5.1) - chat only, no file tools"
+            return ("OpenAI: no backend - install the codex CLI or set an "
+                    "OPENAI_API_KEY (Account dialog)")
         if self.cli:
             return f"claude CLI ({os.path.basename(os.path.dirname(self.cli)) or 'PATH'})"
         if self.sdk_ok:
@@ -275,6 +360,8 @@ class ClaudeAgent:
     def reset(self):
         self.session_id = None
         self._history = []
+        self._openai_history = []
+        self._codex_started = False
 
     # ------------------------------------------------------------------
 
@@ -285,6 +372,17 @@ class ClaudeAgent:
         if autonomous:                  # full edit->run->verify->fix loop
             allow_edits = allow_bash = True
             timeout = max(timeout, 1800)
+        if self.provider == "openai":
+            if self.codex:
+                return self._send_codex(text, context, allow_edits,
+                                        model, timeout, autonomous)
+            if self.openai_ok:
+                return self._send_openai_sdk(text, context, model)
+            return {"ok": False, "text": "",
+                    "error": "No OpenAI backend. Install the codex CLI, or "
+                             "`pip install openai` and set an OPENAI_API_KEY "
+                             "(env var or the Account dialog). "
+                             "/provider claude switches back."}
         if self.cli:
             return self._send_cli(text, context, allow_edits, allow_bash,
                                   model, timeout, autonomous)
@@ -384,6 +482,85 @@ class ClaudeAgent:
             return {"ok": False, "text": "", "error": f"{type(e).__name__}: {e}"}
         reply = "".join(b.text for b in resp.content if b.type == "text")
         self._history.append({"role": "assistant", "content": reply})
+        return {"ok": True, "text": reply, "cost": 0.0}
+
+    # ---- OpenAI provider ---------------------------------------------
+
+    def _send_codex(self, text, context, allow_edits, model, timeout,
+                    autonomous=False):
+        """Headless OpenAI codex CLI (`codex exec`). Best-effort flag
+        mapping; session continuity via `exec resume --last`."""
+        if self._codex_started:
+            args = [self.codex, "exec", "resume", "--last"]
+            prompt = context + "\n\nUSER REQUEST:\n" + text
+        else:
+            args = [self.codex, "exec"]
+            prompt = SYSTEM_PROMPT + "\n" + context \
+                + "\n\nUSER REQUEST:\n" + text
+        if autonomous:
+            args.append("--dangerously-bypass-approvals-and-sandbox")
+        else:
+            args += ["--sandbox",
+                     "workspace-write" if allow_edits else "read-only"]
+        if model and model != "default":
+            args += ["-m", model]
+        args.append("-")                      # prompt from stdin
+
+        env = os.environ.copy()
+        if self.openai_key:
+            env["OPENAI_API_KEY"] = self.openai_key
+        self._stop_requested = False
+        try:
+            self._proc = subprocess.Popen(
+                args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                errors="replace", cwd=self.workdir,
+                creationflags=self._flags(), env=env)
+        except OSError as e:
+            return {"ok": False, "text": "",
+                    "error": f"failed to launch codex: {e}"}
+        try:
+            out, err = self._proc.communicate(input=prompt, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.stop()
+            self._proc = None
+            return {"ok": False, "text": "",
+                    "error": f"codex timed out after {timeout}s"}
+        rc = self._proc.returncode
+        self._proc = None
+        if self._stop_requested:
+            return {"ok": False, "text": "",
+                    "error": "stopped by user (agent run cancelled)"}
+        out = (out or "").strip()
+        if rc != 0 and not out:
+            return {"ok": False, "text": "",
+                    "error": (err or "codex CLI error").strip()[-2000:]}
+        self._codex_started = True
+        return {"ok": True, "text": out or "(empty reply)", "cost": 0.0}
+
+    def _send_openai_sdk(self, text, context, model="default"):
+        """OpenAI chat completions - chat / pattern / action replies only."""
+        try:
+            from openai import OpenAI
+        except ImportError:
+            return {"ok": False, "text": "",
+                    "error": "`pip install openai` to use the OpenAI provider"}
+        client = OpenAI(api_key=self.openai_key) if self.openai_key \
+            else OpenAI()
+        model_id = model if model and model != "default" else "gpt-5.1"
+        msgs = ([{"role": "system",
+                  "content": SYSTEM_PROMPT + SDK_CHAT_NOTE + "\n" + context}]
+                + self._openai_history
+                + [{"role": "user", "content": text}])
+        try:
+            resp = client.chat.completions.create(model=model_id,
+                                                  messages=msgs)
+        except Exception as e:                  # surface any API error
+            return {"ok": False, "text": "",
+                    "error": f"{type(e).__name__}: {e}"}
+        reply = (resp.choices[0].message.content or "") if resp.choices else ""
+        self._openai_history.append({"role": "user", "content": text})
+        self._openai_history.append({"role": "assistant", "content": reply})
         return {"ok": True, "text": reply, "cost": 0.0}
 
     # ------------------------------------------------------------------

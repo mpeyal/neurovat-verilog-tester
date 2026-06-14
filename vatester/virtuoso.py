@@ -32,6 +32,11 @@ _SKILL_HELPERS = [
   (let ((s "") ln port)
     (when (and (isFile p) (setq port (infile p)))
       (while (gets ln port) (setq s (strcat s ln))) (close port)) s))''',
+    r'''(defun pyWriteFile (p s)
+  (let (port)
+    (if (setq port (outfile p))
+      (progn (fprintf port "%s" s) (close port) "OK")
+      (strcat "ERR|cannot open for write: " p))))''',
     r'''(defun pyCells (libName vaOnly)
   (let ((res "")
         (vlist (list "veriloga" "verilogams" "verilogA" "ahdl" "vams"
@@ -227,6 +232,28 @@ class VirtuosoLink:
             text = self.ws["pyReadFile"](full) or ""
             return {"ok": True, "path": full, "text": text, "files": files,
                     "note": ""}
+
+    def write_source(self, lib, cell, view, text):
+        """Write `text` back to the source file backing a cellview (overwrites
+        it in the Cadence library). Returns {ok, path, note}. The library must
+        be writable; recompile/re-netlist the cell in Cadence to pick it up."""
+        with self._lock:
+            self._require()        # loads pyWriteFile + the browse helpers
+            raw = self.ws["pyCvFiles"](lib, cell, view) or ""
+            if raw.startswith("ERR|"):
+                return {"ok": False, "path": "", "note": raw[4:] or "no cellview"}
+            path, _, files_csv = raw.partition("|")
+            files = [f for f in files_csv.split(",") if f]
+            pick = _pick_source(files)
+            if not pick:
+                return {"ok": False, "path": path,
+                        "note": "no writable text source in this view"}
+            full = path + "/" + pick
+            res = (self.ws["pyWriteFile"](full, text) or "").strip()
+            if res != "OK":
+                note = res[4:] if res.startswith("ERR|") else (res or "write failed")
+                return {"ok": False, "path": full, "note": note}
+            return {"ok": True, "path": full, "note": ""}
 
     def disconnect(self):
         """Close the workspace and stop the tunnel if we started it."""

@@ -3,3 +3,5 @@ matplotlib
 dearpygui>=1.11
 # optional - agent chat fallback when the claude CLI is not installed:
 # anthropic
+# optional - OpenAI provider for the agent chat (/provider openai):
+# openai

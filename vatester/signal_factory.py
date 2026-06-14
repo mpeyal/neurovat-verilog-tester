@@ -7,8 +7,10 @@ parameters so the GUI can auto-build its input form.  build(values) returns
 to SI with the unit combo.  meta may carry analysis hints (e.g. n_each for
 LTP/LTD splitting).
 
-ECFET sign convention: positive gate CURRENT raises R (depresses);
-potentiation = negative current.  FeFET convention: positive gate VOLTAGE
+ECFET sign convention is MODEL-DEPENDENT: the paper-matched v2 (default
+polarity) potentiates on POSITIVE intercalation current (G up / R down); the
+legacy v1 port is the opposite (positive current raises R).  Set the LTP/LTD
+"pot. sign" to +1 for v2, -1 for v1.  FeFET convention: positive gate VOLTAGE
 potentiates.
 """
 
@@ -148,16 +150,19 @@ GENERATORS = [
                _p("amp", "amplitude", -100), _p("width_ms", "width (ms)", 10),
                _p("period_ms", "period (ms)", 50)], _train),
     Generator("LTP / LTD train",
-              "n potentiating then n depressing pulses (synaptic curve). "
-              "pot. sign: -1 for ECFET (current), +1 for FeFET (voltage). "
-              "repeats: how many full LTP+LTD trains to play back-to-back.",
-              [_p("n_each", "pulses per branch", 20, True),
-               _p("amp", "|amplitude|", 100),
+              "n potentiating then n depressing pulses (Fig.3c synaptic curve). "
+              "pot. sign: +1 for v2 ECFET (positive current potentiates), -1 "
+              "for v1; defaults are SPACED (period=2 s) so the slow 19 s pool "
+              "clears between pulses - the retained ramp (Analysis tab) is a "
+              "clean triangle and the transient does not saturate. View Fig.3c "
+              "on the ANALYSIS tab (G vs pulse #).",
+              [_p("n_each", "pulses per branch", 300, True),
+               _p("amp", "|amplitude|", 170),
                _p("width_ms", "width (ms)", 10),
-               _p("period_ms", "period (ms)", 50),
+               _p("period_ms", "period (ms)", 2000),
                _p("gap_ms", "branch gap (ms)", 0),
                _p("t0_ms", "start (ms)", 10),
-               _p("pot_sign", "pot. sign (-1/+1)", -1, True),
+               _p("pot_sign", "pot. sign (-1/+1)", 1, True),
                _p("reps", "train repeats", 1, True)],
               _ltp_ltd),
     Generator("Paired pulses (PPF)",

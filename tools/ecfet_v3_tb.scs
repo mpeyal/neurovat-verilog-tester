@@ -1,0 +1,119 @@
+// ecfet_v3_tb.scs - minimal Spectre testbench for ecfet_v3.va
+// ===========================================================================
+// PURPOSE
+//   Smoke-test the Verilog-A model ecfet_v3.va (the paper-faithful CONSERVED-x +
+//   SATURATING-G(x) graphene Li-intercalation synapse) in Spectre: apply a single
+//   +50 pA / 10 ms intercalation pulse at the Fig.3a operating bias (G_init =
+//   227 uS, R = 4400 ohm) and observe the instantaneous dip (-30 ohm) relax to
+//   the retained step (-11 ohm), exactly as tools/validate_v3.py does in Python.
+//
+//   *** CANNOT BE RUN IN THIS ENVIRONMENT - NO SPECTRE / OPENVAF LICENSE. ***
+//   This file is provided so the model can be checked on a real simulator.  It
+//   was authored to mirror the validated Python transient and the .va port; the
+//   numeric expectations in the comments are the Python/paper targets.
+//
+// HOW TO RUN (on a machine with Spectre + the VA compiler):
+//   spectre ecfet_v3_tb.scs +escchars +log spectre.out -format psfascii
+//   (Cadence Virtuoso ADE: create a netlist that ahdl_includes the .va and
+//    drop in the stimulus + analyses below.)
+// ===========================================================================
+
+simulator lang=spectre
+global 0                          // node 0 is the global ground reference
+
+// --- compile/include the Verilog-A model ----------------------------------
+// ahdl_include pulls ecfet_v3.va into the netlist and auto-compiles it.  The
+// path is relative to this .scs file (../ecfet_v3.va from tools/); change to an
+// absolute path if your run directory differs.
+ahdl_include "../ecfet_v3.va"
+
+// ===========================================================================
+// DUT instance
+//   module ecfet_v3(In, Out, IGsc, Rmem)   // output Rmem; inout In,Out; input IGsc
+//   Internal state nodes: n_x (conserved x in [0,1], 1 V == 1 x), n_v1/2/3 (EDL
+//   pools, 1 V == 1 S), n_stdp (STDP-locked contribution, 1 V == 1 S).  We .save
+//   these below.  Defaults match the paper config (Rinit=4400 -> 227 uS, k=6,
+//   Q_full=7.305e-10, kappa_v=0.673, A_stdp=6e-6, tau_ret=1.05e6, ...), so no
+//   parameter overrides are needed to reproduce Fig.3a.
+// ===========================================================================
+X1 (n_in n_out n_igsc n_rmem) ecfet_v3 Rinit=4400
+
+// ---------------------------------------------------------------------------
+// READ PATH across the In/Out memristor branch.
+//   The model defines V(mem) <+ I(mem)/G_total, i.e. the In->Out branch behaves
+//   as a resistor R = 1/G_total.  Force a small 10 mV read bias In->Out and let
+//   Spectre solve the branch current; R_read = 10mV / I(vread).  Keep the read
+//   bias tiny so it does not itself perturb the device (it carries no gate
+//   current - only IGsc drives the conductance).
+// ---------------------------------------------------------------------------
+vread (n_in n_out) vsource dc=10m type=dc
+
+// ---------------------------------------------------------------------------
+// GATE STIMULUS through the IGsc pin (THE "no singular matrix" fix).
+//   The model only READS I(IGsc): the gate current is a SENSED control signal,
+//   and the module makes NO branch contribution that drives the IGsc node's
+//   voltage.  Spectre therefore has nothing to set V(n_igsc) -> a floating node
+//   with "no DC path to ground" -> SINGULAR MATRIX.
+//
+//   FIX (two parts, both required):
+//     (1) Wire the pulse current source FROM n_igsc TO ground so the current
+//         physically flows through the IGsc pin -> that is what I(IGsc) senses.
+//     (2) Add a large shunt resistor Rshunt from n_igsc to ground so the node
+//         has a finite DC conductance to ground and a well-defined operating
+//         point.  At 1 Gohm it diverts 50 mV/1G = 50 fA at the 50 pA level -
+//         a 0.1% perturbation of the sensed current, negligible for the smoke
+//         test.  (Raise to 1 Tohm if you want it truly negligible and your
+//         engine still converges.)
+//
+//   Pulse: 0 A baseline, +50 pA for 10 ms starting at t = 5 s (matches the
+//   Python Fig.3a stimulus: Waveform([(5.0, 10e-3, +50e-12)])).  Flip val1 to
+//   -50p for the Fig.3b depression mirror.
+// ---------------------------------------------------------------------------
+igate (n_igsc 0) isource type=pulse val0=0 val1=50p \
+      delay=5 rise=1u fall=1u width=10m period=1k
+Rshunt (n_igsc 0) resistor r=1G        // DC path for the IGsc sense node
+
+// ===========================================================================
+// INITIAL CONDITION
+//   The .va seeds V(n_x) = x_init at t0 for analysis("ic") OR for the very first
+//   tran time point.  n_x is the conserved Li-intercalation fraction x in [0,1]
+//   (1 V == 1 unit-x), NOT a conductance.  At the 4400 ohm (227 uS) bias,
+//   x_init = S^-1((Ginit-Gmin)/(Gmax-Gmin)) ~ 0.19985 with k=6.  The retained
+//   conductance is the ALGEBRAIC map G_nv = Gmin + (Gmax-Gmin)*S(x) (no node).
+// ===========================================================================
+ic X1.n_x=0.19985 X1.n_v1=0 X1.n_v2=0 X1.n_v3=0
+
+// ===========================================================================
+// ANALYSES
+//   tranOP first establishes the DC operating point (uselatestdcop), then the
+//   transient runs through the pulse and well past the 19 s slow EDL tail so the
+//   retained step settles.  100 s >> tau3 (19 s) and >> a few tau1/tau2.
+// ===========================================================================
+tranOP tran stop=120 errpreset=conservative \
+       ic=node                          // honor the ic statement above
+
+// ===========================================================================
+// SAVES
+//   V(n_rmem)  = R = 1/G_total  (model output Rmem; the primary readout)
+//   X1.n_x     = conserved Li-intercalation fraction x in [0,1] (1 V == 1 x).
+//                The retained conductance is G_nv = Gmin+(Gmax-Gmin)*S(x).
+//   X1.n_v1..3 = volatile EDL pools                   (1 V == 1 S)
+//   X1.n_stdp  = STDP-locked contribution            (1 V == 1 S)
+//   i(vread)   = read-branch current -> R_read = 10mV / i(vread)
+// ===========================================================================
+save X1.n_rmem X1.n_x X1.n_v1 X1.n_v2 X1.n_v3 X1.n_stdp
+save vread:p                            // current through the read source
+
+// ===========================================================================
+// EXPECTED RESULTS (Python / paper targets; see tools/validate_v3.py Fig.3a)
+//   At t = 4.999 s (pre-pulse):       V(n_rmem) ~ 4400 ohm,  X1.n_x ~ 0.19985
+//   At t = 5.010 s (pulse ON, end):   V(n_rmem) ~ 4370 ohm  (instantaneous dR
+//                                       ~ -30 ohm; EDL fast pool present)
+//   X1.n_x at pulse end:              ~ 0.2003   (retained dR' ~ -11 ohm on G_nv;
+//                                       G_nv = Gmin+(Gmax-Gmin)*S(x) ~ 227.8 uS)
+//   At t = 120 s (settled):           V(n_rmem) ~ 4389 ohm  (EDL fast pool gone,
+//                                       19 s tail + retention overlap); the PURE
+//                                       retained step lives in the S(x) map.
+//   For a -50 pA pulse (Fig.3b) flip val1 to -50p: exact +mirror (+30 / +11 ohm).
+//   STDP (Fig.4b): fire two opposite-polarity pulses dt apart and read X1.n_stdp.
+// ===========================================================================

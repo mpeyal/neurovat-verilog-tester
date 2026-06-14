@@ -1,0 +1,293 @@
+// ecfet_v3.va - paper-faithful graphene Li-intercalation synapse
+//               (CONSERVED-x + SATURATING-G(x) law)
+//
+// Verilog-A mirror of ecfet/model_v3.py.  Same pins and port semantics as
+// ecfet_v2.va.  The conductance core is the conserved Li-intercalation fraction
+// x in [0,1] mapped through a NORMALIZED SYMMETRIC SATURATING logistic S-curve:
+//
+//   state:  d(x)/dt = sgn * |I|/Q_full        (x integrated on node n_x; 1V==1x)
+//                     - x/tau_ret              (self-discharge toward x_eq=0)
+//           x is HARD-clamped to [0,1] (the delithiated and LiC6 rails).
+//   map:    G_nv = Gmin + (Gmax-Gmin) * S(x)
+//           S(x) = (sig(k*(x-0.5)) - sig(-k/2)) / (sig(k/2) - sig(-k/2)),
+//           sig(t) = 1/(1+exp(-t)),  so  S(0)=0, S(1)=1.
+//
+// WHY THIS LAW.  The earlier v3 used a windowless MULTIPLICATIVE retained law
+// (dG_nv = f_ret*G_nv*(Q/Q_ref)); its per-pulse step GROWS as G fills toward Gmax
+// -> the LTP ramp is CONCAVE-UP (accelerating) and slams the Gmax rail, which is
+// WRONG vs the real device.  He et al. 2025 Fig 3b/3e and Sharbati 2018 Fig 3c
+// show potentiation that SATURATES (CONCAVE-DOWN: the step SHRINKS as G fills
+// toward Gmax) and depression that saturates toward Gmin.  The logistic S(x)
+// gives exactly that, plus a ~linear 10-90% middle (Sharbati R^2~0.994) and a
+// BELL-SHAPED per-pulse step (small at the rails, large mid-range) - so at the
+// 227 uS bias (near the low rail) the retained step is small (~0.57 uS = -11 ohm,
+// Fig.3a) WITHOUT any accelerating law.  Because x is conserved/reversible, a
+// closed +/- cycle returns x exactly -> charge-conserving BY CONSTRUCTION.
+//
+// Tune all constants in Python (ecfet/model_v3.py) first, then copy here.
+//
+// Primary device: M. T. Sharbati et al., "Low-Power, Electrochemically Tunable
+// Graphene Synapses for Neuromorphic Computing", Adv. Mater. 2018, 30, 1802353.
+// Kinetic dynamic-range extension (eta, OFF by default): He et al.,
+// npj Unconv. Comput. 2025, 2, 28.
+//
+// Sign convention (paper, polarity=-1): a POSITIVE (intercalation) gate current
+// POTENTIATES - Li IN, x UP, G UP, R DOWN.  polarity=+1 recovers the legacy sign.
+//
+// Figures reproduced by the defaults:
+//   Fig.3a) +50 pA/10 ms @ R~4400 ohm (G=227 uS): instantaneous dR=-30 ohm
+//      relaxing to retained dR'=-11 ohm (G_nv step ~ +0.57 uS).
+//   Fig.3b) deintercalation pulse: exact mirror, +30 ohm relaxing to +11 ohm.
+//   Fig.3c) LTP/LTD over G ~120..1150 uS in ~1461 pulses (full sweep), >250
+//      distinct nonvolatile states; near-linear 10-90% (R^2~0.996); CONCAVE-DOWN
+//      (saturating) - the per-pulse step SHRINKS toward Gmax.
+//   Fig.4b) 3-exp STDP window tau1=22 ms, tau2=315 ms, tau3=19 s, peak ~A_stdp.
+//   Fig.S4) dG/G linear in pulse amplitude at small signal; ~0.25% @ 50 pA.
+//   Fig.S5) retention: +3.2% R over 13 h (x relaxes to 0) -> tau_ret ~ 1.05e6 s.
+//
+// State (1 V == 1 S on G nodes; 1 V == 1 unit-x on n_x):
+//   n_x       conserved Li-intercalation fraction x in [0,1]
+//   n_v1/2/3  volatile EDL pools (relax with tau1/tau2/tau3)
+//   n_stdp    STDP-locked nonvolatile contribution (probe V(n_stdp))
+//   G_total = Gmin+(Gmax-Gmin)*S(x) + sum(pools) + stdp_lock, clamped to window.
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module ecfet_v3(In, Out, IGsc, Rmem);
+output Rmem;
+inout In, Out;
+input IGsc;
+
+electrical In, Out, IGsc, Rmem;
+electrical n_x, n_v1, n_v2, n_v3, ignd;     // state nodes
+electrical n_stdp;                          // STDP-only readout (1 V == 1 S)
+
+branch (In,Out) mem;
+
+// ---- conductance window (Fig. 2d/3c: delithiated .. LiC6) -----------------
+parameter real Rmin  = 870   from (0:inf);    // -> Gmax ~ 1150 uS (LiC6 stoich)
+parameter real Rmax  = 8333  from (0:inf);    // -> Gmin = 120 uS  (delithiated)
+parameter real Rinit = 4400  from (0:inf);    // -> G_init = 227 uS (Fig.3a/b bias)
+
+// ---- conserved-x charge-controlled state (the decided law) ----------------
+parameter real Q_ref  = 0.5p from (0:inf);    // C per unit pulse (= 50 pA x 10 ms)
+// Q_full: charge to traverse the WHOLE intercalation window x: 0 -> 1.  A full
+//   sweep at 50 pA/10 ms takes Q_full/Q_ref ~ 1461 pulses -> >250 nv states.
+parameter real Q_full = 0.7305155266508837n from (0:inf);   // 7.305e-10 C
+// k: logistic steepness.  k=6 gives concave-down potentiation (saturates near
+//   Gmax), concave-up depression (saturates near Gmin), ~linear 10-90% middle,
+//   and a bell-shaped per-pulse step (small at the rails, large mid-range).
+parameter real k_steep = 6.0 from (0:inf);
+parameter real polarity = -1.0 from [-1:1];   // -1: positive (intercalation) I potentiates
+
+// ---- volatile EDL split + 3-pool relaxation -------------------------------
+// The EDL injected is (kappa_v/(1-kappa_v)) * |dG_nv| (proportional to the actual
+// retained step).  kappa_v ~ 0.673 makes the OBSERVED instantaneous step -30 ohm
+// @ 227 uS, relaxing to the retained -11 ohm.  Pools: tau1 = w^2/2D = 22 ms (FAST
+// in-plane / EDL gating), tau2 = l^2/2D = 315 ms, tau3 = 19 s (LFP exchange tail).
+// FAST-dominant (most weight on tau1=22 ms so it is present within the 10 ms read
+// pulse and drops fast after) with a small slow tail on tau3 (Fig.3a recovery).
+// Because the EDL scales by the ACTUAL retained step dG_nv (itself bell-shaped),
+// it tapers at the rails too -> no separate soft window is needed.
+parameter real kappa_v = 0.673 from [0:1);
+parameter real w    = 4u   from (0:inf);      // device width  (Fig.4b)
+parameter real l    = 15u  from (0:inf);      // device length (Fig.4b)
+parameter real D    = 360p from (0:inf);      // 3.6e-10 m^2/s -> tau1 22 ms, tau2 315 ms
+parameter real tao3 = 19   from (0:inf);
+parameter real c1 = 0.80 from [0:inf);        // EDL pool weight on tau1 (22 ms, fast drop)
+parameter real c2 = 0.05 from [0:inf);        // EDL pool weight on tau2 (315 ms)
+parameter real c3 = 0.15 from [0:inf);        // EDL pool weight on tau3 (19 s slow tail)
+parameter real tau_scale = 1.0 from (0:inf);
+
+// ---- long-term retention / self-discharge (Fig.S5: +3.2% over 13 h) -------
+// x relaxes toward x_eq=0 (delithiated = Gmin) with tau_ret ~ 1.05e6 s.
+parameter real tau_ret = 1.05M from (0:inf);  // 1.05e6 s
+parameter real x_eq    = 0.0  from [0:1];     // delithiated equilibrium (x=0 -> Gmin)
+
+// ---- STDP 3-exp eligibility-trace lock-in (edge-triggered; Fig.4b) --------
+// Exact port of the discrete per-pulse rule in model_v3.py.  Each pulse ONSET
+// is a @(cross) event that: (1) decays both 3-component traces by exp(-dt/tau_i)
+// since the previous onset, (2) locks A_stdp*sum(OPPOSITE surviving trace) into
+// stdp_lock, (3) CONSUMES (zeros) that opposite trace, (4) bumps its own trace by
+// the normalized weights scn1/2/3, SATURATED at scn (single-pulse cap).  +side:
+//   dG(dt) = A_stdp*(scn1 e^-dt/tau1 + scn2 e^-dt/tau2 + scn3 e^-dt/tau3),
+// peak ~A_stdp at dt->0, ~1 uS by 1800 ms; -side anti-symmetric.  In a monotonic
+// Fig.3 ramp the opposite trace stays ~0 (consumed) so the lock-in is inert and
+// the ramp is carried by x (G_nv), not by stdp_lock.  A_stdp=0 disables STDP.
+parameter real A_stdp  = 6e-6 from [0:inf);   // S, peak at dt->0 (V2 fix: ~5 uS)
+parameter real stdp_c1 = 0.39 from [0:inf);   // trace weight on tau1 (22 ms)
+parameter real stdp_c2 = 0.44 from [0:inf);   // trace weight on tau2 (315 ms)
+parameter real stdp_c3 = 0.17 from [0:inf);   // trace weight on tau3 (19 s)
+
+// ---- kinetic dynamic-range factor (He et al.); OFF by default (eta=1) -----
+parameter integer kinetic_on = 0 from [0:1];  // 1 enables eta(on-time)
+parameter real tau_kin = 0.02 from (0:inf);   // s, kinetic on-time constant
+parameter real eta_inf = 0.3  from [0:1];     // floor efficiency (short pulses)
+parameter real t_on    = 0.01 from (0:inf);   // s, pulse high-time used by eta()
+
+// ---- gate threshold / leak (same semantics as v1/v2) ---------------------
+parameter real I_drift_th       = 1p  from [0:inf);
+parameter real leak_drift_scale = 0.0 from [0:1];
+
+real Gmin, Gmax, span, sa, sb, sden, eta, x_init;
+real tau1, tau2, tau3v, csum, cn1, cn2, cn3;
+real absI, Ieff, xc, Sx, dSdx, G_nv, G_total;
+real u_x, dGnv_dt, u_edl, sgn, edl_factor;
+// edge-triggered 3-exp STDP state (1 unit == 1, lock in S)
+real tr_p1, tr_p2, tr_p3, tr_d1, tr_d2, tr_d3;
+real stdp_lock, t_evt, dt_evt, t_start;
+real ssum, scn1, scn2, scn3;
+// persistent edge-detection state (replaces @(cross); persist across timesteps)
+real prev_drift, prev_pot, drift_on, potentiate;
+
+// logistic helper (numerically safe is unnecessary in AMS; use direct form)
+analog function real lsig;
+    input t; real t;
+    begin
+        lsig = 1.0 / (1.0 + exp(-t));
+    end
+endfunction
+
+analog begin
+    Gmin   = 1.0 / Rmax;
+    Gmax   = 1.0 / Rmin;
+    span   = Gmax - Gmin;
+    sa     = lsig(-0.5*k_steep);          // S-curve normalization endpoints
+    sb     = lsig( 0.5*k_steep);
+    sden   = sb - sa;
+    edl_factor = kappa_v / (1.0 - kappa_v);
+
+    tau1  = (w*w) / (2.0*D) * tau_scale;
+    tau2  = (l*l) / (2.0*D) * tau_scale;
+    tau3v = tao3 * tau_scale;
+
+    csum = c1 + c2 + c3;
+    cn1 = c1 / csum;  cn2 = c2 / csum;  cn3 = c3 / csum;
+
+    ssum = stdp_c1 + stdp_c2 + stdp_c3;   // normalized STDP trace weights
+    scn1 = stdp_c1 / ssum;  scn2 = stdp_c2 / ssum;  scn3 = stdp_c3 / ssum;
+
+    // kinetic efficiency eta(on-time): =1 unless kinetic_on (He et al.).
+    if (kinetic_on != 0)
+        eta = eta_inf + (1.0 - eta_inf) * (1.0 - exp(-t_on / tau_kin));
+    else
+        eta = 1.0;
+
+    // initial x for the Rinit bias: invert S(x) = (Ginit-Gmin)/span.
+    // S(x) = frac  ->  sig(k*(x-0.5)) = sa + frac*sden  ->  solve for x.
+    begin : x_init_calc
+        real ginit_frac, y;
+        ginit_frac = (1.0/Rinit - Gmin) / span;
+        if (ginit_frac < 1e-12) ginit_frac = 1e-12;
+        if (ginit_frac > 1.0-1e-12) ginit_frac = 1.0-1e-12;
+        y = sa + ginit_frac * sden;
+        x_init = 0.5 + ln(y/(1.0-y)) / k_steep;
+    end
+
+    V(ignd) <+ 0;
+
+    // ---- edge-triggered STDP state init + seed timestamp ----
+    @(initial_step) begin
+        tr_p1 = 0.0; tr_p2 = 0.0; tr_p3 = 0.0;
+        tr_d1 = 0.0; tr_d2 = 0.0; tr_d3 = 0.0;
+        stdp_lock = 0.0; t_evt = $abstime;
+        t_start = $abstime;
+        prev_drift = 0.0; prev_pot = 0.0;
+    end
+
+    // gate threshold / leak scaling
+    absI = abs(I(IGsc));
+    if (absI < I_drift_th)
+        Ieff = leak_drift_scale * I(IGsc);
+    else
+        Ieff = I(IGsc);
+
+    // ---- STDP 3-exp impulse lock-in: fires once at each pulse ONSET ----------
+    // openvaf does NOT support @(cross) events, so the pulse onset is detected by
+    // comparing the current drift-on state to the value stored at the PREVIOUS
+    // evaluation (module-scope reals persist between timesteps).  This is the
+    // exact analogue of model_v3.py's  `if drift_on and not self.prev_drift_on`.
+    // The body has NO analog operators (only arithmetic), so it is legal inside
+    // an if().  potentiating = (-sign(Ieff)*polarity) > 0.
+    drift_on  = (absI >= I_drift_th) ? 1.0 : 0.0;
+    potentiate = ((-(Ieff>0 ? 1.0 : (Ieff<0 ? -1.0 : 0.0))) * polarity > 0.0)
+                 ? 1.0 : 0.0;
+    if (drift_on > 0.5 && prev_drift < 0.5) begin   // pulse ONSET
+        dt_evt = $abstime - t_evt;
+        tr_p1 = tr_p1*exp(-dt_evt/tau1); tr_p2 = tr_p2*exp(-dt_evt/tau2); tr_p3 = tr_p3*exp(-dt_evt/tau3v);
+        tr_d1 = tr_d1*exp(-dt_evt/tau1); tr_d2 = tr_d2*exp(-dt_evt/tau2); tr_d3 = tr_d3*exp(-dt_evt/tau3v);
+        t_evt = $abstime;
+        if (potentiate > 0.5) begin         // post-before-pre -> LTP
+            stdp_lock = stdp_lock + A_stdp*(tr_d1 + tr_d2 + tr_d3);   // harvest depression trace
+            tr_d1 = 0.0; tr_d2 = 0.0; tr_d3 = 0.0;                    // consume it
+            tr_p1 = min(tr_p1 + scn1, scn1); tr_p2 = min(tr_p2 + scn2, scn2); tr_p3 = min(tr_p3 + scn3, scn3);
+        end else begin                      // pre-before-post -> LTD
+            stdp_lock = stdp_lock - A_stdp*(tr_p1 + tr_p2 + tr_p3);   // harvest potentiation trace
+            tr_p1 = 0.0; tr_p2 = 0.0; tr_p3 = 0.0;                    // consume it
+            tr_d1 = min(tr_d1 + scn1, scn1); tr_d2 = min(tr_d2 + scn2, scn2); tr_d3 = min(tr_d3 + scn3, scn3);
+        end
+    end
+    prev_drift = drift_on;                  // remember for next evaluation's edge
+    prev_pot   = potentiate;
+
+    // ---- saturating map G_nv = Gmin + span*S(x), and dS/dx for the EDL rate ----
+    xc = V(n_x,ignd);
+    if (xc < 0.0) xc = 0.0;
+    if (xc > 1.0) xc = 1.0;
+    Sx   = (lsig(k_steep*(xc-0.5)) - sa) / sden;
+    // d/dx [ sig(k*(x-0.5)) ] = k*sig*(1-sig); dS/dx divides by sden.
+    begin : dsdx_calc
+        real s; s = lsig(k_steep*(xc-0.5));
+        dSdx = k_steep * s * (1.0 - s) / sden;
+    end
+    G_nv = Gmin + span * Sx;
+
+    // total observable conductance = nonvolatile S(x) + volatile pools + STDP
+    G_total = G_nv + V(n_v1,ignd) + V(n_v2,ignd) + V(n_v3,ignd) + stdp_lock;
+    if (G_total < Gmin) G_total = Gmin;
+    if (G_total > Gmax) G_total = Gmax;
+
+    // ---- conserved-x charge-driven write + EDL inflow rate --------------------
+    // u_x is the x rate; the retained conductance rate is dGnv_dt = dS/dx*span*u_x
+    // (bell-shaped: small at the rails, large mid-range -> concave-down LTP).
+    // The EDL inflow is edl_factor*|dGnv_dt|, signed by dGnv_dt.
+    if (Ieff != 0.0) begin
+        if (Ieff > 0)
+            sgn = -polarity;     // polarity=-1: positive I raises x (raises G)
+        else
+            sgn = polarity;
+        u_x = sgn * abs(Ieff) / Q_full * eta;
+        // hard-stop x at the rails (no write past [0,1])
+        if ((xc >= 1.0 && u_x > 0.0) || (xc <= 0.0 && u_x < 0.0))
+            u_x = 0.0;
+        dGnv_dt = dSdx * span * u_x;
+        if (dGnv_dt >= 0.0)
+            u_edl = edl_factor * dGnv_dt;
+        else
+            u_edl = -edl_factor * (-dGnv_dt);   // = edl_factor*dGnv_dt (same sign)
+    end else begin
+        u_x   = 0.0;
+        u_edl = 0.0;
+    end
+
+    // ---- state nodes as integrators with built-in initial conditions ----------
+    // idt(rate, ic) integrates `rate` from the initial value `ic`, which is the
+    // openvaf-clean way to express a state node with an IC (no analog operator in
+    // a conditional).  These are mathematically identical to the v2-style
+    // ddt-KCL form but seed n_x = x_init and the pools = 0 at t0.
+    //
+    // CONSERVED x: d(x)/dt = u_x - (x - x_eq)/tau_ret  (self-discharge to x_eq=0).
+    V(n_x,ignd)  <+ idt(u_x - (V(n_x,ignd) - x_eq) / tau_ret, x_init);
+    // VOLATILE EDL: d(G_vi)/dt = cni*u_edl - G_vi/taui  (decaying pools, ic=0).
+    V(n_v1,ignd) <+ idt(cn1*u_edl - V(n_v1,ignd)/tau1,  0.0);
+    V(n_v2,ignd) <+ idt(cn2*u_edl - V(n_v2,ignd)/tau2,  0.0);
+    V(n_v3,ignd) <+ idt(cn3*u_edl - V(n_v3,ignd)/tau3v, 0.0);
+
+    // outputs
+    V(Rmem) <+ 1.0 / G_total;          // readout: V(Rmem) = R = 1/G_total
+    V(mem)  <+ I(mem) / G_total;       // memristor branch: V = I/G
+    V(n_stdp) <+ stdp_lock;            // isolated STDP window readout (S, 1 V == 1 S)
+end
+
+endmodule
