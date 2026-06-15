@@ -69,6 +69,17 @@ def parse_va(path):
         if any(w in hint_text for w in words):
             va.model_key = key
             break
+    # Guard versioned names: if the name says "vN" but we matched a DIFFERENT
+    # version family (e.g. "ecfet_v4" falling through to the generic "ecfet"->v1
+    # keyword), trust the name's version - remap to vN if that's a real twin,
+    # else leave it UNMAPPED so the GUI prompts to build a twin (instead of
+    # silently simulating the wrong model).
+    known_versions = {k for k, _ in MODEL_HINTS if re.fullmatch(r"v\d+", k)}
+    ver = re.search(r"(?<![a-z0-9])v(\d+)", hint_text)
+    if ver and re.fullmatch(r"v\d+", va.model_key or ""):
+        vkey = "v" + ver.group(1)
+        if va.model_key != vkey:
+            va.model_key = vkey if vkey in known_versions else ""
     return va
 
 

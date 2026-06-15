@@ -1348,6 +1348,7 @@ class App:
         self._sync_class_ui(_cls)                      # init labels + tab visibility
         self.log(f"workspace: {self.workdir}")
         self.log(f"agent backend: {self.agent.backend_label()}")
+        self._check_orphan_twins()        # warn about unregistered ecfet/ twins
         self.append_chat("agent",
                          "Hi! I can generate spike patterns (Poisson, STDP, "
                          "bursts...), explain or modify the .va sources, and "
@@ -3301,6 +3302,42 @@ class App:
             self.append_chat("sys", "Tip: enable Agent > Autonomous so the agent "
                              "can edit the twin and run the sim itself.")
         self.on_send()
+
+    def _check_orphan_twins(self):
+        """Warn (in the log + chat) about ecfet/model_*.py files that define a
+        twin but are NOT registered - so they'd silently never simulate (the
+        exact trap v3 hit).  Catches a hand-added core twin where a registration
+        step was missed.  Twins in twins/ are auto-registered, so they're fine."""
+        import glob
+        import importlib
+        ecfet_dir = os.path.dirname(_m_v1.__file__)
+        registered = set()
+        for mod, _c, _p in RELOAD_MODULES.values():
+            f = getattr(mod, "__file__", None)
+            if f:
+                registered.add(os.path.normcase(os.path.abspath(f)))
+        for path in sorted(glob.glob(os.path.join(ecfet_dir, "model_*.py"))):
+            if os.path.normcase(os.path.abspath(path)) in registered:
+                continue
+            base = os.path.splitext(os.path.basename(path))[0]
+            try:
+                mod = importlib.import_module(f"ecfet.{base}")
+            except Exception as e:                       # noqa: BLE001
+                self.log(f"[models] ecfet/{base}.py failed to import: {e!r}")
+                continue
+            twin = next((n for n in dir(mod)
+                         if isinstance(getattr(mod, n), type)
+                         and all(hasattr(getattr(mod, n), a)
+                                 for a in ("step", "reset", "R"))), None)
+            if twin:
+                self.log(f"[models] WARNING: ecfet/{base}.py defines a twin "
+                         f"({twin}) but is NOT registered - it will not "
+                         f"simulate. Register it (MODEL_SPECS / TWIN_FILE / "
+                         f"RELOAD_MODULES + a va_scan keyword) or move it to "
+                         f"twins/ with a TWIN_SPEC.")
+                self.append_chat("err", f"ecfet/{base}.py looks like a device "
+                                 f"twin but isn't registered, so it won't run. "
+                                 f"Register it or put it in twins/.")
 
     def _check_untwinned_va(self):
         """If any .va has no Python twin, prompt to build one (agent -> twins/)."""
