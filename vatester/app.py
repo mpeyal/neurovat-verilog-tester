@@ -211,8 +211,9 @@ class App:
         self.legend_outside = False   # legend inside (False) / outside (True) canvas
         self.legend_horizontal = False  # legend layout: vertical (False) / horizontal
         self.legend_location = None   # ImPlot anchor (None = ImPlot default corner)
-        self._stdp_view = None        # locked STDP view (xlo,xhi,ylo,yhi) or None
-        self._menu_unfocused = 0      # frames the STDP context menu has lost focus
+        self._plot_menus = []         # [{plot,menu,xaxis,yaxis}] right-click menus
+        self._open_menu = None        # tag of the currently shown plot context menu
+        self._menu_unfocused = 0      # frames the open context menu has lost focus
         self.param_values = {s.key: _defaults_of(s.params_cls)
                              for s in MODEL_SPECS}
         self.gen_values = {}
@@ -599,42 +600,11 @@ class App:
                 self._push_zoom(ax, factor)
 
     def _fit_axes_of(self, axes):
-        if "stdp_x" in axes or "stdp_y" in axes:
-            self._stdp_view = None       # an explicit Fit releases the view lock
         for ax in axes:
             self._zoom_anim.pop(ax, None)
             if dpg.does_item_exist(ax):
                 dpg.set_axis_limits_auto(ax)
                 dpg.fit_axis_data(ax)
-
-    def _apply_stdp_view(self, *_):
-        """Lock the STDP plot to the X (ms) / Y range typed in the Axis range
-        flyout. The user chooses when to lock and when to release (Auto); a new
-        sweep fits to data and does NOT silently re-apply this."""
-        try:
-            xlo = float(dpg.get_value("stdp_xmin"))
-            xhi = float(dpg.get_value("stdp_xmax"))
-            ylo = float(dpg.get_value("stdp_ymin"))
-            yhi = float(dpg.get_value("stdp_ymax"))
-        except (TypeError, ValueError):
-            return
-        if not xhi > xlo:
-            self.log("[plot] View: X 'to' must be greater than X 'from'")
-            return
-        self._zoom_anim.pop("stdp_x", None)
-        self._zoom_anim.pop("stdp_y", None)
-        dpg.set_axis_limits("stdp_x", xlo, xhi)
-        if yhi > ylo:
-            dpg.set_axis_limits("stdp_y", ylo, yhi)
-        else:
-            dpg.set_axis_limits_auto("stdp_y")
-            ylo = yhi = None
-        self._stdp_view = (xlo, xhi, ylo, yhi)
-
-    def _auto_stdp_view(self, *_):
-        """Release the STDP view lock and fit to the data."""
-        self._stdp_view = None
-        self._fit_axes_of(("stdp_x", "stdp_y"))
 
     # per-plot hover labels: (x_name, x_unit, y_name, y_unit); "{unit}" is
     # resolved from the current signal-unit combo at runtime.
@@ -1219,8 +1189,7 @@ class App:
         for t in self.LEGEND_TAGS:
             if dpg.does_item_exist(t):
                 dpg.configure_item(t, show=self.legends_visible)
-        if dpg.does_item_exist("leg_chk_show"):   # keep the menu check in sync
-            dpg.set_value("leg_chk_show", self.legends_visible)
+        self._sync_leg_checks()                   # keep menu checkboxes in sync
         self.log(f"[plot] legends {'shown' if self.legends_visible else 'hidden'}"
                  + ("" if self.legends_visible else
                     " - hover a curve to see its label"))
@@ -1230,8 +1199,7 @@ class App:
         for t in self.LEGEND_TAGS:
             if dpg.does_item_exist(t):
                 dpg.configure_item(t, outside=self.legend_outside)
-        if dpg.does_item_exist("leg_chk_out"):
-            dpg.set_value("leg_chk_out", self.legend_outside)
+        self._sync_leg_checks()
         self.log(f"[plot] legend moved {'outside' if self.legend_outside else 'inside'}"
                  " the plot canvas")
 
@@ -1279,11 +1247,10 @@ class App:
                                         callback=self._on_probe_click)
             dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left,
                                           callback=self._on_probe_release)
-            # ImPlot swallows the plot's own right-click, so the popup's native
-            # mousebutton binding never fires - open it explicitly here. ImGui
-            # still owns the cascade submenus + dismiss once it's shown.
+            # ImPlot swallows a plot's own right-click, so we open each plot's
+            # context menu explicitly from this global handler.
             dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right,
-                                        callback=self._on_stdp_rclick)
+                                        callback=self._on_plot_rclick)
 
         dpg.add_file_dialog(directory_selector=True, show=False, modal=True,
                             callback=self._on_dir_picked, tag="dir_dialog",
@@ -1369,8 +1336,8 @@ class App:
             dpg.add_file_extension(".json", color=(220, 200, 140, 255))
             dpg.add_file_extension(".va", color=(220, 170, 255, 255))
 
-        # the STDP right-click menu is built natively on the plot itself
-        # (see _build_stdp_menu, called from the STDP tab)
+        # each plot's right-click menu is built natively next to its plot
+        # (see _add_plot_menu, called from each tab)
 
         # "Save as..." target picker for the Verilog-A editor
         with dpg.file_dialog(directory_selector=False, show=False, modal=True,
@@ -1771,10 +1738,14 @@ class App:
             dpg.add_text("", tag="designer_summary", color=C_GREEN)
             self._plot_toolbar(("prev_x",), ("prev_y",),
                                probe_tag="probe_prev")
-            with dpg.plot(height=-1, width=-1, tag="preview_plot"):
+            with dpg.plot(height=-1, width=-1, tag="preview_plot",
+                          no_menus=True):
                 dpg.add_plot_legend(tag="preview_plot_leg")
-                dpg.add_plot_axis(dpg.mvXAxis, label="time (s)", tag="prev_x")
-                dpg.add_plot_axis(dpg.mvYAxis, label="amplitude", tag="prev_y")
+                dpg.add_plot_axis(dpg.mvXAxis, label="time (s)", tag="prev_x",
+                                  no_menus=True)
+                dpg.add_plot_axis(dpg.mvYAxis, label="amplitude", tag="prev_y",
+                                  no_menus=True)
+            self._add_plot_menu("preview_plot", "prev_x", "prev_y", x_unit="s")
 
     def _results_tab(self):
         with self._pad(left=8, top=8, bottom=0):
@@ -1783,24 +1754,27 @@ class App:
                                probe_tag="probe_results")
             with dpg.subplots(3, 1, link_all_x=True, width=-1, height=-1,
                               row_ratios=[0.62, 1.0, 1.0]):
-                with dpg.plot(tag="plot_i"):
+                with dpg.plot(tag="plot_i", no_menus=True):
                     dpg.add_plot_legend(tag="plot_i_leg")
                     dpg.add_plot_axis(dpg.mvXAxis, tag="ax_i_x",
-                                      no_tick_labels=True)
+                                      no_tick_labels=True, no_menus=True)
                     dpg.add_plot_axis(dpg.mvYAxis, label="stimulus",
-                                      tag="ax_i_y")
-                with dpg.plot(tag="plot_r"):
+                                      tag="ax_i_y", no_menus=True)
+                with dpg.plot(tag="plot_r", no_menus=True):
                     dpg.add_plot_legend(tag="plot_r_leg")
                     dpg.add_plot_axis(dpg.mvXAxis, tag="ax_r_x",
-                                      no_tick_labels=True)
+                                      no_tick_labels=True, no_menus=True)
                     dpg.add_plot_axis(dpg.mvYAxis, label="R_mem (ohm)",
-                                      tag="ax_r_y")
-                with dpg.plot(tag="plot_g"):
+                                      tag="ax_r_y", no_menus=True)
+                with dpg.plot(tag="plot_g", no_menus=True):
                     dpg.add_plot_legend(tag="plot_g_leg")
                     dpg.add_plot_axis(dpg.mvXAxis, label="time (s)",
-                                      tag="ax_g_x")
+                                      tag="ax_g_x", no_menus=True)
                     dpg.add_plot_axis(dpg.mvYAxis, label="G (uS)",
-                                      tag="ax_g_y")
+                                      tag="ax_g_y", no_menus=True)
+            self._add_plot_menu("plot_i", "ax_i_x", "ax_i_y", x_unit="s")
+            self._add_plot_menu("plot_r", "ax_r_x", "ax_r_y", x_unit="s")
+            self._add_plot_menu("plot_g", "ax_g_x", "ax_g_y", x_unit="s")
 
     def _analysis_tab(self):
         with self._pad(left=8, top=8, bottom=0):
@@ -1814,10 +1788,13 @@ class App:
                             tag="ana_caption")
             dpg.add_text("", tag="ana_text", wrap=940, color=C_TEXT2)
             self._plot_toolbar(("ana_x",), ("ana_y",), probe_tag="probe_ana")
-            with dpg.plot(height=-1, width=-1, tag="ana_plot"):
+            with dpg.plot(height=-1, width=-1, tag="ana_plot", no_menus=True):
                 dpg.add_plot_legend(tag="ana_plot_leg")
-                dpg.add_plot_axis(dpg.mvXAxis, label="pulse #", tag="ana_x")
-                dpg.add_plot_axis(dpg.mvYAxis, label="G (uS)", tag="ana_y")
+                dpg.add_plot_axis(dpg.mvXAxis, label="pulse #", tag="ana_x",
+                                  no_menus=True)
+                dpg.add_plot_axis(dpg.mvYAxis, label="G (uS)", tag="ana_y",
+                                  no_menus=True)
+            self._add_plot_menu("ana_plot", "ana_x", "ana_y")
 
     def _stdp_tab(self):
         with self._pad(left=8, top=8, bottom=0):
@@ -1886,11 +1863,9 @@ class App:
                                   tag="stdp_x", no_menus=True)
                 dpg.add_plot_axis(dpg.mvYAxis, label="dG (uS)", tag="stdp_y",
                                   no_menus=True)
-            # NATIVE right-click context menu, bound straight to the plot. Using
-            # dpg.popup + nested dpg.menu means ImGui owns open / cascade-on-
-            # hover / both-stay-open / correct-position / dismiss - no manual
-            # window, z-order, or hit-test code (all of which were fragile).
-            self._build_stdp_menu()
+            # native right-click menu (copy points + Fit/Zoom/Axis/Legend)
+            self._add_plot_menu("stdp_plot", "stdp_x", "stdp_y",
+                                copy=True, x_unit="ms")
 
     # ---------------- device class + polarization --------------------
 
@@ -2049,11 +2024,13 @@ class App:
                                        callback=self.on_plot_polar)
                     dpg.bind_item_theme(b, self.themes["primary"])
             self._plot_toolbar(("polar_x",), ("polar_y",), probe_tag="probe_polar")
-            with dpg.plot(height=-1, width=-1, tag="polar_plot"):
+            with dpg.plot(height=-1, width=-1, tag="polar_plot", no_menus=True):
                 dpg.add_plot_legend(tag="polar_plot_leg")
                 dpg.add_plot_axis(dpg.mvXAxis, label="gate voltage (V)",
-                                  tag="polar_x")
-                dpg.add_plot_axis(dpg.mvYAxis, label="P (uC/cm^2)", tag="polar_y")
+                                  tag="polar_x", no_menus=True)
+                dpg.add_plot_axis(dpg.mvYAxis, label="P (uC/cm^2)",
+                                  tag="polar_y", no_menus=True)
+            self._add_plot_menu("polar_plot", "polar_x", "polar_y", x_unit="V")
 
     def _source_tab(self):
         with self._pad(left=8, top=8, bottom=0):
@@ -3085,75 +3062,75 @@ class App:
                  "W": "Left", "C": "Center", "E": "Right",
                  "SW": "Bottom-left", "S": "Bottom", "SE": "Bottom-right"}
 
-    def _build_stdp_menu(self):
-        """STDP plot's right-click menu. It's a plain WINDOW (so it opens/closes
-        reliably and never auto-dismisses on its own opening click) holding
-        native nested dpg.menu submenus (which cascade on hover, keep the parent
-        open, and position themselves). It's opened by _on_stdp_rclick and closed
-        by _tick_menu_dismiss when it loses focus."""
-        with dpg.window(tag="stdp_copy_menu", show=False, no_title_bar=True,
-                        no_resize=True, no_move=True, no_collapse=True,
-                        no_scrollbar=True, autosize=True):
-            self._small("COPY POINTS", color=C_ACC)
-            dpg.add_menu_item(label="dt  (delta-T) values", callback=lambda:
-                              self._menu_act(lambda: self._copy_stdp("dt")))
-            dpg.add_menu_item(label="dG  values", callback=lambda:
-                              self._menu_act(lambda: self._copy_stdp("dg")))
-            dpg.add_menu_item(label="dt, dG pairs  (CSV)", callback=lambda:
-                              self._menu_act(lambda: self._copy_stdp("pairs")))
-            dpg.add_separator()
+    def _add_plot_menu(self, plot, xaxis, yaxis, copy=False, x_unit=""):
+        """Attach a native right-click context menu to `plot`. A plain WINDOW
+        (reliable open/close, no auto-dismiss) of nested dpg.menu submenus that
+        cascade on hover and keep the parent open. Opened by _on_plot_rclick,
+        closed by _tick_menu_dismiss. copy=True adds the STDP copy-points items.
+        Registering many plots gives every plot the same Fit/Zoom/Axis/Legend."""
+        menu = plot + "_menu"
+        with dpg.window(tag=menu, show=False, no_title_bar=True, no_resize=True,
+                        no_move=True, no_collapse=True, no_scrollbar=True,
+                        autosize=True):
+            if copy:
+                self._small("COPY POINTS", color=C_ACC)
+                dpg.add_menu_item(label="dt  (delta-T) values", callback=lambda:
+                                  self._menu_act(menu, lambda: self._copy_stdp("dt")))
+                dpg.add_menu_item(label="dG  values", callback=lambda:
+                                  self._menu_act(menu, lambda: self._copy_stdp("dg")))
+                dpg.add_menu_item(label="dt, dG pairs  (CSV)", callback=lambda:
+                                  self._menu_act(menu, lambda: self._copy_stdp("pairs")))
+                dpg.add_separator()
             self._small("VIEW", color=C_ACC)
             dpg.add_menu_item(label="Fit all", callback=lambda: self._menu_act(
-                lambda: self._fit_axes_of(("stdp_x", "stdp_y"))))
+                menu, lambda: self._fit_axes_of((xaxis, yaxis))))
             dpg.add_menu_item(label="Fit X", callback=lambda: self._menu_act(
-                lambda: self._fit_axes_of(("stdp_x",))))
+                menu, lambda: self._fit_axes_of((xaxis,))))
             dpg.add_menu_item(label="Fit Y", callback=lambda: self._menu_act(
-                lambda: self._fit_axes_of(("stdp_y",))))
+                menu, lambda: self._fit_axes_of((yaxis,))))
             dpg.add_menu_item(label="Zoom in", callback=lambda: self._menu_act(
-                lambda: self._zoom_axes(("stdp_x", "stdp_y"), 0.7)))
+                menu, lambda: self._zoom_axes((xaxis, yaxis), 0.7)))
             dpg.add_menu_item(label="Zoom out", callback=lambda: self._menu_act(
-                lambda: self._zoom_axes(("stdp_x", "stdp_y"), 1.45)))
+                menu, lambda: self._zoom_axes((xaxis, yaxis), 1.45)))
             dpg.add_separator()
             with dpg.menu(label="Axis range"):
-                self._build_axis_menu()
+                self._build_axis_menu(menu, xaxis, yaxis, x_unit)
             with dpg.menu(label="Legend"):
-                self._build_legend_menu()
+                self._build_legend_menu(menu)
             dpg.add_separator()
             dpg.add_menu_item(label="Clear A / B probes", callback=lambda:
-                              self._menu_act(lambda:
-                                             self._clear_probes(("stdp_plot",))))
+                              self._menu_act(menu, lambda: self._clear_probes((plot,))))
         if "stdp_menu" in self.themes:
-            dpg.bind_item_theme("stdp_copy_menu", self.themes["stdp_menu"])
+            dpg.bind_item_theme(menu, self.themes["stdp_menu"])
+        self._plot_menus.append({"plot": plot, "menu": menu,
+                                 "xaxis": xaxis, "yaxis": yaxis})
 
-    def _menu_act(self, fn):
-        """Run a one-shot menu action, then close the menu."""
+    def _menu_act(self, menu, fn):
+        """Run a one-shot menu action, then close that menu."""
         fn()
-        if dpg.does_item_exist("stdp_copy_menu"):
-            dpg.configure_item("stdp_copy_menu", show=False)
+        if dpg.does_item_exist(menu):
+            dpg.configure_item(menu, show=False)
+        if self._open_menu == menu:
+            self._open_menu = None
 
-    def _on_stdp_rclick(self, sender, app_data):
-        """Open the context menu at the cursor on a right-click over the plot.
-        ImPlot swallows the plot's own right-click, so we open the menu window
-        here and focus it; _tick_menu_dismiss closes it when focus is lost."""
-        if not dpg.does_item_exist("stdp_copy_menu"):
-            return
-        active = (not dpg.does_item_exist("center_tabs")
-                  or dpg.get_value("center_tabs") == "tab_stdp")
-        if active and dpg.is_item_hovered("stdp_plot"):
-            mx, my = dpg.get_mouse_pos(local=False)
-            vw = dpg.get_viewport_client_width()
-            vh = dpg.get_viewport_client_height()
-            px, py = min(int(mx), vw - 230), min(int(my), vh - 320)
-            dpg.configure_item("stdp_copy_menu", show=True,
-                               pos=[max(0, px), max(0, py)])
-            dpg.focus_item("stdp_copy_menu")
-            self._menu_unfocused = 0
-
-    # one tagged child per cascade submenu - it only RENDERS (is_item_visible)
-    # while that submenu's dropdown is open, which is how we know to keep the
-    # parent menu alive (a submenu dropdown is its own ImGui popup, so it steals
-    # focus/hover from the menu window)
-    _SUBMENU_PROBES = ("stdp_xmin", "leg_chk_show")
+    def _on_plot_rclick(self, sender, app_data):
+        """Right-click over any registered plot opens THAT plot's context menu at
+        the cursor (ImPlot swallows the plot's own right-click). Only the plot on
+        the active tab is hovered, so this naturally targets the right one."""
+        for m in self._plot_menus:
+            menu, plot = m["menu"], m["plot"]
+            if dpg.does_item_exist(menu) and dpg.is_item_hovered(plot):
+                self._prefill_axis(menu, m["xaxis"], m["yaxis"])
+                mx, my = dpg.get_mouse_pos(local=False)
+                vw = dpg.get_viewport_client_width()
+                vh = dpg.get_viewport_client_height()
+                px = max(0, min(int(mx), vw - 230))
+                py = max(0, min(int(my), vh - 340))
+                dpg.configure_item(menu, show=True, pos=[px, py])
+                dpg.focus_item(menu)
+                self._open_menu = menu
+                self._menu_unfocused = 0
+                return
 
     @staticmethod
     def _item_visible(tag):
@@ -3167,65 +3144,116 @@ class App:
             return False
 
     def _tick_menu_dismiss(self):
-        """Close the STDP context menu only once neither it NOR any of its open
-        submenus is focused / hovered / showing (short grace for transitions)."""
-        if not dpg.does_item_exist("stdp_copy_menu") \
-                or not dpg.is_item_shown("stdp_copy_menu"):
+        """Close the open context menu once neither it NOR an open submenu of it
+        is focused / hovered (a short grace tolerates focus transitions). A
+        submenu is detected by one of its rendered child widgets - the axis-range
+        input and the legend checkbox - reporting 'visible'."""
+        menu = self._open_menu
+        if not menu or not dpg.does_item_exist(menu) \
+                or not dpg.is_item_shown(menu):
             return
-        submenu_open = any(self._item_visible(t) for t in self._SUBMENU_PROBES)
-        if (submenu_open or dpg.is_item_focused("stdp_copy_menu")
-                or dpg.is_item_hovered("stdp_copy_menu")):
+        submenu_open = (self._item_visible(menu + "_xmin")
+                        or self._item_visible(menu + "_leg_show"))
+        if (submenu_open or dpg.is_item_focused(menu)
+                or dpg.is_item_hovered(menu)):
             self._menu_unfocused = 0
             return
         self._menu_unfocused += 1
         if self._menu_unfocused >= 4:
-            dpg.configure_item("stdp_copy_menu", show=False)
+            dpg.configure_item(menu, show=False)
+            self._open_menu = None
 
-    def _build_axis_menu(self):
-        """'Axis range' submenu: type a range + Lock view (inputs/buttons don't
+    def _prefill_axis(self, menu, xaxis, yaxis):
+        """Seed the Axis-range inputs with the plot's CURRENT view, so 'Lock
+        view' locks what's on screen (and the user edits from there)."""
+        for axis, lo, hi in ((xaxis, "_xmin", "_xmax"), (yaxis, "_ymin", "_ymax")):
+            try:
+                lim = dpg.get_axis_limits(axis)
+            except Exception:
+                continue
+            if lim and len(lim) == 2 and dpg.does_item_exist(menu + lo):
+                dpg.set_value(menu + lo, round(float(lim[0]), 6))
+                dpg.set_value(menu + hi, round(float(lim[1]), 6))
+
+    def _build_axis_menu(self, menu, xaxis, yaxis, x_unit=""):
+        """'Axis range' submenu: edit a range + Lock view (inputs/buttons don't
         close the submenu, so the user can set X and Y then lock)."""
         self._small("Lock the view to a range; Auto releases it.", color=C_MUTED)
+        def _lock(*_):
+            self._apply_view(menu, xaxis, yaxis)
         with dpg.group(horizontal=True):
             self._small("X")
-            dpg.add_input_float(tag="stdp_xmin", default_value=-100.0, width=72,
-                                step=0, format="%.4g", on_enter=True,
-                                callback=self._apply_stdp_view)
+            dpg.add_input_float(tag=menu + "_xmin", width=72, step=0,
+                                format="%.4g", on_enter=True, callback=_lock)
             self._small("to")
-            dpg.add_input_float(tag="stdp_xmax", default_value=100.0, width=72,
-                                step=0, format="%.4g", on_enter=True,
-                                callback=self._apply_stdp_view)
-            self._small("ms")
+            dpg.add_input_float(tag=menu + "_xmax", width=72, step=0,
+                                format="%.4g", on_enter=True, callback=_lock)
+            self._small(x_unit)
         with dpg.group(horizontal=True):
             self._small("Y")
-            dpg.add_input_float(tag="stdp_ymin", default_value=0.0, width=72,
-                                step=0, format="%.4g", on_enter=True,
-                                callback=self._apply_stdp_view)
+            dpg.add_input_float(tag=menu + "_ymin", width=72, step=0,
+                                format="%.4g", on_enter=True, callback=_lock)
             self._small("to")
-            dpg.add_input_float(tag="stdp_ymax", default_value=0.0, width=72,
-                                step=0, format="%.4g", on_enter=True,
-                                callback=self._apply_stdp_view)
+            dpg.add_input_float(tag=menu + "_ymax", width=72, step=0,
+                                format="%.4g", on_enter=True, callback=_lock)
             self._small("(0 to 0 = auto Y)", color=C_MUTED)
         with dpg.group(horizontal=True):
-            dpg.add_button(label="Lock view", callback=self._apply_stdp_view)
-            dpg.add_button(label="Auto", callback=self._auto_stdp_view)
+            dpg.add_button(label="Lock view", callback=_lock)
+            dpg.add_button(label="Auto", callback=lambda *_:
+                           self._auto_view(menu, xaxis, yaxis))
 
-    def _build_legend_menu(self):
+    def _apply_view(self, menu, xaxis, yaxis):
+        """Lock the plot to the X/Y range in `menu`'s Axis-range inputs."""
+        try:
+            xlo = float(dpg.get_value(menu + "_xmin"))
+            xhi = float(dpg.get_value(menu + "_xmax"))
+            ylo = float(dpg.get_value(menu + "_ymin"))
+            yhi = float(dpg.get_value(menu + "_ymax"))
+        except (TypeError, ValueError):
+            return
+        if not xhi > xlo:
+            self.log("[plot] Axis range: X 'to' must be greater than X 'from'")
+            return
+        self._zoom_anim.pop(xaxis, None)
+        self._zoom_anim.pop(yaxis, None)
+        dpg.set_axis_limits(xaxis, xlo, xhi)
+        if yhi > ylo:
+            dpg.set_axis_limits(yaxis, ylo, yhi)
+        else:
+            dpg.set_axis_limits_auto(yaxis)
+
+    def _auto_view(self, menu, xaxis, yaxis):
+        """Release the lock and fit `menu`'s plot to its data."""
+        self._fit_axes_of((xaxis, yaxis))
+
+    def _build_legend_menu(self, menu):
         """'Legend' submenu. Uses checkboxes (not check menu_items) so (a) they
         report a 'visible' state - which is how _tick_menu_dismiss knows this
         submenu is open - and (b) toggling one doesn't close the submenu, so the
         user can flip several at once. Position is a nested anchor submenu."""
-        dpg.add_checkbox(label="Show legend", default_value=True,
-                         tag="leg_chk_show", callback=self._toggle_legends)
-        dpg.add_checkbox(label="Outside canvas", default_value=False,
-                         tag="leg_chk_out", callback=self._toggle_legend_outside)
-        dpg.add_checkbox(label="Horizontal layout", default_value=False,
-                         tag="leg_chk_horiz",
+        dpg.add_checkbox(label="Show legend", default_value=self.legends_visible,
+                         tag=menu + "_leg_show", callback=self._toggle_legends)
+        dpg.add_checkbox(label="Outside canvas", default_value=self.legend_outside,
+                         tag=menu + "_leg_out", callback=self._toggle_legend_outside)
+        dpg.add_checkbox(label="Horizontal layout",
+                         default_value=self.legend_horizontal,
+                         tag=menu + "_leg_horiz",
                          callback=self._toggle_legend_horizontal)
         with dpg.menu(label="Position"):
             for short, const in self._LEGEND_GRID:
                 loc = getattr(dpg, const, 0)
                 dpg.add_menu_item(label=self._LOC_NAME[short], user_data=loc,
                                   callback=self._on_legend_pos)
+
+    def _sync_leg_checks(self):
+        """Mirror the current legend state into every plot menu's checkboxes."""
+        for m in self._plot_menus:
+            for suf, val in ((("_leg_show"), self.legends_visible),
+                             (("_leg_out"), self.legend_outside),
+                             (("_leg_horiz"), self.legend_horizontal)):
+                t = m["menu"] + suf
+                if dpg.does_item_exist(t):
+                    dpg.set_value(t, val)
 
     def _on_legend_pos(self, sender, app_data, loc):
         """Snap every legend to the picked anchor."""
@@ -3239,8 +3267,7 @@ class App:
         for t in self.LEGEND_TAGS:
             if dpg.does_item_exist(t):
                 dpg.configure_item(t, horizontal=self.legend_horizontal)
-        if dpg.does_item_exist("leg_chk_horiz"):
-            dpg.set_value("leg_chk_horiz", self.legend_horizontal)
+        self._sync_leg_checks()
         self.log("[plot] legend layout "
                  + ("horizontal" if self.legend_horizontal else "vertical"))
 
