@@ -101,18 +101,16 @@ while time.time() - t0 < 120:
         break
 assert app._stdp_series, "STDP sweep produced no curves"
 assert app._stdp_summary, "no STDP metrics"
-# scatter series carries every real point; the line series has a NaN gap-break
-_scatter = [s for s in app._stdp_series
-            if dpg.get_item_configuration(s).get("label", "").startswith("##")][0]
-stdp_data = dpg.get_value(_scatter)
+# ONE line-series-with-markers per curve: carries every real point AND a NaN
+# gap-break at dt=0 (so a single legend entry toggles line + point markers)
+_line = app._stdp_series[0]
+stdp_data = dpg.get_value(_line)
+_ly = stdp_data[1]
 n_pts = len(app._stdp_ctx["dts"])
-assert len(stdp_data[0]) == n_pts, \
-    f"expected {n_pts} sweep points, got {len(stdp_data[0])}"
-assert any(abs(v) > 0 for v in stdp_data[1]), "STDP curve is all zeros"
-# the line series must contain a NaN break so the two branches don't join
-_line = [s for s in app._stdp_series
-         if not dpg.get_item_configuration(s).get("label", "").startswith("##")][0]
-_ly = dpg.get_value(_line)[1]
+_real = sum(1 for v in _ly if v == v)          # non-NaN = real swept points
+assert _real == n_pts, f"expected {n_pts} sweep points, got {_real}"
+assert any((v == v) and abs(v) > 0 for v in _ly), "STDP curve is all zeros"
+# the series must contain a NaN break so the two branches don't join
 assert any(v != v for v in _ly), "STDP line has no NaN gap-break"
 for _ in range(3):
     dpg.render_dearpygui_frame()
@@ -167,10 +165,9 @@ print("STDP drilldown:", status.lstrip("● ").encode("ascii", "replace").decode
 # drilldown must only fire ON a point, not in empty canvas
 import vatester.app as _m
 _dts = app._stdp_ctx["dts"]
-_series = [s for s in app._stdp_series
-           if not dpg.get_item_configuration(s).get("label", "").startswith("##")][0]
+_series = app._stdp_series[0]
 _d = dpg.get_value(_series)
-_xj, _yj = float(_d[0][5]), float(_d[1][5])     # a real point
+_xj, _yj = float(_d[0][5]), float(_d[1][5])     # a real point (neg branch)
 y0a, y1a = dpg.get_axis_limits("stdp_y")
 app.run_status_before = dpg.get_item_configuration("run_status")["label"]
 called = {"n": 0}

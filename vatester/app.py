@@ -205,6 +205,14 @@ class App:
         self.editor_remote = None   # (lib, cell, view) when the buffer is remote
         self.device_class = "ECFET"  # ECFET (dG, current) | FeFET (dVt, voltage)
         self._untwinned_prompted = None   # last set of .va shown in the prompt
+        self.sweep_specs = []      # [{param,type,...}] parametric sweep specs
+        self.SWEEP_CAP = 24        # max overlaid curves (Cartesian product)
+        self.legends_visible = True   # show/hide all plot legends (toolbar toggle)
+        self.legend_outside = False   # legend inside (False) / outside (True) canvas
+        self.legend_horizontal = False  # legend layout: vertical (False) / horizontal
+        self.legend_location = None   # ImPlot anchor (None = ImPlot default corner)
+        self._stdp_view = None        # locked STDP view (xlo,xhi,ylo,yhi) or None
+        self._menu_unfocused = 0      # frames the STDP context menu has lost focus
         self.param_values = {s.key: _defaults_of(s.params_cls)
                              for s in MODEL_SPECS}
         self.gen_values = {}
@@ -249,7 +257,6 @@ class App:
         self._stdp_summary = []
         self._stdp_dts_ms = []     # last sweep's dt points (ms), for copy menu
         self._stdp_curves = {}     # last sweep's {model: [dG_uS]}, for copy menu
-        self._menu_size = (216, 300)   # STDP context-menu size (measured in build)
         self._tip_frame = -10
         self._hover_ann = {}       # plot -> in-canvas hover bubble annotation
         self._hover_cache = {}     # plot -> [(label, xs, ys)] for fast hover
@@ -461,6 +468,18 @@ class App:
                    ("mvStyleVar_WindowBorderSize", 1),
                    ("mvStyleVar_ItemSpacing", (8, 3))])
 
+        # line-series-with-markers: bound to STDP curves so a single legend
+        # entry controls BOTH the connecting line and the point markers (the
+        # marker inherits the line's auto-assigned colour).
+        with dpg.theme() as _mk:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_style(dpg.mvPlotStyleVar_Marker,
+                                    dpg.mvPlotMarker_Circle,
+                                    category=dpg.mvThemeCat_Plots)
+                dpg.add_theme_style(dpg.mvPlotStyleVar_MarkerSize, 3.0,
+                                    category=dpg.mvThemeCat_Plots)
+        self.themes["markers"] = _mk
+
     # ---- tiny helpers ------------------------------------------------
 
     def _small(self, text, color=C_MUTED, parent=0, wrap=0, tag=0):
@@ -580,11 +599,42 @@ class App:
                 self._push_zoom(ax, factor)
 
     def _fit_axes_of(self, axes):
+        if "stdp_x" in axes or "stdp_y" in axes:
+            self._stdp_view = None       # an explicit Fit releases the view lock
         for ax in axes:
             self._zoom_anim.pop(ax, None)
             if dpg.does_item_exist(ax):
                 dpg.set_axis_limits_auto(ax)
                 dpg.fit_axis_data(ax)
+
+    def _apply_stdp_view(self, *_):
+        """Lock the STDP plot to the X (ms) / Y range typed in the Axis range
+        flyout. The user chooses when to lock and when to release (Auto); a new
+        sweep fits to data and does NOT silently re-apply this."""
+        try:
+            xlo = float(dpg.get_value("stdp_xmin"))
+            xhi = float(dpg.get_value("stdp_xmax"))
+            ylo = float(dpg.get_value("stdp_ymin"))
+            yhi = float(dpg.get_value("stdp_ymax"))
+        except (TypeError, ValueError):
+            return
+        if not xhi > xlo:
+            self.log("[plot] View: X 'to' must be greater than X 'from'")
+            return
+        self._zoom_anim.pop("stdp_x", None)
+        self._zoom_anim.pop("stdp_y", None)
+        dpg.set_axis_limits("stdp_x", xlo, xhi)
+        if yhi > ylo:
+            dpg.set_axis_limits("stdp_y", ylo, yhi)
+        else:
+            dpg.set_axis_limits_auto("stdp_y")
+            ylo = yhi = None
+        self._stdp_view = (xlo, xhi, ylo, yhi)
+
+    def _auto_stdp_view(self, *_):
+        """Release the STDP view lock and fit to the data."""
+        self._stdp_view = None
+        self._fit_axes_of(("stdp_x", "stdp_y"))
 
     # per-plot hover labels: (x_name, x_unit, y_name, y_unit); "{unit}" is
     # resolved from the current signal-unit combo at runtime.
@@ -628,6 +678,8 @@ class App:
             if not val or len(val) < 2 or not val[0]:
                 continue
             for x, y in zip(val[0], val[1]):
+                if y != y:                       # NaN gap-break point
+                    continue
                 d = ((x - mx) / xs_span) ** 2 + ((y - my) / ys_span) ** 2
                 if best is None or d < best[0]:
                     best = (d, float(x), float(y), lbl)
@@ -840,7 +892,11 @@ class App:
             return
         self._hover_last = (plot, mx, my)
         best = None
+        labels = set()
         for lbl, xs, ys in self._get_hover_data(plot):
+            cl = self._clean_label(lbl)
+            if cl:
+                labels.add(cl)
             cand = self._nearest_on_series(xs, ys, mx, my, xs_span, ys_span)
             if cand is not None and (best is None or cand[0] < best[0]):
                 best = (cand[0], cand[1], cand[2], lbl)
@@ -857,7 +913,12 @@ class App:
             "unit_combo") else ""
         xunit = xunit.replace("{unit}", unit)
         yunit = yunit.replace("{unit}", unit)
-        text = (f"{yname} = {y:.4g} {yunit}".rstrip() + "\n"
+        # identify the curve (its legend label) when there are several or the
+        # legend is hidden - so a hidden legend still tells you which is which
+        cl = self._clean_label(lbl)
+        head = (cl + "\n") if (cl and (not self.legends_visible
+                                       or len(labels) > 1)) else ""
+        text = (head + f"{yname} = {y:.4g} {yunit}".rstrip() + "\n"
                 + f"{xname} = {x:.4g} {xunit}".rstrip())
         self._show_hover_bubble(plot, x, y, text)
         self._tip_frame = dpg.get_frame_count()
@@ -1134,10 +1195,53 @@ class App:
                            callback=self._on_fit_btn)
             dpg.add_button(label=" Fit Y ", small=True, user_data=yaxes,
                            callback=self._on_fit_btn)
+            lb = dpg.add_button(label=" Legend ", small=True,
+                                callback=self._toggle_legends)
+            with dpg.tooltip(lb):
+                dpg.add_text("Show/hide the legend (when hidden, hover a curve "
+                             "to see its label). Click a legend entry to "
+                             "hide/show that single curve.")
+            ob = dpg.add_button(label=" Leg out ", small=True,
+                                callback=self._toggle_legend_outside)
+            with dpg.tooltip(ob):
+                dpg.add_text("Move the legend outside / inside the plot canvas "
+                             "(a big legend can cover the curves).")
             self._small("wheel zoom · drag pan · dbl-click fit · "
                         "A / B then click = place probe · C = clear")
         if probe_tag:
             self._small("", tag=probe_tag, color=(126, 170, 255))
+
+    LEGEND_TAGS = ("preview_plot_leg", "plot_i_leg", "plot_r_leg", "plot_g_leg",
+                   "ana_plot_leg", "stdp_plot_leg", "polar_plot_leg")
+
+    def _toggle_legends(self, *_):
+        self.legends_visible = not self.legends_visible
+        for t in self.LEGEND_TAGS:
+            if dpg.does_item_exist(t):
+                dpg.configure_item(t, show=self.legends_visible)
+        if dpg.does_item_exist("leg_chk_show"):   # keep the menu check in sync
+            dpg.set_value("leg_chk_show", self.legends_visible)
+        self.log(f"[plot] legends {'shown' if self.legends_visible else 'hidden'}"
+                 + ("" if self.legends_visible else
+                    " - hover a curve to see its label"))
+
+    def _toggle_legend_outside(self, *_):
+        self.legend_outside = not self.legend_outside
+        for t in self.LEGEND_TAGS:
+            if dpg.does_item_exist(t):
+                dpg.configure_item(t, outside=self.legend_outside)
+        if dpg.does_item_exist("leg_chk_out"):
+            dpg.set_value("leg_chk_out", self.legend_outside)
+        self.log(f"[plot] legend moved {'outside' if self.legend_outside else 'inside'}"
+                 " the plot canvas")
+
+    @staticmethod
+    def _clean_label(lbl):
+        """Strip the '##'/'##pts_' prefixes used to hide helper series."""
+        s = (lbl or "").lstrip("#")
+        if s.startswith("pts_"):
+            s = s[4:]
+        return s.strip()
 
     # =================================================================
     # UI construction
@@ -1175,12 +1279,11 @@ class App:
                                         callback=self._on_probe_click)
             dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left,
                                           callback=self._on_probe_release)
-            # STDP copy menu: right-click over the plot (labels included) opens
-            # it; a left-click elsewhere dismisses it
+            # ImPlot swallows the plot's own right-click, so the popup's native
+            # mousebutton binding never fires - open it explicitly here. ImGui
+            # still owns the cascade submenus + dismiss once it's shown.
             dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right,
                                         callback=self._on_stdp_rclick)
-            dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Left,
-                                        callback=self._dismiss_copy_menu)
 
         dpg.add_file_dialog(directory_selector=True, show=False, modal=True,
                             callback=self._on_dir_picked, tag="dir_dialog",
@@ -1266,27 +1369,8 @@ class App:
             dpg.add_file_extension(".json", color=(220, 200, 140, 255))
             dpg.add_file_extension(".va", color=(220, 170, 255, 255))
 
-        # right-click context menu for the STDP plot (shown at the cursor by
-        # _on_stdp_rclick when the right button is pressed over the plot rect,
-        # axis labels included)
-        with dpg.window(tag="stdp_copy_menu", show=False, no_title_bar=True,
-                        no_resize=True, no_move=True, no_collapse=True,
-                        no_scrollbar=True, autosize=True):
-            self._small("COPY POINTS", color=C_ACC)
-            self._menu_row("dt  (delta-T) values", "copy_dt")
-            self._menu_row("dG  values", "copy_dg")
-            self._menu_row("dt, dG pairs  (CSV)", "copy_pairs")
-            dpg.add_separator()
-            self._small("VIEW", color=C_ACC)
-            self._menu_row("Fit all", "fit")
-            self._menu_row("Fit X", "fit_x")
-            self._menu_row("Fit Y", "fit_y")
-            self._menu_row("Zoom in", "zoom_in")
-            self._menu_row("Zoom out", "zoom_out")
-            dpg.add_separator()
-            self._menu_row("Clear A / B probes", "clear_probes")
-        if "stdp_menu" in self.themes:
-            dpg.bind_item_theme("stdp_copy_menu", self.themes["stdp_menu"])
+        # the STDP right-click menu is built natively on the plot itself
+        # (see _build_stdp_menu, called from the STDP tab)
 
         # "Save as..." target picker for the Verilog-A editor
         with dpg.file_dialog(directory_selector=False, show=False, modal=True,
@@ -1322,22 +1406,74 @@ class App:
             dpg.add_button(label="Not now", callback=lambda: dpg.configure_item(
                 "untwin_modal", show=False))
 
+        # Parametric Sweep dialog (Virtuoso-style): manage per-variable sweep
+        # specs (From/To, Center/Span%, explicit Values) in engineering units
+        with dpg.window(label="Parametric Sweep", tag="sweep_dialog",
+                        modal=True, show=False, no_resize=False, width=580,
+                        height=460):
+            self._small("SWEEP VARIABLES", color=C_ACC)
+            with dpg.child_window(tag="sweep_spec_list", height=120,
+                                  border=True):
+                pass
+            dpg.add_separator()
+            self._small("ADD / EDIT A VARIABLE", color=C_ACC)
+            with dpg.group(horizontal=True):
+                self._caption("Parameter")
+                dpg.add_combo([], tag="sw_param", width=160)
+                self._caption("Sweep type")
+                dpg.add_combo(["From/To", "Center/Span%", "Values"],
+                              default_value="From/To", tag="sw_type", width=130,
+                              callback=self._on_sw_type)
+            with dpg.group(tag="sw_range_row"):
+                with dpg.group(horizontal=True):
+                    self._caption("From")
+                    dpg.add_input_text(tag="sw_from", width=80, hint="4u")
+                    self._caption("To")
+                    dpg.add_input_text(tag="sw_to", width=80, hint="12u")
+                    self._caption("Step type")
+                    dpg.add_combo(["Linear", "Log", "Auto"],
+                                  default_value="Linear", tag="sw_steptype",
+                                  width=80)
+                    self._caption("Total steps")
+                    dpg.add_input_int(tag="sw_steps", default_value=5, width=70,
+                                      step=0, min_value=2, min_clamped=True)
+            with dpg.group(tag="sw_center_row", show=False):
+                with dpg.group(horizontal=True):
+                    self._caption("Center")
+                    dpg.add_input_text(tag="sw_center", width=80, hint="8u")
+                    self._caption("Span %")
+                    dpg.add_input_text(tag="sw_span", width=70, hint="50")
+                    self._caption("Total steps")
+                    dpg.add_input_int(tag="sw_csteps", default_value=5, width=70,
+                                      step=0, min_value=2, min_clamped=True)
+            with dpg.group(tag="sw_values_row", show=False):
+                with dpg.group(horizontal=True):
+                    self._caption("Values")
+                    dpg.add_input_text(tag="sw_values", width=-1,
+                                       hint="4u, 8u, 12u")
+            with dpg.group(horizontal=True):
+                ba = dpg.add_button(label="Add / Update",
+                                    callback=self._on_sweep_spec_add)
+                dpg.bind_item_theme(ba, self.themes["primary"])
+                dpg.add_button(label="Delete selected",
+                               callback=self._on_sweep_spec_delete)
+            self._small("engineering units OK:  4u = 4e-6,  3m = 3e-3,  "
+                        "100k = 1e5.   Run / Plot STDP / Plot P-V overlay one "
+                        "curve per value (2+ variables = a grid).", wrap=540)
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                bo = dpg.add_button(label="OK", width=80,
+                                    callback=self._on_sweep_ok)
+                dpg.bind_item_theme(bo, self.themes["primary"])
+                dpg.add_button(label="Cancel", width=80,
+                               callback=self._on_sweep_cancel)
+
         dpg.create_viewport(title=APP_TITLE, width=1600, height=980,
                             min_width=1160, min_height=720)
         dpg.set_viewport_resize_callback(self._on_resize)
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("main", True)
-
-        # measure the context menu once so it can be kept on-screen when opened
-        # near an edge (autosize windows only report a size after rendering)
-        dpg.configure_item("stdp_copy_menu", show=True, pos=[0, 0])
-        for _ in range(3):
-            dpg.render_dearpygui_frame()
-        ms = dpg.get_item_rect_size("stdp_copy_menu") or [0, 0]
-        if ms and ms[0] > 0:
-            self._menu_size = (int(ms[0]), int(ms[1]))
-        dpg.configure_item("stdp_copy_menu", show=False)
 
         self.rescan_va(startup=True)
         self.rebuild_param_panel()
@@ -1375,6 +1511,8 @@ class App:
             with dpg.menu(label="Run"):
                 dpg.add_menu_item(label="Run simulation  (F5)",
                                   callback=self.on_run)
+                dpg.add_menu_item(label="Parametric Sweep...",
+                                  callback=self.on_open_sweep_dialog)
                 dpg.add_menu_item(label="Fit plot axes", callback=self.fit_axes)
                 dpg.add_separator()
                 dpg.add_text("Analyze quantity:")
@@ -1634,7 +1772,7 @@ class App:
             self._plot_toolbar(("prev_x",), ("prev_y",),
                                probe_tag="probe_prev")
             with dpg.plot(height=-1, width=-1, tag="preview_plot"):
-                dpg.add_plot_legend()
+                dpg.add_plot_legend(tag="preview_plot_leg")
                 dpg.add_plot_axis(dpg.mvXAxis, label="time (s)", tag="prev_x")
                 dpg.add_plot_axis(dpg.mvYAxis, label="amplitude", tag="prev_y")
 
@@ -1646,19 +1784,19 @@ class App:
             with dpg.subplots(3, 1, link_all_x=True, width=-1, height=-1,
                               row_ratios=[0.62, 1.0, 1.0]):
                 with dpg.plot(tag="plot_i"):
-                    dpg.add_plot_legend()
+                    dpg.add_plot_legend(tag="plot_i_leg")
                     dpg.add_plot_axis(dpg.mvXAxis, tag="ax_i_x",
                                       no_tick_labels=True)
                     dpg.add_plot_axis(dpg.mvYAxis, label="stimulus",
                                       tag="ax_i_y")
                 with dpg.plot(tag="plot_r"):
-                    dpg.add_plot_legend()
+                    dpg.add_plot_legend(tag="plot_r_leg")
                     dpg.add_plot_axis(dpg.mvXAxis, tag="ax_r_x",
                                       no_tick_labels=True)
                     dpg.add_plot_axis(dpg.mvYAxis, label="R_mem (ohm)",
                                       tag="ax_r_y")
                 with dpg.plot(tag="plot_g"):
-                    dpg.add_plot_legend()
+                    dpg.add_plot_legend(tag="plot_g_leg")
                     dpg.add_plot_axis(dpg.mvXAxis, label="time (s)",
                                       tag="ax_g_x")
                     dpg.add_plot_axis(dpg.mvYAxis, label="G (uS)",
@@ -1677,7 +1815,7 @@ class App:
             dpg.add_text("", tag="ana_text", wrap=940, color=C_TEXT2)
             self._plot_toolbar(("ana_x",), ("ana_y",), probe_tag="probe_ana")
             with dpg.plot(height=-1, width=-1, tag="ana_plot"):
-                dpg.add_plot_legend()
+                dpg.add_plot_legend(tag="ana_plot_leg")
                 dpg.add_plot_axis(dpg.mvXAxis, label="pulse #", tag="ana_x")
                 dpg.add_plot_axis(dpg.mvYAxis, label="G (uS)", tag="ana_y")
 
@@ -1699,9 +1837,9 @@ class App:
                 # probe amplitude keeps the +/- window symmetric (the lock-in
                 # is per-spike, so amplitude doesn't change the window height).
                 for tag, cap, default, w in (
-                        ("stdp_amp_pre", "PRE AMP", -20.0, 84),
-                        ("stdp_amp_post", "POST AMP", 20.0, 84),
-                        ("stdp_width_ms", "WIDTH (ms)", 5.0, 84),
+                        ("stdp_amp_pre", "PRE AMP", -50.0, 84),
+                        ("stdp_amp_post", "POST AMP", 50.0, 84),
+                        ("stdp_width_ms", "WIDTH (ms)", 10.0, 84),
                         ("stdp_range_ms", "DT RANGE (+-ms)", 1800.0, 96),
                         ("stdp_settle_ms", "SETTLE (ms)", 1000.0, 90)):
                     with dpg.group():
@@ -1739,18 +1877,20 @@ class App:
                              "RETAINED change locked in by the timing.")
             self._plot_toolbar(("stdp_x",), ("stdp_y",),
                                probe_tag="probe_stdp")
-            with dpg.plot(height=-1, width=-1, tag="stdp_plot"):
-                dpg.add_plot_legend()
-                # no_menus frees the right mouse button from ImPlot's default
-                # axis context menu so our copy menu can use it (a popup can't
-                # bind to an axis, so the copy menu is driven from a global
-                # right-click handler that hit-tests the whole plot rect -
-                # including the axis-label margins; see _on_stdp_rclick)
+            # axis bounds + legend live in the right-click menu (Axis range /
+            # Legend submenus)
+            with dpg.plot(height=-1, width=-1, tag="stdp_plot", no_menus=True):
+                dpg.add_plot_legend(tag="stdp_plot_leg")
                 dpg.add_plot_axis(dpg.mvXAxis,
                                   label="dt = t_post - t_pre (ms)",
                                   tag="stdp_x", no_menus=True)
                 dpg.add_plot_axis(dpg.mvYAxis, label="dG (uS)", tag="stdp_y",
                                   no_menus=True)
+            # NATIVE right-click context menu, bound straight to the plot. Using
+            # dpg.popup + nested dpg.menu means ImGui owns open / cascade-on-
+            # hover / both-stay-open / correct-position / dismiss - no manual
+            # window, z-order, or hit-test code (all of which were fragile).
+            self._build_stdp_menu()
 
     # ---------------- device class + polarization --------------------
 
@@ -1837,7 +1977,7 @@ class App:
     def on_plot_polar(self, *_):
         if self.sim_running:
             return
-        models = [m for m in self._checked_models()
+        models = [m for m in self._sweep_models()       # expands over the sweep
                   if hasattr(m, "P") or getattr(m, "POLAR_OBS", None)]
         if not models:
             self.log("[polar] select a FeFET model (no polarization observable)")
@@ -1910,7 +2050,7 @@ class App:
                     dpg.bind_item_theme(b, self.themes["primary"])
             self._plot_toolbar(("polar_x",), ("polar_y",), probe_tag="probe_polar")
             with dpg.plot(height=-1, width=-1, tag="polar_plot"):
-                dpg.add_plot_legend()
+                dpg.add_plot_legend(tag="polar_plot_leg")
                 dpg.add_plot_axis(dpg.mvXAxis, label="gate voltage (V)",
                                   tag="polar_x")
                 dpg.add_plot_axis(dpg.mvYAxis, label="P (uC/cm^2)", tag="polar_y")
@@ -2300,6 +2440,7 @@ class App:
                                              width=-1, format="%.6g", step=0,
                                              callback=self._on_param_edit,
                                              user_data=(spec.key, name, False))
+        self._prune_sweeps()      # drop sweeps on params not in this model
 
     def _on_param_edit(self, sender, value, user_data):
         key, name, is_int = user_data
@@ -2430,14 +2571,250 @@ class App:
     # =================================================================
 
     def _checked_models(self):
+        return self._build_models()
+
+    def _build_models(self, overrides=None, name_suffix=""):
+        """Enabled models built from the panel params, optionally with a few
+        parameter overrides (for a sweep) and a label suffix on each .name."""
         models = []
         for key in self._enabled_keys():
             s = SPEC_BY_KEY[key]
+            pv = dict(self.param_values[key])
+            if overrides:
+                for p, v in overrides.items():
+                    if p in pv:
+                        pv[p] = v
             try:
-                models.append(s.cls(s.params_cls(**self.param_values[key])))
+                m = s.cls(s.params_cls(**pv))
+                if name_suffix:
+                    m.name = f"{m.name} [{name_suffix}]"
+                models.append(m)
             except Exception as e:
                 self.log(f"[params] {key}: {e}")
         return models
+
+    # ---- parameter sweep (Virtuoso-style specs, engineering units) -------
+
+    _SI_MULT = {"f": 1e-15, "p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3,
+                "": 1.0, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12}
+
+    @classmethod
+    def _parse_eng(cls, s):
+        """'4u'->4e-6, '3m'->3e-3, '100k'->1e5, '1.5'->1.5, '4e-6'->4e-6.
+        None if it doesn't parse.  Case-sensitive (m=milli, M=mega)."""
+        s = (s or "").strip().replace("µ", "u")
+        m = re.fullmatch(r"([-+]?(?:[0-9]*\.?[0-9]+)(?:[eE][-+]?[0-9]+)?)\s*"
+                         r"([fpnumkKMGT]?)", s)
+        if not m:
+            return None
+        try:
+            return float(m.group(1)) * cls._SI_MULT[m.group(2)]
+        except (ValueError, KeyError):
+            return None
+
+    @classmethod
+    def _parse_eng_list(cls, text):
+        out = []
+        for tok in (text or "").replace(",", " ").split():
+            v = cls._parse_eng(tok)
+            if v is not None:
+                out.append(v)
+        return out
+
+    def _spec_values(self, spec):
+        """Concrete value list for a sweep spec (range / center / explicit)."""
+        t = spec.get("type", "values")
+        n = max(2, int(spec.get("steps", 5)))
+        if t == "range":
+            a, b = spec.get("from"), spec.get("to")
+            if a is None or b is None:
+                return []
+            if spec.get("step_type") == "Log" and a > 0 and b > 0:
+                return [a * (b / a) ** (k / (n - 1)) for k in range(n)]
+            return [a + (b - a) * k / (n - 1) for k in range(n)]
+        if t == "center":
+            c, sp = spec.get("center"), spec.get("span")
+            if c is None or sp is None:
+                return []
+            a, b = c - abs(c) * sp / 200.0, c + abs(c) * sp / 200.0
+            return [a + (b - a) * k / (n - 1) for k in range(n)]
+        return list(spec.get("values", []))
+
+    def _spec_summary(self, spec):
+        vals = self._spec_values(spec)
+        t, e = spec.get("type", "values"), self._eng
+        if t == "range":
+            return (f"{e(spec.get('from', 0))} -> {e(spec.get('to', 0))}  "
+                    f"{len(vals)} {spec.get('step_type', 'Linear')[:3].lower()}")
+        if t == "center":
+            return (f"{e(spec.get('center', 0))} +/-{spec.get('span', 0):g}%  "
+                    f"{len(vals)} pts")
+        return ", ".join(e(v) for v in vals)
+
+    def _sweep_combos(self):
+        """Cartesian product of the sweep specs -> [(label, {param: value})].
+        No sweep -> [("", {})] (a single base run).  Capped at SWEEP_CAP."""
+        active = [(s["param"], self._spec_values(s)) for s in self.sweep_specs]
+        active = [(p, vs) for p, vs in active if vs]
+        if not active:
+            return [("", {})]
+        import itertools
+        combos = []
+        for vals in itertools.product(*[vs for _, vs in active]):
+            ov = {p: v for (p, _), v in zip(active, vals)}
+            label = ", ".join(f"{p}={self._eng(v)}"
+                              for (p, _), v in zip(active, vals))
+            combos.append((label, ov))
+        return combos[:self.SWEEP_CAP]
+
+    def _sweep_models(self):
+        """Enabled models expanded over the sweep combos, each distinctly named.
+        Identical to _checked_models() when no sweep is defined."""
+        out = []
+        for label, ov in self._sweep_combos():
+            out.extend(self._build_models(ov, name_suffix=label))
+        return out
+
+    def _sweep_param_names(self):
+        """Sweepable parameter names = the params of the model shown in the
+        param panel (falls back to the first enabled model)."""
+        label = (dpg.get_value("param_model_sel")
+                 if dpg.does_item_exist("param_model_sel") else None)
+        key = LABEL_TO_KEY.get(label)
+        if not key:
+            keys = self._enabled_keys()
+            key = keys[0] if keys else MODEL_SPECS[0].key
+        return list(_defaults_of(SPEC_BY_KEY[key].params_cls).keys())
+
+    def _prune_sweeps(self):
+        """Drop sweep specs whose param isn't in the current model."""
+        names = set(self._sweep_param_names())
+        self.sweep_specs = [s for s in self.sweep_specs
+                            if s.get("param") in names]
+
+    # ---- the Parametric Sweep dialog (Run menu) --------------------------
+
+    def on_open_sweep_dialog(self, *_):
+        names = self._sweep_param_names()
+        if dpg.does_item_exist("sw_param"):
+            dpg.configure_item("sw_param", items=names)
+            if names and dpg.get_value("sw_param") not in names:
+                dpg.set_value("sw_param", names[0])
+        self._sweep_backup = [dict(s) for s in self.sweep_specs]
+        self._rebuild_spec_list()
+        self._on_sw_type()
+        vw = dpg.get_viewport_client_width()
+        vh = dpg.get_viewport_client_height()
+        dpg.configure_item("sweep_dialog", show=True,
+                           pos=(max(0, (vw - 580) // 2), max(0, (vh - 470) // 4)))
+
+    def _on_sw_type(self, *_):
+        t = dpg.get_value("sw_type") if dpg.does_item_exist("sw_type") else "From/To"
+        for tag, kind in (("sw_range_row", "From/To"),
+                          ("sw_center_row", "Center/Span%"),
+                          ("sw_values_row", "Values")):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, show=(t == kind))
+
+    def _read_spec_editor(self):
+        p = dpg.get_value("sw_param")
+        if not p:
+            return None
+        t = dpg.get_value("sw_type")
+        if t == "From/To":
+            a = self._parse_eng(dpg.get_value("sw_from"))
+            b = self._parse_eng(dpg.get_value("sw_to"))
+            if a is None or b is None:
+                return None
+            return {"param": p, "type": "range", "from": a, "to": b,
+                    "step_type": dpg.get_value("sw_steptype"),
+                    "steps": int(dpg.get_value("sw_steps"))}
+        if t == "Center/Span%":
+            c = self._parse_eng(dpg.get_value("sw_center"))
+            sp = self._parse_eng(dpg.get_value("sw_span"))
+            if c is None or sp is None:
+                return None
+            return {"param": p, "type": "center", "center": c, "span": sp,
+                    "steps": int(dpg.get_value("sw_csteps"))}
+        vals = self._parse_eng_list(dpg.get_value("sw_values"))
+        return {"param": p, "type": "values", "values": vals} if vals else None
+
+    def _load_spec_into_editor(self, spec):
+        dpg.set_value("sw_param", spec["param"])
+        t = spec.get("type", "values")
+        dpg.set_value("sw_type", {"range": "From/To", "center": "Center/Span%",
+                                  "values": "Values"}[t])
+        self._on_sw_type()
+        if t == "range":
+            dpg.set_value("sw_from", self._eng(spec["from"]))
+            dpg.set_value("sw_to", self._eng(spec["to"]))
+            dpg.set_value("sw_steptype", spec.get("step_type", "Linear"))
+            dpg.set_value("sw_steps", int(spec.get("steps", 5)))
+        elif t == "center":
+            dpg.set_value("sw_center", self._eng(spec["center"]))
+            dpg.set_value("sw_span", f"{spec['span']:g}")
+            dpg.set_value("sw_csteps", int(spec.get("steps", 5)))
+        else:
+            dpg.set_value("sw_values",
+                          ", ".join(self._eng(v) for v in spec.get("values", [])))
+
+    def _on_spec_row_click(self, sender, app_data, user_data):
+        spec = next((s for s in self.sweep_specs
+                     if s.get("param") == user_data), None)
+        if spec:
+            self._load_spec_into_editor(spec)
+
+    def _on_sweep_spec_add(self, *_):
+        spec = self._read_spec_editor()
+        if not spec:
+            self.log("[sweep] enter valid values (eng units OK: 4u, 3m, 100k)")
+            return
+        self.sweep_specs = [s for s in self.sweep_specs
+                            if s.get("param") != spec["param"]]
+        self.sweep_specs.append(spec)
+        self._rebuild_spec_list()
+
+    def _on_sweep_spec_delete(self, sender=None, app_data=None, user_data=None):
+        p = user_data or dpg.get_value("sw_param")
+        self.sweep_specs = [s for s in self.sweep_specs if s.get("param") != p]
+        self._rebuild_spec_list()
+
+    def _rebuild_spec_list(self):
+        if not dpg.does_item_exist("sweep_spec_list"):
+            return
+        dpg.delete_item("sweep_spec_list", children_only=True)
+        n = 1
+        for s in self.sweep_specs:
+            vals = self._spec_values(s)
+            n *= max(1, len(vals))
+            with dpg.group(parent="sweep_spec_list", horizontal=True):
+                bx = dpg.add_button(label="x", small=True, user_data=s["param"],
+                                    callback=self._on_sweep_spec_delete)
+                dpg.bind_item_theme(bx, self.themes["chip"])
+                dpg.add_selectable(
+                    label=f"  {s['param']}   {self._spec_summary(s)}   "
+                          f"({len(vals)})",
+                    user_data=s["param"], callback=self._on_spec_row_click)
+        if self.sweep_specs:
+            total = min(n, self.SWEEP_CAP)
+            self._small(f"= {total} curve(s)"
+                        + (" (capped)" if n > self.SWEEP_CAP else ""),
+                        parent="sweep_spec_list", color=C_ACC)
+        else:
+            self._small("no sweep - add a variable above", color=C_MUTED,
+                        parent="sweep_spec_list")
+
+    def _on_sweep_ok(self, *_):
+        dpg.configure_item("sweep_dialog", show=False)
+        if self.sweep_specs:
+            self.log("[sweep] " + "; ".join(
+                f"{s['param']} {self._spec_summary(s)}"
+                for s in self.sweep_specs)
+                + f"  ({len(self._sweep_combos())} curves) - run a plot to see it")
+
+    def _on_sweep_cancel(self, *_):
+        self.sweep_specs = getattr(self, "_sweep_backup", [])
+        dpg.configure_item("sweep_dialog", show=False)
 
     def on_run(self, *_, live=False):
         if self.sim_running:
@@ -2448,7 +2825,7 @@ class App:
             if not live:
                 self.log(f"[run] {e}")
             return
-        models = self._checked_models()
+        models = self._sweep_models()       # expands over the parameter sweep
         if not models:
             if not live:
                 self.log("[run] no model selected")
@@ -2508,7 +2885,7 @@ class App:
     def on_plot_stdp(self, *_, live=False):
         if self.sim_running:
             return
-        models = self._checked_models()
+        models = self._sweep_models()       # expands over the parameter sweep
         if not models:
             if not live:
                 self.log("[stdp] no model selected")
@@ -2616,10 +2993,14 @@ class App:
             pos = [(d, y) for d, y in zip(dts_ms, ys) if d > 0]
             line_x = [d for d, _ in neg] + [0.0] + [d for d, _ in pos]
             line_y = [y for _, y in neg] + [nan] + [y for _, y in pos]
-            self._stdp_series.append(dpg.add_line_series(
-                line_x, line_y, parent="stdp_y", label=label))
-            self._stdp_series.append(dpg.add_scatter_series(
-                dts_ms, ys, parent="stdp_y", label="##pts_" + label))
+            # ONE line-series-with-markers per curve (markers via the bound
+            # "markers" theme; the NaN at dt=0 both breaks the line and skips a
+            # marker there) so a single legend entry toggles line AND points
+            # together.
+            sid = dpg.add_line_series(
+                line_x, line_y, parent="stdp_y", label=label)
+            dpg.bind_item_theme(sid, self.themes["markers"])
+            self._stdp_series.append(sid)
             imax = max(range(len(ys)), key=lambda i: abs(ys[i]))
             lines.append(f"{label}:  {slabel} {min(ys):+.4g}..{max(ys):+.4g} "
                          f"{sunit}  |  strongest change at dt = "
@@ -2630,6 +3011,8 @@ class App:
                 self.log("  [stdp] " + ln)
             self.log("  [stdp] click any curve point to drill into that timing "
                      "(R/G/spike transient + dT, dG, dR)")
+        # a fresh sweep fits to the data; the user re-applies a manual Axis
+        # range lock if they want one (no auto/sticky lock - they choose)
         self._fit_axes_of(("stdp_x", "stdp_y"))
         if live:
             self._busy(False, f"live STDP · {len(curves)} model(s) "
@@ -2689,92 +3072,177 @@ class App:
         self.log(f"[stdp] copied {what} to clipboard")
         self._busy(False, f"copied {what} to clipboard")
 
-    # ---- STDP right-click copy menu (works over the axis labels too) -----
 
-    @staticmethod
-    def _in_rect(mx, my, tag):
-        """True if (mx, my) (viewport coords) is inside item `tag`'s rect."""
-        if not dpg.does_item_exist(tag):
-            return False
-        rmin = dpg.get_item_rect_min(tag)
-        rsz = dpg.get_item_rect_size(tag)
-        if not rmin or not rsz:
-            return False
-        return (rmin[0] <= mx <= rmin[0] + rsz[0]
-                and rmin[1] <= my <= rmin[1] + rsz[1])
+    # short id -> ImPlot legend location constant / readable label
+    _LEGEND_GRID = (
+        ("NW", "mvPlot_Location_NorthWest"), ("N", "mvPlot_Location_North"),
+        ("NE", "mvPlot_Location_NorthEast"),
+        ("W", "mvPlot_Location_West"), ("C", "mvPlot_Location_Center"),
+        ("E", "mvPlot_Location_East"),
+        ("SW", "mvPlot_Location_SouthWest"), ("S", "mvPlot_Location_South"),
+        ("SE", "mvPlot_Location_SouthEast"))
+    _LOC_NAME = {"NW": "Top-left", "N": "Top", "NE": "Top-right",
+                 "W": "Left", "C": "Center", "E": "Right",
+                 "SW": "Bottom-left", "S": "Bottom", "SE": "Bottom-right"}
 
-    def _menu_row(self, label, action):
-        """One full-width, hover-highlighted row of the STDP context menu."""
-        s = dpg.add_selectable(label=label, width=200, user_data=action,
-                               callback=self._menu_action)
-        if "small" in self.fonts:
-            dpg.bind_item_font(s, self.fonts["small"])
-        return s
+    def _build_stdp_menu(self):
+        """STDP plot's right-click menu. It's a plain WINDOW (so it opens/closes
+        reliably and never auto-dismisses on its own opening click) holding
+        native nested dpg.menu submenus (which cascade on hover, keep the parent
+        open, and position themselves). It's opened by _on_stdp_rclick and closed
+        by _tick_menu_dismiss when it loses focus."""
+        with dpg.window(tag="stdp_copy_menu", show=False, no_title_bar=True,
+                        no_resize=True, no_move=True, no_collapse=True,
+                        no_scrollbar=True, autosize=True):
+            self._small("COPY POINTS", color=C_ACC)
+            dpg.add_menu_item(label="dt  (delta-T) values", callback=lambda:
+                              self._menu_act(lambda: self._copy_stdp("dt")))
+            dpg.add_menu_item(label="dG  values", callback=lambda:
+                              self._menu_act(lambda: self._copy_stdp("dg")))
+            dpg.add_menu_item(label="dt, dG pairs  (CSV)", callback=lambda:
+                              self._menu_act(lambda: self._copy_stdp("pairs")))
+            dpg.add_separator()
+            self._small("VIEW", color=C_ACC)
+            dpg.add_menu_item(label="Fit all", callback=lambda: self._menu_act(
+                lambda: self._fit_axes_of(("stdp_x", "stdp_y"))))
+            dpg.add_menu_item(label="Fit X", callback=lambda: self._menu_act(
+                lambda: self._fit_axes_of(("stdp_x",))))
+            dpg.add_menu_item(label="Fit Y", callback=lambda: self._menu_act(
+                lambda: self._fit_axes_of(("stdp_y",))))
+            dpg.add_menu_item(label="Zoom in", callback=lambda: self._menu_act(
+                lambda: self._zoom_axes(("stdp_x", "stdp_y"), 0.7)))
+            dpg.add_menu_item(label="Zoom out", callback=lambda: self._menu_act(
+                lambda: self._zoom_axes(("stdp_x", "stdp_y"), 1.45)))
+            dpg.add_separator()
+            with dpg.menu(label="Axis range"):
+                self._build_axis_menu()
+            with dpg.menu(label="Legend"):
+                self._build_legend_menu()
+            dpg.add_separator()
+            dpg.add_menu_item(label="Clear A / B probes", callback=lambda:
+                              self._menu_act(lambda:
+                                             self._clear_probes(("stdp_plot",))))
+        if "stdp_menu" in self.themes:
+            dpg.bind_item_theme("stdp_copy_menu", self.themes["stdp_menu"])
 
-    def _menu_action(self, sender, app_data, action):
-        """Run a context-menu action, then close the menu."""
-        x = ("stdp_x",)
-        y = ("stdp_y",)
-        if action == "copy_dt":
-            self._copy_stdp("dt")
-        elif action == "copy_dg":
-            self._copy_stdp("dg")
-        elif action == "copy_pairs":
-            self._copy_stdp("pairs")
-        elif action == "fit":
-            self._fit_axes_of(x + y)
-        elif action == "fit_x":
-            self._fit_axes_of(x)
-        elif action == "fit_y":
-            self._fit_axes_of(y)
-        elif action == "zoom_in":
-            self._zoom_axes(x + y, 0.7)
-        elif action == "zoom_out":
-            self._zoom_axes(x + y, 1.45)
-        elif action == "clear_probes":
-            self._clear_probes(("stdp_plot",))
-        if sender:
-            dpg.set_value(sender, False)        # don't leave the row "selected"
-        dpg.configure_item("stdp_copy_menu", show=False)
+    def _menu_act(self, fn):
+        """Run a one-shot menu action, then close the menu."""
+        fn()
+        if dpg.does_item_exist("stdp_copy_menu"):
+            dpg.configure_item("stdp_copy_menu", show=False)
 
     def _on_stdp_rclick(self, sender, app_data):
-        """Right button anywhere over the STDP plot (data area OR the axis-label
-        margins) opens the context menu at the cursor."""
+        """Open the context menu at the cursor on a right-click over the plot.
+        ImPlot swallows the plot's own right-click, so we open the menu window
+        here and focus it; _tick_menu_dismiss closes it when focus is lost."""
         if not dpg.does_item_exist("stdp_copy_menu"):
             return
         active = (not dpg.does_item_exist("center_tabs")
                   or dpg.get_value("center_tabs") == "tab_stdp")
-        mx, my = dpg.get_mouse_pos(local=False)
-        if active and self._in_rect(mx, my, "stdp_plot"):
-            for row in dpg.get_item_children("stdp_copy_menu", 1):
-                if dpg.get_item_type(row).endswith("mvSelectable"):
-                    dpg.set_value(row, False)   # clear stale highlight
-            # keep the whole menu on-screen: shift it up/left when the click is
-            # near the right or bottom edge (e.g. on the x-axis label)
-            live = dpg.get_item_rect_size("stdp_copy_menu")
-            if live and live[0] > 0:
-                self._menu_size = (int(live[0]), int(live[1]))
-            mw, mh = self._menu_size
+        if active and dpg.is_item_hovered("stdp_plot"):
+            mx, my = dpg.get_mouse_pos(local=False)
             vw = dpg.get_viewport_client_width()
             vh = dpg.get_viewport_client_height()
-            px, py = int(mx), int(my)
-            if px + mw > vw - 6:
-                px = max(6, vw - mw - 6)
-            if py + mh > vh - 6:
-                py = max(6, py - mh)        # flip the menu above the cursor
-            dpg.configure_item("stdp_copy_menu", show=True, pos=[px, py])
-        else:
-            dpg.configure_item("stdp_copy_menu", show=False)
+            px, py = min(int(mx), vw - 230), min(int(my), vh - 320)
+            dpg.configure_item("stdp_copy_menu", show=True,
+                               pos=[max(0, px), max(0, py)])
+            dpg.focus_item("stdp_copy_menu")
+            self._menu_unfocused = 0
 
-    def _dismiss_copy_menu(self, sender, app_data):
-        """Left-click outside the menu closes it (clicks on it are handled by
-        the menu rows themselves)."""
+    # one tagged child per cascade submenu - it only RENDERS (is_item_visible)
+    # while that submenu's dropdown is open, which is how we know to keep the
+    # parent menu alive (a submenu dropdown is its own ImGui popup, so it steals
+    # focus/hover from the menu window)
+    _SUBMENU_PROBES = ("stdp_xmin", "leg_chk_show")
+
+    @staticmethod
+    def _item_visible(tag):
+        """is_item_visible that can't raise: a never-rendered item has no
+        'visible' state key (is_item_visible would KeyError)."""
+        if not dpg.does_item_exist(tag):
+            return False
+        try:
+            return bool(dpg.get_item_state(tag).get("visible"))
+        except Exception:
+            return False
+
+    def _tick_menu_dismiss(self):
+        """Close the STDP context menu only once neither it NOR any of its open
+        submenus is focused / hovered / showing (short grace for transitions)."""
         if not dpg.does_item_exist("stdp_copy_menu") \
                 or not dpg.is_item_shown("stdp_copy_menu"):
             return
-        mx, my = dpg.get_mouse_pos(local=False)
-        if not self._in_rect(mx, my, "stdp_copy_menu"):
+        submenu_open = any(self._item_visible(t) for t in self._SUBMENU_PROBES)
+        if (submenu_open or dpg.is_item_focused("stdp_copy_menu")
+                or dpg.is_item_hovered("stdp_copy_menu")):
+            self._menu_unfocused = 0
+            return
+        self._menu_unfocused += 1
+        if self._menu_unfocused >= 4:
             dpg.configure_item("stdp_copy_menu", show=False)
+
+    def _build_axis_menu(self):
+        """'Axis range' submenu: type a range + Lock view (inputs/buttons don't
+        close the submenu, so the user can set X and Y then lock)."""
+        self._small("Lock the view to a range; Auto releases it.", color=C_MUTED)
+        with dpg.group(horizontal=True):
+            self._small("X")
+            dpg.add_input_float(tag="stdp_xmin", default_value=-100.0, width=72,
+                                step=0, format="%.4g", on_enter=True,
+                                callback=self._apply_stdp_view)
+            self._small("to")
+            dpg.add_input_float(tag="stdp_xmax", default_value=100.0, width=72,
+                                step=0, format="%.4g", on_enter=True,
+                                callback=self._apply_stdp_view)
+            self._small("ms")
+        with dpg.group(horizontal=True):
+            self._small("Y")
+            dpg.add_input_float(tag="stdp_ymin", default_value=0.0, width=72,
+                                step=0, format="%.4g", on_enter=True,
+                                callback=self._apply_stdp_view)
+            self._small("to")
+            dpg.add_input_float(tag="stdp_ymax", default_value=0.0, width=72,
+                                step=0, format="%.4g", on_enter=True,
+                                callback=self._apply_stdp_view)
+            self._small("(0 to 0 = auto Y)", color=C_MUTED)
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Lock view", callback=self._apply_stdp_view)
+            dpg.add_button(label="Auto", callback=self._auto_stdp_view)
+
+    def _build_legend_menu(self):
+        """'Legend' submenu. Uses checkboxes (not check menu_items) so (a) they
+        report a 'visible' state - which is how _tick_menu_dismiss knows this
+        submenu is open - and (b) toggling one doesn't close the submenu, so the
+        user can flip several at once. Position is a nested anchor submenu."""
+        dpg.add_checkbox(label="Show legend", default_value=True,
+                         tag="leg_chk_show", callback=self._toggle_legends)
+        dpg.add_checkbox(label="Outside canvas", default_value=False,
+                         tag="leg_chk_out", callback=self._toggle_legend_outside)
+        dpg.add_checkbox(label="Horizontal layout", default_value=False,
+                         tag="leg_chk_horiz",
+                         callback=self._toggle_legend_horizontal)
+        with dpg.menu(label="Position"):
+            for short, const in self._LEGEND_GRID:
+                loc = getattr(dpg, const, 0)
+                dpg.add_menu_item(label=self._LOC_NAME[short], user_data=loc,
+                                  callback=self._on_legend_pos)
+
+    def _on_legend_pos(self, sender, app_data, loc):
+        """Snap every legend to the picked anchor."""
+        self.legend_location = loc
+        for t in self.LEGEND_TAGS:
+            if dpg.does_item_exist(t):
+                dpg.configure_item(t, location=loc)
+
+    def _toggle_legend_horizontal(self, *_):
+        self.legend_horizontal = not self.legend_horizontal
+        for t in self.LEGEND_TAGS:
+            if dpg.does_item_exist(t):
+                dpg.configure_item(t, horizontal=self.legend_horizontal)
+        if dpg.does_item_exist("leg_chk_horiz"):
+            dpg.set_value("leg_chk_horiz", self.legend_horizontal)
+        self.log("[plot] legend layout "
+                 + ("horizontal" if self.legend_horizontal else "vertical"))
 
     def _stdp_drilldown(self):
         """Re-run the single pre/post pair at the clicked dt and show the
@@ -3731,8 +4199,10 @@ class App:
                     continue
                 d = dpg.get_value(sid)
                 if d and len(d) >= 2:
-                    curves[lbl] = {"dt_ms": [round(float(x), 4) for x in d[0]],
-                                   "dG_uS": [round(float(y), 5) for y in d[1]]}
+                    # drop the NaN gap-break point (invalid JSON; agent-facing)
+                    pts = [(x, y) for x, y in zip(d[0], d[1]) if y == y]
+                    curves[lbl] = {"dt_ms": [round(float(x), 4) for x, _ in pts],
+                                   "dG_uS": [round(float(y), 5) for _, y in pts]}
             snap["stdp"] = {"curves": curves}
 
         for plot, probes in self._probes.items():
@@ -3770,6 +4240,13 @@ class App:
             lines.append(f"User-selected .va: {self.selected_va.name}")
         checked = [SPEC_BY_KEY[k].label for k in self._enabled_keys()]
         lines.append("Models enabled: " + (", ".join(checked) or "none"))
+        sweepable = self._sweep_param_names()
+        if sweepable:
+            lines.append(
+                "Sweepable parameters for the active model (use these EXACT "
+                "names in the 'sweep' action - they are case-sensitive; e.g. "
+                "device width/length are 'w'/'l', not 'W'/'L'): "
+                + ", ".join(sweepable))
         if self.virtuoso.connected:
             libs = self.virtuoso.info.get("libraries", [])
             lines.append(f"Virtuoso: connected via skillbridge "
@@ -3936,22 +4413,103 @@ class App:
 
     def _run_agent_action(self, action):
         """Execute a GUI action the agent asked for (so it can actually run
-        plots in the app instead of scripting them)."""
+        plots in the app instead of scripting them).  `action` is the action
+        dict ({"action": "...", ...}); a bare string is also accepted."""
+        if isinstance(action, str):
+            action = {"action": action}
+        name = action.get("action")
+        if name == "sweep":
+            self._apply_agent_sweep(action)
+            return
         actions = {
             "run": lambda: self.on_run(),
             "plot_stdp": lambda: self.on_plot_stdp(),
+            "plot_polar": lambda: self.on_plot_polar(),
             "preview": lambda: self.on_preview(),
             "analyze_g": lambda: self.on_analysis_metric("G"),
             "analyze_r": lambda: self.on_analysis_metric("R"),
             "fit": lambda: self.fit_axes(),
             "export_csv": lambda: self.export_csv(),
         }
-        fn = actions.get(action)
+        fn = actions.get(name)
         if fn:
-            self.log(f"[agent] running GUI action: {action}")
+            self.log(f"[agent] running GUI action: {name}")
             fn()
         else:
-            self.log(f"[agent] unknown GUI action: {action}")
+            self.log(f"[agent] unknown GUI action: {name}")
+
+    # common synonyms the agent might use for geometry params -> canonical
+    _SWEEP_ALIAS = {"length": "l", "len": "l", "channel_length": "l",
+                    "width": "w", "wid": "w", "channel_width": "w",
+                    "diffusion": "d", "thickness": "tox"}
+
+    def _resolve_sweep_param(self, name, valid):
+        """Map an agent-supplied param name to a real model parameter, tolerant
+        of case ('L'->'l', 'W'->'w') and a few common synonyms. Returns the
+        canonical name, or None if it can't be matched."""
+        if not name:
+            return None
+        name = str(name).strip()
+        if name in valid:
+            return name
+        low = {v.lower(): v for v in valid}      # case-insensitive lookup
+        if name.lower() in low:
+            return low[name.lower()]
+        alias = self._SWEEP_ALIAS.get(name.lower())
+        if alias and alias in low:
+            return low[alias]
+        return None
+
+    def _apply_agent_sweep(self, action):
+        """Agent-driven parameter sweep: set the sweep spec(s) then run the plot.
+        Accepts {"sweeps":[{"param","values"|"from"/"to"/"steps"}], "mode":..}
+        or a single {"param","values",...,"mode"}."""
+        sweeps = action.get("sweeps")
+        if not sweeps and action.get("param"):
+            sweeps = [action]
+        valid = list(self._sweep_param_names())
+        specs = []
+        unknown = []
+        for s in sweeps or []:
+            p = self._resolve_sweep_param(s.get("param"), valid)
+            if not p:
+                if s.get("param"):
+                    unknown.append(str(s.get("param")))
+                continue
+            if s.get("from") is not None and s.get("to") is not None:
+                specs.append({"param": p, "type": "range",
+                              "from": float(s["from"]), "to": float(s["to"]),
+                              "step_type": s.get("step_type", "Linear"),
+                              "steps": int(s.get("steps", 5))})
+                continue
+            raw = s.get("values")
+            if isinstance(raw, (list, tuple)):
+                vals = [float(v) for v in raw if isinstance(v, (int, float))]
+            else:
+                vals = self._parse_eng_list(str(raw))
+            if vals:
+                specs.append({"param": p, "type": "values", "values": vals})
+        if not specs:
+            self.log("[agent] sweep: no valid (param, values) for the active "
+                     f"model (params: {sorted(valid)})")
+            hint = ""
+            if unknown:
+                hint = (f" Unknown param(s): {', '.join(unknown)}. "
+                        f"This model's parameters are: {', '.join(sorted(valid))}.")
+            self.append_chat("err", "Sweep had no valid parameter/values for "
+                             "the selected model." + hint)
+            return
+        self.sweep_specs = specs
+        if dpg.does_item_exist("sweep_spec_list"):
+            self._rebuild_spec_list()
+        mode = (action.get("mode") or "run").lower()
+        self.log(f"[agent] sweep {self._sweep_combos().__len__()} curves -> {mode}")
+        if mode in ("stdp", "plot_stdp"):
+            self.on_plot_stdp()
+        elif mode in ("polar", "polarization", "pv", "plot_polar"):
+            self.on_plot_polar()
+        else:
+            self.on_run()
 
     def on_load_agent_pattern(self, sender=None, app_data=None, user_data=None):
         wf = user_data
@@ -4289,6 +4847,7 @@ class App:
             self._tick_zoom_anim()
             self._tick_probe_drag()
             self._hide_tip_if_stale()
+            self._tick_menu_dismiss()
             self._watch_code()
             dpg.render_dearpygui_frame()
             frame += 1

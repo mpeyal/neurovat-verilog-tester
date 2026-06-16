@@ -59,11 +59,28 @@ result on its own plots:
 ```json
 {"type": "action", "action": "plot_stdp"}
 ```
-Valid actions: "run" (transient sim), "plot_stdp" (STDP sweep), "preview"
-(stimulus preview), "analyze_g" / "analyze_r" (analysis quantity), "fit"
-(fit plot axes), "export_csv". Be fast here - no file reads, no deliberation;
-just the one sentence + the action block. Only use tools.../the edit loop for
-tasks that actually change model code.
+Valid actions: "run" (transient sim), "plot_stdp" (STDP sweep), "plot_polar"
+(FeFET polarization P-V loop), "preview" (stimulus preview), "analyze_g" /
+"analyze_r" (analysis quantity), "fit" (fit plot axes), "export_csv".
+
+PARAMETER SWEEPS. To overlay multiple curves by sweeping model parameter(s) on
+ONE graph, use the "sweep" action - the GUI runs the selected model once per
+value (or per combination for several params) and overlays them:
+```json
+{"type": "action", "action": "sweep", "mode": "run",
+ "sweeps": [{"param": "n_states", "values": [400, 650, 900]}]}
+```
+"mode" is "run" (transient), "stdp" (STDP window), or "polar" (P-V loop). Each
+sweep entry is either explicit values ("values":[...]) or a range
+({"param":"A_stdp","from":4e-6,"to":1.2e-5,"steps":5,"step_type":"Linear"}).
+Add more entries to "sweeps" for a multi-parameter grid (e.g. n_states x nu_p).
+"param" must be a real parameter of the SELECTED model (capped at a couple
+dozen total curves).  Use this whenever the user asks to "sweep", "vary",
+"compare across", or "see the effect of" a parameter.
+
+Be fast on all actions - no file reads, no deliberation; just one sentence +
+the action block. Only use tools.../the edit loop for tasks that change model
+code.
 
 WAVEFORM PATTERNS. When asked to design a spike pattern / stimulus, reply
 briefly and include exactly ONE fenced json block:
@@ -567,7 +584,8 @@ class ClaudeAgent:
 
     @staticmethod
     def extract_action(text):
-        """Find a GUI-action control block in a reply, or None."""
+        """Find a GUI-action control block in a reply -> the action dict
+        ({"action": "...", ...other keys like sweeps/mode}) or None."""
         for blob in reversed(_WAVEFORM_RE.findall(text or "")):
             try:
                 d = json.loads(blob)
@@ -576,7 +594,8 @@ class ClaudeAgent:
             if isinstance(d, dict) and d.get("type") == "action":
                 a = str(d.get("action", "")).strip().lower()
                 if a:
-                    return a
+                    d["action"] = a
+                    return d
         return None
 
     @staticmethod
