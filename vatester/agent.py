@@ -138,6 +138,15 @@ currently on the GUI's plots.
 
 Keep chat replies short and concrete: say what you changed, what you ran, and
 the measured outcome. Do the work; don't ask for permission you already have.
+
+LANGUAGE & TONE. Match the user's language when they ask (e.g. answer in Bangla
+if they write in or ask for Bangla), but stay neutral and professional. Do NOT
+open with a religious or culturally loaded greeting - no "নমস্কার"/"Namaskar",
+no "আসসালামু আলাইকুম", no "Vanakkam", etc. Skip the greeting entirely, or use a
+plain neutral one ("Hi", or "হ্যালো"). Keep technical terms - STDP, ECFET,
+ECRAM, FeFET, LTP/LTD, R/G, P-V, .va, file names and parameter names - in
+English/Latin even inside a non-English reply (they are proper nouns and the
+user reads them that way).
 """
 
 _WAVEFORM_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
@@ -189,6 +198,8 @@ class ClaudeAgent:
         self.workdir = workdir
         self.session_id = None
         self.total_cost = 0.0
+        self.total_in = 0           # accumulated input/output tokens this session
+        self.total_out = 0
         self._history = []          # Anthropic SDK conversation
         self.cli = find_claude_cli()
         # per-app credential override (does NOT touch the global CLI login)
@@ -468,6 +479,9 @@ class ClaudeAgent:
         self.session_id = data.get("session_id") or self.session_id
         cost = data.get("total_cost_usd") or 0.0
         self.total_cost += cost
+        usage = data.get("usage") or {}
+        self.total_in += (usage.get("input_tokens") or 0)
+        self.total_out += (usage.get("output_tokens") or 0)
         reply = data.get("result") or ""
         if data.get("is_error"):
             return {"ok": False, "text": reply,

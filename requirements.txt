@@ -1,6 +1,11 @@
 numpy
 matplotlib
 dearpygui>=1.11
+# complex-script (Bangla/Devanagari) chat: shapes text with HarfBuzz + FreeType
+# and draws it as an image (ImGui can't shape these). The chat falls back to
+# plain text if these are absent.
+uharfbuzz
+freetype-py
 # optional - agent chat fallback when the claude CLI is not installed:
 # anthropic
 # optional - OpenAI provider for the agent chat (/provider openai):

@@ -27,6 +27,7 @@ from ecfet import (Waveform, EcfetV1, V1Params, EcfetV2, V2Params,
                    EcfetV3, V3Params, FeFET, FeFETParams, simulate)
 from . import signal_factory as sf
 from .agent import ClaudeAgent
+from .textshape import TextShaper, needs_shaping
 from .va_scan import scan as va_scan
 from .virtuoso import VirtuosoLink
 
@@ -198,6 +199,14 @@ class App:
         self.dynamic_twins, self.twin_errors = register_dynamic_twins(self.workdir)
         self.q = queue.Queue()
         self.agent = ClaudeAgent(self.workdir)
+        self._agent_turns = 0          # agent replies this session (for /cost)
+        # HarfBuzz shaper for complex-script chat (Bangla, etc.); falls back to
+        # plain text if uharfbuzz/freetype/a covering font are unavailable.
+        # Sized to sit with the smaller chat body font (FreeType rasterises a
+        # touch larger than DearPyGui at the same nominal size).
+        self.shaper = TextShaper(size=13)
+        self._chat_tex = []            # texture tags for shaped chat images
+        self._tex_n = 0
         self.va_files = []
         self.selected_va = None
         self.editor_path = None
@@ -285,8 +294,29 @@ class App:
                 if not os.path.isfile(path):
                     continue
                 self.fonts[key] = dpg.add_font(path, size)
+            # Segoe UI has no Indic glyphs, so non-Latin agent replies (e.g.
+            # Bangla) render as boxes. Nirmala UI (ships with Windows) covers
+            # Latin + Bengali + Devanagari; load it with those ranges for the
+            # chat text so replies in those scripts display correctly.
+            self._load_chat_font(fdir)
         if "body" in self.fonts:
             dpg.bind_font(self.fonts["body"])
+
+    def _load_chat_font(self, fdir):
+        """Font for chat-message text that also covers Bengali/Devanagari.
+        Nirmala UI (ships as Nirmala.ttc on most Windows) covers Latin + Indic;
+        Kalpurush is a Bengali-focused fallback. DearPyGui 2.x auto-loads every
+        glyph the file contains, so no explicit Unicode ranges are needed."""
+        for fn in ("Nirmala.ttc", "Nirmala.ttf", "NirmalaS.ttf",
+                   "kalpurush.ttf"):
+            path = os.path.join(fdir, fn)
+            if not os.path.isfile(path):
+                continue
+            try:
+                self.fonts["chat"] = dpg.add_font(path, 17)
+                return
+            except Exception as e:                       # noqa: BLE001
+                print(f"[font] {fn} load failed: {e}")
 
     def _mk_theme(self, name, colors=(), styles=(), plot_colors=()):
         with dpg.theme() as t:
@@ -1219,6 +1249,7 @@ class App:
         dpg.create_context()
         self._font()
         self._theme()
+        dpg.add_texture_registry(tag="chat_tex_reg")   # shaped-chat textures
 
         with dpg.window(tag="main"):
             self._menu()
@@ -1451,6 +1482,10 @@ class App:
         self._sync_class_ui(_cls)                      # init labels + tab visibility
         self.log(f"workspace: {self.workdir}")
         self.log(f"agent backend: {self.agent.backend_label()}")
+        self.log("chat script shaping (Bangla, etc.): "
+                 + ("ON (HarfBuzz)" if (self.shaper and self.shaper.ok)
+                    else "OFF - 'pip install uharfbuzz freetype-py' for shaped "
+                         "complex scripts (falling back to unshaped glyphs)"))
         self._check_orphan_twins()        # warn about unregistered ecfet/ twins
         self.append_chat("agent",
                          "Hi! I can generate spike patterns (Poisson, STDP, "
@@ -2137,7 +2172,9 @@ class App:
                                 dpg.add_text("Sign in / switch Claude account, "
                                              "or run this app under a specific "
                                              "key/token")
-                            self._small("", tag="cost_label", color=C_TEXT2)
+                            # session cost is shown on demand (/cost or /usage)
+                            # rather than inline here, where it overflowed the
+                            # narrow agent panel
                 with dpg.child_window(tag="chat_log", height=-56,
                                       border=False):
                     pass
@@ -2156,9 +2193,11 @@ class App:
                         dpg.add_text("Attach files - pdf, csv, image... The "
                                      "agent reads them and can retune the "
                                      "model / Verilog from their content.")
-                    dpg.add_input_text(tag="chat_input", width=-78,
-                                       hint="Message the agent...  (/help)",
-                                       on_enter=True, callback=self.on_send)
+                    ci = dpg.add_input_text(tag="chat_input", width=-78,
+                                            hint="Message the agent...  (/help)",
+                                            on_enter=True, callback=self.on_send)
+                    if "chat" in self.fonts:    # let the user type Bangla too
+                        dpg.bind_item_font(ci, self.fonts["chat"])
                     b = dpg.add_button(label="Send", tag="btn_send",
                                        callback=self.on_send)
                     dpg.bind_item_theme(b, self.themes["primary"])
@@ -2199,8 +2238,7 @@ class App:
                         dpg.bind_item_font(cp, self.fonts["small"])
                     with dpg.tooltip(cp):
                         dpg.add_text("Copy this message to the clipboard")
-                msg = dpg.add_text(text, wrap=BUBBLE_W - indent - 28,
-                                   color=C_TEXT)
+                msg = self._chat_message(text, BUBBLE_W - indent - 28)
                 with dpg.popup(msg):    # right-click the text -> Copy
                     dpg.add_selectable(label="Copy message", user_data=text,
                                        callback=lambda s, a, u:
@@ -2208,6 +2246,33 @@ class App:
             dpg.bind_item_theme(bub, self.themes[theme])
         dpg.add_spacer(height=5, parent="chat_log")
         self._scroll_bottom("chat_log")
+
+    def _chat_message(self, text, wrap_w):
+        """Render a chat message body and return its item id. Complex scripts
+        (Bangla, Devanagari, ...) are shaped by HarfBuzz and shown as an image
+        because ImGui can't shape them; plain Latin uses fast, selectable text."""
+        complex_ = needs_shaping(text)
+        if complex_ and self.shaper and self.shaper.ok:
+            out = self.shaper.render(text, color=C_TEXT[:3], max_width=wrap_w)
+            if out:
+                flat, tw, th = out
+                self._tex_n += 1
+                ttag = "chat_tex_%d" % self._tex_n
+                try:
+                    dpg.add_static_texture(tw, th, flat.tolist(),
+                                           parent="chat_tex_reg", tag=ttag)
+                    self._chat_tex.append(ttag)
+                    return dpg.add_image(ttag)
+                except Exception as e:           # noqa: BLE001
+                    print(f"[chat] shaped-image failed: {e}")
+        msg = dpg.add_text(text, wrap=wrap_w, color=C_TEXT)
+        if complex_ and "chat" in self.fonts:
+            # shaper unavailable: at least use a font that HAS the glyphs (the
+            # Nirmala chat font) so it reads, instead of boxes from Segoe
+            dpg.bind_item_font(msg, self.fonts["chat"])
+        elif "small" in self.fonts:              # plain Latin: compact body font
+            dpg.bind_item_font(msg, self.fonts["small"])
+        return msg
 
     def _add_pattern_card(self, wf):
         with dpg.group(parent="chat_log"):
@@ -2354,6 +2419,8 @@ class App:
                 self._set_provider(parts[1])
         elif cmd in ("clear", "reset"):
             self.on_agent_reset()
+        elif cmd in ("cost", "usage"):
+            self.append_chat("sys", self._usage_summary())
         elif cmd == "help":
             self.append_chat("sys",
                              "Commands:\n"
@@ -2361,10 +2428,25 @@ class App:
                              "/model <name>       e.g. /model opus, /model gpt-5.1\n"
                              "/provider           show the active provider\n"
                              "/provider <name>    claude | openai\n"
+                             "/cost  or  /usage   show this session's cost/tokens\n"
                              "/clear              reset the conversation\n"
                              "/help               this list")
         else:
             self.append_chat("err", f"Unknown command /{cmd} - try /help")
+
+    def _usage_summary(self):
+        """Session cost / token / turn summary shown on /cost or /usage."""
+        a = self.agent
+        if not self._agent_turns:
+            return "No agent calls yet this session."
+        lines = [f"Session usage ({self._agent_turns} "
+                 f"repl{'y' if self._agent_turns == 1 else 'ies'}):",
+                 f"  cost:   ${a.total_cost:.4f}"]
+        if getattr(a, "total_in", 0) or getattr(a, "total_out", 0):
+            lines.append(f"  tokens: {a.total_in:,} in / {a.total_out:,} out")
+        if not a.total_cost:
+            lines.append("  (cost not reported by this provider/backend)")
+        return "\n".join(lines)
 
     def _chat_pending(self, show):
         if dpg.does_item_exist("pending_bubble"):
@@ -4432,9 +4514,7 @@ class App:
                 self._run_agent_action(action)
         else:
             self.append_chat("err", res.get("error") or "unknown error")
-        if self.agent.total_cost:
-            dpg.set_value("cost_label",
-                          f"session cost ${self.agent.total_cost:.3f}")
+        self._agent_turns += 1          # session usage is shown via /cost
         if may_have_edited:
             self._check_external_edits()
 
@@ -4562,6 +4642,10 @@ class App:
     def on_agent_reset(self):
         self.agent.reset()
         dpg.delete_item("chat_log", children_only=True)
+        for t in self._chat_tex:                 # free shaped-message textures
+            if dpg.does_item_exist(t):
+                dpg.delete_item(t)
+        self._chat_tex = []
         self.append_chat("agent", "Conversation reset.")
         self.log("[agent] conversation reset")
 
