@@ -19,10 +19,14 @@ try:
 except Exception:                       # noqa: BLE001 - any import problem
     _DEPS = False
 
-# scripts that need shaping (ImGui can't): Arabic..Hangul-Jamo + CJK and beyond.
-# Plain Latin/digits stay on the fast dpg.add_text path.
+# Indic scripts (Devanagari U+0900 .. Malayalam/Sinhala U+0DFF) need complex
+# shaping that ImGui can't do, and the Nirmala chat font covers them. Crucially
+# this EXCLUDES general punctuation (em dash, smart quotes, ellipsis, arrows)
+# and other symbols - those are plain Latin text the default font renders fine,
+# so an English reply that happens to use "—" stays on the fast text path at the
+# same size as every other English message.
 def needs_shaping(s):
-    return any(0x0600 <= ord(c) <= 0x10FF or ord(c) >= 0x1100 for c in (s or ""))
+    return any(0x0900 <= ord(c) <= 0x0DFF for c in (s or ""))
 
 
 _FONT_CANDIDATES = ("Nirmala.ttc", "Nirmala.ttf", "kalpurush.ttf",
@@ -55,7 +59,16 @@ class TextShaper:
             self._ft.set_pixel_sizes(0, size)
             self._ascent = self._ft.size.ascender >> 6
             self._descent = (-self._ft.size.descender) >> 6
-            self._line_h = self._ascent + self._descent + 2
+            # full line advance (includes line gap) gives marks above/below the
+            # baseline room so stacked conjuncts / vowel signs aren't clipped
+            self._line_h = max(self._ascent + self._descent + 2,
+                               self._ft.size.height >> 6)
+            # padding for ink that overhangs the advance box: pre-base vowels
+            # reach LEFT of the pen, side bearings reach RIGHT, marks/3-stacked
+            # conjuncts reach ABOVE, ri-kar/descenders reach BELOW. Generous so
+            # no glyph variation is ever clipped.
+            self._padx = max(6, size // 2)
+            self._pady = max(8, (size * 2) // 3)
             self.ok = True
         except Exception:               # noqa: BLE001
             self.ok = False
@@ -95,7 +108,7 @@ class TextShaper:
         if not line:
             return
         infos, positions = self._shape(line)
-        pen = 2.0
+        pen = float(self._padx)
         baseline = y_top + self._ascent
         H, W = canvas.shape
         for info, pos in zip(infos, positions):
@@ -122,13 +135,12 @@ class TextShaper:
         try:
             max_width = max(40, int(max_width))
             lines = self._wrap(text, max_width)
-            W = min(max_width, max((self._width_px(ln) for ln in lines),
-                                   default=1) + 4) or 1
-            W = max(W, 1)
-            H = max(1, len(lines) * self._line_h + 2)
+            text_w = max((self._width_px(ln) for ln in lines), default=1)
+            W = max(1, min(text_w, max_width) + 2 * self._padx)
+            H = max(1, len(lines) * self._line_h + 2 * self._pady)
             canvas = np.zeros((H, W), dtype=np.uint8)
             for i, ln in enumerate(lines):
-                self._blit_line(canvas, ln, i * self._line_h + 1)
+                self._blit_line(canvas, ln, self._pady + i * self._line_h)
             rgba = np.zeros((H, W, 4), dtype=np.float32)
             rgba[..., 0] = color[0] / 255.0
             rgba[..., 1] = color[1] / 255.0

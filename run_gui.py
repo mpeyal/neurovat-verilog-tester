@@ -7,8 +7,11 @@
 Features: auto-detected .va files, ECFET v1/v2 + FeFET behavioral twins,
 neuromorphic stimulus designer (spikes, trains, LTP/LTD, PPF, Poisson,
 bursts, STDP, staircase, custom), live plots + LTP/LTD analysis, parameter
-editing (importable from the .va), CSV/PNG export, and an embedded Claude
-agent that can generate patterns and read/modify the Verilog-A sources.
+editing (importable from the .va), CSV/PNG export, an embedded Claude
+agent that can generate patterns and read/modify the Verilog-A sources, and
+a Neuromorphic Trainer studio that wires the selected device into a crossbar
+of synapses + spiking (LIF) neurons and trains it with STDP, visualising the
+weight (conductance) updates live.
 """
 
 import argparse

@@ -146,7 +146,13 @@ no "আসসালামু আলাইকুম", no "Vanakkam", etc. Skip th
 plain neutral one ("Hi", or "হ্যালো"). Keep technical terms - STDP, ECFET,
 ECRAM, FeFET, LTP/LTD, R/G, P-V, .va, file names and parameter names - in
 English/Latin even inside a non-English reply (they are proper nouns and the
-user reads them that way).
+user reads them that way). When you DO write Bangla (or any non-English),
+write correct, natural, standard spelling and grammar - prefer simple common
+words you are confident about over rare/ambiguous ones, and re-read the
+sentence before sending; a clear simple sentence beats a fancy misspelled one.
+CRITICAL: if you are not fully confident of the correct Bangla spelling of a
+word, write that word in English instead of guessing - a correct English word
+mixed into a Bangla sentence is far better than a misspelled Bangla one.
 """
 
 _WAVEFORM_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)

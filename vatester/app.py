@@ -22,10 +22,12 @@ import threading
 import time
 
 import dearpygui.dearpygui as dpg
+import numpy as np
 
 from ecfet import (Waveform, EcfetV1, V1Params, EcfetV2, V2Params,
                    EcfetV3, V3Params, FeFET, FeFETParams, simulate)
 from . import signal_factory as sf
+from . import neuro
 from .agent import ClaudeAgent
 from .textshape import TextShaper, needs_shaping
 from .va_scan import scan as va_scan
@@ -271,6 +273,32 @@ class App:
         self._hover_ann = {}       # plot -> in-canvas hover bubble annotation
         self._hover_cache = {}     # plot -> [(label, xs, ys)] for fast hover
         self._hover_last = None    # (plot, mx, my) of last computed bubble
+        # ---- Neuromorphic Trainer studio (crossbar of device synapses) ----
+        self.trainer = None             # neuro.Trainer instance
+        self.trainer_running = False
+        self._trainer_stop = False
+        self._nt_dev = None             # {make, kind, label} synapse factory
+        self._rf_tex = None             # receptive-field montage raw texture
+        self._rf_layout = None          # (n_out, gh, gw, cell, gap, tw, th)
+        self._nt_series = {}            # group -> [series tags] to clear
+        self._nt_diag_size = (900, 300)
+        self._last_present = None       # (label, vec, result) for the live views
+        self._wevo = {}                 # neuron -> [mean weight uS] learning curve
+        self._wevo_epochs = []
+        self._cmap_lut_cache = None
+        self._nt_open = False           # studio window visible?
+        self._nt_win_rect = None        # last (w, h) seen, to detect manual resize
+        self._nt_maximized = False
+        self._nt_restore_rect = None    # (w, h, x, y) to restore from maximize
+        self._nt_spk_series = {}        # neuron -> training output-spike series
+        self._nt_spk_pts = {}           # neuron -> ([pres_idx], [neuron_row])
+        self._nt_pres_idx = 0           # training presentation counter
+        self._nt_paint = None           # custom-pattern paint grid (gh x gw)
+        self._nt_paint_gh = 0
+        self._nt_paint_gw = 0
+        self._nt_custom = []            # [(label, grid01)] painted patterns
+        self._nt_ds = None              # loaded dataset {images, labels, names}
+        self._nt_busy_load = False
 
     # =================================================================
     # fonts & themes
@@ -281,6 +309,7 @@ class App:
         files = {
             "body":  ("segoeui.ttf", 17),
             "small": ("segoeui.ttf", 14),
+            "chat_en": ("segoeui.ttf", 16),    # English chat body
             "bold":  ("segoeuib.ttf", 17),
             "h2":    ("seguisb.ttf", 21),
             "title": ("segoeuib.ttf", 24),
@@ -1466,6 +1495,10 @@ class App:
                 dpg.add_button(label="Cancel", width=80,
                                callback=self._on_sweep_cancel)
 
+        # Neuromorphic Trainer studio (a floating "canvas" - built hidden,
+        # opened from the toolbar / Run menu)
+        self._build_neuro_window()
+
         dpg.create_viewport(title=APP_TITLE, width=1600, height=980,
                             min_width=1160, min_height=720)
         dpg.set_viewport_resize_callback(self._on_resize)
@@ -1513,6 +1546,8 @@ class App:
             with dpg.menu(label="Run"):
                 dpg.add_menu_item(label="Run simulation  (F5)",
                                   callback=self.on_run)
+                dpg.add_menu_item(label="Neuromorphic Trainer studio...",
+                                  callback=self.on_open_trainer)
                 dpg.add_menu_item(label="Parametric Sweep...",
                                   callback=self.on_open_sweep_dialog)
                 dpg.add_menu_item(label="Fit plot axes", callback=self.fit_axes)
@@ -1587,6 +1622,14 @@ class App:
                              "the synaptic STDP curve dG vs dt.\nUses the "
                              "'STDP pair' generator's amplitudes/width and "
                              "the post-stimulus tail as settle time.")
+            bn = dpg.add_button(label="Neuro Trainer", tag="btn_trainer",
+                                callback=self.on_open_trainer)
+            dpg.bind_item_theme(bn, self.themes["primary"])
+            with dpg.tooltip(bn):
+                dpg.add_text("Open the Neuromorphic Trainer studio: wire the "
+                             "selected device into a crossbar of synapses + "
+                             "spiking neurons, train it with STDP and watch "
+                             "the weights (device conductances) update live.")
             dpg.add_button(label="Fit plots", callback=self.fit_axes)
             dpg.add_button(label="Export CSV", callback=self.export_csv)
             dpg.add_button(label="Rescan .va",
@@ -2270,8 +2313,8 @@ class App:
             # shaper unavailable: at least use a font that HAS the glyphs (the
             # Nirmala chat font) so it reads, instead of boxes from Segoe
             dpg.bind_item_font(msg, self.fonts["chat"])
-        elif "small" in self.fonts:              # plain Latin: compact body font
-            dpg.bind_item_font(msg, self.fonts["small"])
+        elif "chat_en" in self.fonts:            # plain Latin: 15px chat body
+            dpg.bind_item_font(msg, self.fonts["chat_en"])
         return msg
 
     def _add_pattern_card(self, wf):
@@ -4885,6 +4928,1180 @@ class App:
             self.rescan_va()
             self.log(f"[workspace] -> {self.workdir}")
 
+    # =================================================================
+    # Neuromorphic Trainer studio - a crossbar of device synapses driving
+    # spiking (LIF) neurons, trained by device-physics STDP.  A pop-out
+    # "canvas" (think Simulink) that visualises the weight updates live.
+    # =================================================================
+
+    # viridis-style colour ramp, expanded once to a 256-row [0,1] rgb LUT
+    _CMAP_STOPS = [(0.0, (68, 1, 84)), (0.22, (65, 68, 135)),
+                   (0.45, (42, 120, 142)), (0.66, (34, 168, 132)),
+                   (0.84, (122, 209, 81)), (1.0, (253, 231, 37))]
+
+    def _cmap_lut(self):
+        if self._cmap_lut_cache is None:
+            xs = np.array([s for s, _ in self._CMAP_STOPS])
+            cols = np.array([c for _, c in self._CMAP_STOPS], float) / 255.0
+            g = np.linspace(0, 1, 256)
+            self._cmap_lut_cache = np.stack(
+                [np.interp(g, xs, cols[:, k]) for k in range(3)], axis=1)
+        return self._cmap_lut_cache
+
+    def _cmap_color(self, v, alpha=255):
+        lut = self._cmap_lut()
+        r, g, b = lut[int(min(max(v, 0.0), 1.0) * 255)] * 255.0
+        return (int(r), int(g), int(b), alpha)
+
+    # ---- window construction ----------------------------------------
+
+    def _nt_num(self, tag, label, default, width=78, is_int=False, tip=None):
+        with dpg.group():
+            self._caption(label)
+            if is_int:
+                dpg.add_input_int(tag=tag, default_value=int(default),
+                                  width=width, step=0)
+            else:
+                dpg.add_input_double(tag=tag, default_value=float(default),
+                                     width=width, format="%.4g", step=0)
+        if tip:
+            with dpg.tooltip(tag):
+                dpg.add_text(tip, wrap=320)
+
+    def _build_neuro_window(self):
+        dpg.add_texture_registry(tag="nt_tex_reg")
+        # dataset pickers (a file, or a folder of MNIST ubyte / class subfolders)
+        with dpg.file_dialog(directory_selector=False, show=False, modal=True,
+                             width=640, height=420, tag="nt_ds_file_dialog",
+                             callback=self._on_nt_ds_file,
+                             default_path=self.workdir):
+            dpg.add_file_extension(".*")
+            dpg.add_file_extension(".npz", color=(220, 200, 140, 255))
+            dpg.add_file_extension(".csv", color=(150, 220, 160, 255))
+            dpg.add_file_extension(".gz", color=(150, 180, 255, 255))
+        dpg.add_file_dialog(directory_selector=True, show=False, modal=True,
+                            width=640, height=420, tag="nt_ds_dir_dialog",
+                            callback=self._on_nt_ds_dir,
+                            default_path=self.workdir)
+        # a real DearPyGui window: its title bar carries the collapse (minimize)
+        # triangle and the close (x) button; "Maximize" is the action-bar button
+        # below (single-viewport DPG has no OS maximize).  Sized to the viewport
+        # on open and kept in sync as the viewport / window is resized.
+        with dpg.window(tag="neuro_win", show=False, width=1360, height=900,
+                        pos=[40, 44], on_close=self._nt_on_close,
+                        label="Neuromorphic Trainer - spiking crossbar studio"):
+            with dpg.group(horizontal=True):
+                t = dpg.add_text("Neuromorphic Trainer", color=C_ACC)
+                if "h2" in self.fonts:
+                    dpg.bind_item_font(t, self.fonts["h2"])
+                self._small("crossbar of device synapses -> spiking neurons")
+                dpg.add_spacer(width=8)
+                b = dpg.add_button(label=" Build network ", callback=self.on_nt_build)
+                dpg.bind_item_theme(b, self.themes["primary"])
+                b = dpg.add_button(label=" Train ", tag="nt_btn_train",
+                                   callback=self.on_nt_train)
+                dpg.bind_item_theme(b, self.themes["primary"])
+                b = dpg.add_button(label=" Stop ", callback=self.on_nt_stop)
+                dpg.bind_item_theme(b, self.themes["stop"])
+                dpg.add_button(label=" Test ", callback=self.on_nt_test)
+                dpg.add_button(label=" Reset ", callback=self.on_nt_reset)
+                dpg.add_button(label=" Defaults ", callback=self.on_nt_defaults)
+                dpg.add_spacer(width=6)
+                dpg.add_button(label=" Maximize ", tag="nt_btn_max",
+                               callback=self.on_nt_toggle_max)
+                dpg.add_loading_indicator(tag="nt_busy", show=False, radius=2.0,
+                                          style=1, color=C_AMBER)
+                dpg.add_button(label="● ready", tag="nt_status")
+            dpg.add_text("build a network to begin", tag="nt_devlabel",
+                         color=C_TEXT2)
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                with dpg.child_window(width=326, border=False, tag="nt_controls"):
+                    self._nt_controls()
+                # the main canvas column: no scrollbar - its content is sized to
+                # fit the window in _nt_relayout()
+                with dpg.child_window(width=-1, border=False, no_scrollbar=True,
+                                      tag="nt_canvas_col"):
+                    with dpg.tab_bar():
+                        with dpg.tab(label="  Canvas  "):
+                            self._nt_canvas_tab()
+                        with dpg.tab(label="  Weights  "):
+                            self._nt_weights_tab()
+                        with dpg.tab(label="  Activity  "):
+                            self._nt_activity_tab()
+                        with dpg.tab(label="  Output spikes  "):
+                            self._nt_output_tab()
+                        with dpg.tab(label="  Inputs / Dataset  "):
+                            self._nt_patterns_tab()
+                        with dpg.tab(label="  Learning  "):
+                            self._nt_learning_tab()
+
+    def _nt_controls(self):
+        with dpg.collapsing_header(label="Network", default_open=True):
+            with dpg.group(horizontal=True):
+                self._nt_num("nt_gh", "GRID H", 5, 60, True,
+                             "Input pixel grid height (one spiking input "
+                             "neuron per pixel).")
+                self._nt_num("nt_gw", "GRID W", 5, 60, True,
+                             "Input pixel grid width.")
+                self._nt_num("nt_nout", "NEURONS", 4, 64, True,
+                             "Number of output LIF neurons (crossbar columns).")
+            with dpg.group(horizontal=True):
+                with dpg.group():
+                    self._caption("MODE")
+                    dpg.add_combo(["supervised", "unsupervised"],
+                                  default_value="supervised", tag="nt_mode",
+                                  width=130)
+                with dpg.group():
+                    self._caption("PATTERNS")
+                    dpg.add_combo(["bars", "letters", "digits", "random",
+                                   "custom", "dataset"],
+                                  default_value="bars", tag="nt_patset",
+                                  width=110)
+            with dpg.tooltip("nt_mode"):
+                dpg.add_text("supervised: a teacher current forces each "
+                             "pattern's assigned neuron to fire, so its "
+                             "receptive field grows into that pattern.\n"
+                             "unsupervised: pure winner-take-all competition - "
+                             "neurons self-organise to tile the patterns.",
+                             wrap=320)
+            with dpg.group(horizontal=True):
+                self._nt_num("nt_epochs", "EPOCHS", 20, 60, True,
+                             "Passes over the full pattern set.")
+                self._nt_num("nt_present", "PRESENT ms", 120, 72, False,
+                             "Duration each pattern is shown for.")
+                self._nt_num("nt_seed", "SEED", 1, 56, True)
+            with dpg.group(horizontal=True):
+                self._nt_num("nt_rate", "RATE Hz", 180, 70, False,
+                             "Peak Poisson spike rate for a fully-on pixel.")
+                self._nt_num("nt_dt", "STEP ms", 1.0, 60, False,
+                             "Integration time-step.")
+        with dpg.collapsing_header(label="Neuron (LIF + PSP)", default_open=True):
+            with dpg.group(horizontal=True):
+                self._nt_num("nt_tau_m", "tau_m ms", 20, 66, False,
+                             "Membrane time constant - how fast the potential "
+                             "leaks back to rest.")
+                self._nt_num("nt_vth", "V threshold", 1.0, 70, False,
+                             "Fire when the membrane potential crosses this "
+                             "(+ the adaptive homeostatic theta).")
+                self._nt_num("nt_refrac", "refrac ms", 5, 64, False,
+                             "Dead time after a spike.")
+            with dpg.group(horizontal=True):
+                self._nt_num("nt_epsp", "EPSP gain", 11.0, 70, False,
+                             "Excitatory post-synaptic potential weight - how "
+                             "strongly an excitatory input spike (scaled by the "
+                             "synapse conductance) depolarises the neuron. The "
+                             "drive is activity-normalised, so the same value "
+                             "works for a 5x5 grid or 28x28 MNIST.")
+                self._nt_num("nt_ipsp", "IPSP gain", 1.0, 70, False,
+                             "Inhibitory post-synaptic potential depth - "
+                             "feed-forward inhibition from inhibitory inputs "
+                             "(hyperpolarising).")
+                self._nt_num("nt_tausyn", "tau_syn ms", 8, 66, False,
+                             "Synaptic (PSP) trace decay.")
+            with dpg.group(horizontal=True):
+                self._nt_num("nt_inhib", "lateral inhib", 0.9, 78, False,
+                             "Winner-take-all lateral inhibition between output "
+                             "neurons (competition). 0 disables it.")
+                self._nt_num("nt_theta", "theta+ homeo", 0.06, 78, False,
+                             "Homeostatic threshold bump per output spike "
+                             "(keeps one neuron from hogging every pattern).")
+                self._nt_num("nt_teacher", "teacher", 1.4, 60, False,
+                             "Supervised teacher drive onto the target neuron.")
+        with dpg.collapsing_header(label="Synapse learning (STDP)",
+                                   default_open=True):
+            self._small("the network rule sets the DIRECTION of each write; the "
+                        "device twin sets the ACTUAL dG (its nonlinearity, "
+                        "soft bounds, retention).", color=C_MUTED)
+            with dpg.group(horizontal=True):
+                self._nt_num("nt_potamp", "pot amp", 200, 70, False,
+                             "Amplitude of a full potentiating programming "
+                             "pulse, in the device's drive unit.")
+                self._nt_num("nt_depamp", "dep amp", 200, 70, False,
+                             "Amplitude of a full depressing pulse.")
+                with dpg.group():
+                    self._caption("UNIT")
+                    dpg.add_text("pA", tag="nt_amp_unit", color=C_TEXT2)
+            with dpg.group(horizontal=True):
+                self._nt_num("nt_pwidth", "pulse ms", 10, 64, False,
+                             "Programming pulse width.")
+                self._nt_num("nt_aplus", "A+ rate", 1.0, 60, False,
+                             "Potentiation learning-rate scale.")
+                self._nt_num("nt_aminus", "A- rate", 1.0, 60, False,
+                             "Heterosynaptic depression rate.")
+            with dpg.group(horizontal=True):
+                self._nt_num("nt_offset", "LTP/LTD split", 0.25, 80, False,
+                             "Pre-trace split: inputs above this are "
+                             "potentiated on a post spike, those below are "
+                             "depressed. Carves the receptive field.")
+                self._nt_num("nt_taupre", "tau_pre ms", 20, 70, False,
+                             "Pre-synaptic eligibility-trace decay.")
+
+    def _nt_canvas_tab(self):
+        # the "main canvas": just the network diagram, sized to fill the tab in
+        # _nt_relayout() so it never needs a scrollbar
+        with self._pad(left=6, top=4, bottom=0):
+            self._small("inputs (pixel grid)  ->  memristive crossbar "
+                        "synapses  ->  LIF output neurons.   edge brightness = "
+                        "synaptic weight (device conductance);  node brightness "
+                        "= activity.", color=C_TEXT2)
+            Wd, Hd = self._nt_diag_size
+            dl = dpg.add_drawlist(width=Wd, height=Hd, tag="nt_diagram")
+            dpg.add_draw_layer(parent=dl, tag="nt_diag_layer")
+            dpg.add_text("trained on: -", tag="nt_pat_txt", color=C_MUTED)
+
+    def _nt_weights_tab(self):
+        with self._pad(left=6, top=4, bottom=0):
+            self._small("RECEPTIVE FIELDS  (each neuron's learned weight map; "
+                        "viridis = low->high conductance)", color=(126, 150, 220))
+            with dpg.child_window(height=190, border=False,
+                                  horizontal_scrollbar=True, tag="nt_rf_holder"):
+                pass
+            dpg.add_separator()
+            self._small("CROSSBAR CONDUCTANCE MATRIX  (rows = neurons, "
+                        "cols = input pixels)", color=(126, 150, 220))
+            with dpg.group(horizontal=True):
+                with dpg.plot(width=-92, height=-1, tag="nt_wm_plot",
+                              no_menus=True, no_mouse_pos=True):
+                    dpg.add_plot_axis(dpg.mvXAxis, label="input pixel",
+                                      tag="nt_wm_x", no_menus=True)
+                    dpg.add_plot_axis(dpg.mvYAxis, label="neuron",
+                                      tag="nt_wm_y", no_menus=True)
+                dpg.bind_colormap("nt_wm_plot", dpg.mvPlotColormap_Viridis)
+                dpg.add_colormap_scale(min_scale=0.0, max_scale=1.0,
+                                       colormap=dpg.mvPlotColormap_Viridis,
+                                       width=72, height=-1, tag="nt_wm_cbar",
+                                       label="uS")
+
+    def _nt_activity_tab(self):
+        with self._pad(left=6, top=4, bottom=0):
+            dpg.add_text("present a pattern (Train/Test) to see the dynamics - "
+                         "raster: grey = input spikes, orange = neuron spikes",
+                         tag="nt_act_title", color=C_TEXT2)
+            # linked, auto-filling stack so it scales to the window height
+            with dpg.subplots(2, 1, link_all_x=True, width=-1, height=-1,
+                              row_ratios=[1.0, 0.85]):
+                with dpg.plot(tag="nt_rast_plot", no_menus=True):
+                    dpg.add_plot_legend()
+                    dpg.add_plot_axis(dpg.mvXAxis, label="time (ms)",
+                                      tag="nt_rast_x")
+                    dpg.add_plot_axis(dpg.mvYAxis, label="unit (inputs | "
+                                      "neurons)", tag="nt_rast_y")
+                with dpg.plot(tag="nt_mem_plot", no_menus=True):
+                    dpg.add_plot_legend()
+                    dpg.add_plot_axis(dpg.mvXAxis, label="time (ms)",
+                                      tag="nt_mem_x")
+                    dpg.add_plot_axis(dpg.mvYAxis, label="membrane V (a.u.)",
+                                      tag="nt_mem_y")
+
+    def _nt_learning_tab(self):
+        with self._pad(left=6, top=4, bottom=0):
+            self._small("LEARNING CURVES  (mean synaptic weight per neuron vs "
+                        "epoch - the device conductances climbing/settling)",
+                        color=(126, 150, 220))
+            with dpg.plot(width=-1, height=-168, tag="nt_wevo_plot",
+                          no_menus=True):
+                dpg.add_plot_legend()
+                dpg.add_plot_axis(dpg.mvXAxis, label="epoch", tag="nt_wevo_x")
+                dpg.add_plot_axis(dpg.mvYAxis, label="mean weight (uS)",
+                                  tag="nt_wevo_y")
+            dpg.add_separator()
+            self._small("TEST / CLASSIFICATION", color=(126, 150, 220))
+            with dpg.child_window(height=-1, border=False):
+                dpg.add_text("run Test after training to classify every "
+                             "pattern", tag="nt_test_txt", wrap=900,
+                             color=C_TEXT2)
+
+    def _nt_output_tab(self):
+        with self._pad(left=6, top=4, bottom=0):
+            self._small("TRAINING OUTPUT SPIKES  (live) - a dot each time an "
+                        "output neuron fires during training; watch neurons "
+                        "specialise to patterns as the synapses learn",
+                        color=(126, 150, 220))
+            dpg.add_text("totals: -", tag="nt_spk_totals", color=C_TEXT2)
+            with dpg.plot(width=-1, height=-1, tag="nt_spk_plot",
+                          no_menus=True):
+                dpg.add_plot_legend()
+                dpg.add_plot_axis(dpg.mvXAxis, label="training presentation #",
+                                  tag="nt_spk_x")
+                dpg.add_plot_axis(dpg.mvYAxis, label="output neuron",
+                                  tag="nt_spk_y")
+
+    def _nt_patterns_tab(self):
+        with self._pad(left=6, top=4, bottom=0):
+            with dpg.group(horizontal=True):
+                # --- custom paint editor ---
+                with dpg.group():
+                    self._small("CUSTOM INPUT PATTERN  (click cells to paint; "
+                                "set PATTERNS = custom to train on these)",
+                                color=(126, 150, 220))
+                    dl = dpg.add_drawlist(width=300, height=300,
+                                          tag="nt_pat_editor")
+                    dpg.add_draw_layer(parent=dl, tag="nt_pat_layer")
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label=" New grid ",
+                                       callback=self._nt_paint_new)
+                        dpg.add_button(label=" Clear ",
+                                       callback=self._nt_paint_clear)
+                        b = dpg.add_button(label=" Add pattern ",
+                                           callback=self._nt_paint_add)
+                        dpg.bind_item_theme(b, self.themes["primary"])
+                        dpg.add_button(label=" Drop last ",
+                                       callback=self._nt_paint_drop)
+                    with dpg.tooltip(dl):
+                        dpg.add_text("Left-click / drag paints a pixel ON, "
+                                     "right-click / drag erases. 'Add pattern' "
+                                     "stores the current grid; build with "
+                                     "PATTERNS = custom to train on your set.",
+                                     wrap=320)
+                    dpg.add_text("custom patterns: 0", tag="nt_custom_txt",
+                                 color=C_TEXT2)
+                # --- dataset loader ---
+                with dpg.group():
+                    self._small("DATASET INPUT  (MNIST / images)  - set "
+                                "PATTERNS = dataset to train on it",
+                                color=(126, 150, 220))
+                    with dpg.group(horizontal=True):
+                        b = dpg.add_button(label=" Download MNIST ",
+                                           callback=self.on_nt_download_mnist)
+                        dpg.bind_item_theme(b, self.themes["primary"])
+                        dpg.add_button(label=" Load file... ",
+                                       callback=lambda: dpg.show_item(
+                                           "nt_ds_file_dialog"))
+                        dpg.add_button(label=" Load folder... ",
+                                       callback=lambda: dpg.show_item(
+                                           "nt_ds_dir_dialog"))
+                    self._small("file: MNIST .idx/.gz, keras .npz, a CSV "
+                                "(label,pixels), or one image.  folder: the 4 "
+                                "MNIST ubyte files, or images in per-class "
+                                "subfolders.", color=C_MUTED)
+                    with dpg.group(horizontal=True):
+                        self._nt_num("nt_ds_res", "RESOLUTION", 14, 64, True,
+                                     "Square grid the images are downsampled to "
+                                     "(also sets GRID H/W on build). Smaller = "
+                                     "fewer synapses = faster.")
+                        self._nt_num("nt_ds_perclass", "IMG/CLASS", 12, 64, True,
+                                     "How many images per class to sample for "
+                                     "the training set.")
+                        with dpg.group():
+                            self._caption("INVERT")
+                            dpg.add_checkbox(tag="nt_ds_invert",
+                                             default_value=False)
+                    dpg.add_text("no dataset loaded", tag="nt_ds_txt",
+                                 wrap=520, color=C_TEXT2)
+                    with dpg.child_window(height=210, border=False,
+                                          horizontal_scrollbar=True,
+                                          tag="nt_ds_holder"):
+                        pass
+
+    # ---- training output-spike stream -------------------------------
+
+    def _nt_reset_output(self):
+        self._nt_pres_idx = 0
+        self._nt_spk_pts = {}
+        for s in self._nt_spk_series.values():
+            if dpg.does_item_exist(s):
+                dpg.delete_item(s)
+        self._nt_spk_series = {}
+        if dpg.does_item_exist("nt_spk_totals"):
+            dpg.set_value("nt_spk_totals", "totals: -")
+
+    def _on_nt_spk(self, counts, winner):
+        idx = self._nt_pres_idx
+        self._nt_pres_idx += 1
+        if not dpg.does_item_exist("nt_spk_y"):
+            return
+        for j, c in enumerate(counts):
+            if c <= 0:
+                continue
+            xs, ys = self._nt_spk_pts.setdefault(j, ([], []))
+            xs.append(idx)
+            ys.append(j)
+            s = self._nt_spk_series.get(j)
+            if s and dpg.does_item_exist(s):
+                dpg.set_value(s, [xs, ys])
+            else:
+                self._nt_spk_series[j] = dpg.add_scatter_series(
+                    xs, ys, label=f"N{j}", parent="nt_spk_y")
+        tot = self.trainer.spike_count if self.trainer is not None else []
+        dpg.set_value("nt_spk_totals", "totals:  " + "   ".join(
+            f"N{j}={int(t)}" for j, t in enumerate(tot)))
+        if idx % 8 == 0:
+            dpg.fit_axis_data("nt_spk_x")
+            dpg.fit_axis_data("nt_spk_y")
+
+    # ---- custom pattern paint editor --------------------------------
+
+    def _nt_paint_grid_dims(self):
+        gh = min(max(int(self._nt_get("nt_gh", 5)), 2), 14)
+        gw = min(max(int(self._nt_get("nt_gw", 5)), 2), 14)
+        return gh, gw
+
+    def _nt_paint_new(self, *_):
+        gh, gw = self._nt_paint_grid_dims()
+        if self._nt_custom and (gh, gw) != (self._nt_paint_gh, self._nt_paint_gw):
+            self._nt_custom = []            # grid changed -> old ones incompatible
+            if dpg.does_item_exist("nt_custom_txt"):
+                dpg.set_value("nt_custom_txt", "custom patterns: 0")
+        self._nt_paint = np.zeros((gh, gw), np.float32)
+        self._nt_paint_gh, self._nt_paint_gw = gh, gw
+        self._nt_paint_redraw()
+
+    def _nt_paint_clear(self, *_):
+        if self._nt_paint is not None:
+            self._nt_paint[:] = 0.0
+            self._nt_paint_redraw()
+
+    def _nt_paint_add(self, *_):
+        if self._nt_paint is None or self._nt_paint.sum() <= 0:
+            self._nt_status("paint some pixels first", C_AMBER)
+            return
+        n = len(self._nt_custom)
+        self._nt_custom.append((f"custom {n}", self._nt_paint.copy()))
+        if dpg.does_item_exist("nt_custom_txt"):
+            dpg.set_value("nt_custom_txt",
+                          f"custom patterns: {len(self._nt_custom)}")
+        self._nt_paint_clear()
+        self._nt_status(f"added custom pattern ({len(self._nt_custom)} total)",
+                        C_GREEN)
+
+    def _nt_paint_drop(self, *_):
+        if self._nt_custom:
+            self._nt_custom.pop()
+            dpg.set_value("nt_custom_txt",
+                          f"custom patterns: {len(self._nt_custom)}")
+
+    def _nt_paint_redraw(self):
+        layer = "nt_pat_layer"
+        if not dpg.does_item_exist(layer) or self._nt_paint is None:
+            return
+        dpg.delete_item(layer, children_only=True)
+        gh, gw = self._nt_paint_gh, self._nt_paint_gw
+        W = H = 300
+        cw, ch = W / gw, H / gh
+        for r in range(gh):
+            for c in range(gw):
+                v = float(self._nt_paint[r, c])
+                col = self._cmap_color(v) if v > 0 else (26, 30, 40, 255)
+                dpg.draw_rectangle((c * cw, r * ch), ((c + 1) * cw, (r + 1) * ch),
+                                   fill=col, color=(50, 56, 70, 255),
+                                   parent=layer)
+
+    def _nt_tick_paint(self):
+        """Drag-paint the custom-pattern editor: left held = set, right = erase.
+        Driven from the render loop so click-and-drag works smoothly."""
+        if (self._nt_paint is None or not dpg.does_item_exist("nt_pat_editor")
+                or not dpg.is_item_hovered("nt_pat_editor")):
+            return
+        left = dpg.is_mouse_button_down(dpg.mvMouseButton_Left)
+        right = dpg.is_mouse_button_down(dpg.mvMouseButton_Right)
+        if not (left or right):
+            return
+        gx, gy = dpg.get_mouse_pos(local=False)
+        rmin = dpg.get_item_rect_min("nt_pat_editor")
+        lx, ly = gx - rmin[0], gy - rmin[1]
+        gh, gw = self._nt_paint_gh, self._nt_paint_gw
+        c = int(lx / (300.0 / gw))
+        r = int(ly / (300.0 / gh))
+        if 0 <= r < gh and 0 <= c < gw:
+            nv = 1.0 if left else 0.0
+            if self._nt_paint[r, c] != nv:
+                self._nt_paint[r, c] = nv
+                self._nt_paint_redraw()
+
+    # ---- dataset loading --------------------------------------------
+
+    def on_nt_download_mnist(self, *_):
+        if self._nt_busy_load:
+            return
+        self._nt_busy_load = True
+        self._nt_status("downloading MNIST (~11 MB)...", C_AMBER)
+        self.log("[neuro] downloading MNIST from the keras mirror...")
+        threading.Thread(target=self._nt_download_worker, daemon=True).start()
+
+    def _nt_download_worker(self):
+        try:
+            from . import datasets as nds
+            path = nds.download_mnist(os.path.join(self.workdir, "datasets"))
+            self.q.put(("nt_dataset", path, None))
+        except Exception as e:                          # noqa: BLE001
+            self.q.put(("nt_dataset", None, f"download failed: {e}"))
+
+    def _on_nt_ds_file(self, sender, app_data):
+        sel = app_data.get("file_path_name") or ""
+        paths = list((app_data.get("selections") or {}).values())
+        path = paths[0] if paths else sel
+        if path:
+            self._nt_load_dataset(path)
+
+    def _on_nt_ds_dir(self, sender, app_data):
+        path = app_data.get("file_path_name") or ""
+        if path:
+            self._nt_load_dataset(path)
+
+    def _nt_load_dataset(self, path):
+        if self._nt_busy_load:
+            return
+        self._nt_busy_load = True
+        self._nt_status("loading dataset...", C_AMBER)
+        threading.Thread(target=self._nt_load_worker, args=(path,),
+                         daemon=True).start()
+
+    def _nt_load_worker(self, path):
+        try:
+            from . import datasets as nds
+            imgs, labels, names = nds.load_any(path)
+            n = len(imgs)
+            classes = sorted(set((labels if labels is not None
+                                  else np.zeros(n, int)).tolist()))
+            self.q.put(("nt_dataset_loaded",
+                        {"images": imgs, "labels": labels, "names": names,
+                         "path": path, "n": n, "classes": classes}, None))
+        except Exception as e:                          # noqa: BLE001
+            self.q.put(("nt_dataset", None, f"load failed: {e!r}"))
+
+    def _on_nt_dataset(self, path, err):
+        self._nt_busy_load = False
+        if err:
+            self._nt_status(err, C_RED)
+            self.log(f"[neuro] {err}")
+            return
+        if path:                                        # downloaded -> now load
+            self._nt_load_dataset(path)
+
+    def _on_nt_dataset_loaded(self, ds, err):
+        self._nt_busy_load = False
+        if err or not ds:
+            self._nt_status(err or "dataset load failed", C_RED)
+            return
+        self._nt_ds = ds
+        nclass = len(ds["classes"])
+        dpg.set_value("nt_ds_txt",
+                      f"loaded {ds['n']} images, {nclass} classes "
+                      f"({os.path.basename(ds['path'])}). Set PATTERNS = "
+                      f"dataset and Build.")
+        dpg.set_value("nt_patset", "dataset")
+        if nclass > 1:
+            dpg.set_value("nt_nout", nclass)            # one neuron per class
+        self._nt_dataset_preview(ds)
+        self._nt_status(f"dataset ready: {ds['n']} imgs / {nclass} classes",
+                        C_GREEN)
+        self.log(f"[neuro] dataset loaded: {ds['n']} images, {nclass} classes")
+
+    def _nt_dataset_preview(self, ds):
+        """Montage of one example image per class into the preview strip."""
+        if not dpg.does_item_exist("nt_ds_holder"):
+            return
+        for tag in ("nt_ds_prev_img", "nt_ds_prev_tex"):
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+        from . import datasets as nds
+        imgs, labels, classes = ds["images"], ds["labels"], ds["classes"]
+        labels = (labels if labels is not None
+                  else np.zeros(len(imgs), int))
+        cell = 40
+        cols = min(len(classes), 10)
+        lut = self._cmap_lut()
+        mont = np.full((cell, cols * cell, 4), 0.08, np.float32)
+        mont[..., 3] = 1.0
+        for k, c in enumerate(classes[:cols]):
+            idx = np.where(np.asarray(labels) == c)[0]
+            if not len(idx):
+                continue
+            g = nds._resize(imgs[idx[0]], cell, cell).astype(np.float32)
+            g = g - g.min()
+            g = g / (g.max() or 1.0)
+            mont[:, k * cell:(k + 1) * cell, :3] = lut[
+                np.clip((g * 255).astype(int), 0, 255)]
+        dpg.add_raw_texture(cols * cell, cell, mont.reshape(-1),
+                            format=dpg.mvFormat_Float_rgba, parent="nt_tex_reg",
+                            tag="nt_ds_prev_tex")
+        dpg.add_image("nt_ds_prev_tex", tag="nt_ds_prev_img",
+                      parent="nt_ds_holder", width=cols * cell * 2,
+                      height=cell * 2)
+
+    # ---- pattern-source dispatch (for on_nt_build) ------------------
+
+    def _nt_build_patterns(self, cfg):
+        """Return (patterns, targets) for the selected PATTERNS source, or
+        (None, None) to use the built-in bank.  May adjust cfg in place
+        (grid + n_out for a dataset)."""
+        src = cfg.pattern_set
+        if src == "custom":
+            if not self._nt_custom:
+                raise ValueError("no custom patterns - paint some in the "
+                                 "Inputs/Dataset tab (Add pattern)")
+            gh, gw = self._nt_paint_gh or cfg.grid_h, self._nt_paint_gw or cfg.grid_w
+            cfg.grid_h, cfg.grid_w = gh, gw
+            pats = [(lbl, g.reshape(-1).astype(np.float32))
+                    for lbl, g in self._nt_custom]
+            targets = [k % cfg.n_out for k in range(len(pats))]
+            return pats, targets
+        if src == "dataset":
+            if not self._nt_ds:
+                raise ValueError("no dataset loaded - use Download MNIST / Load "
+                                 "in the Inputs/Dataset tab")
+            res = min(max(int(self._nt_get("nt_ds_res", 14)), 6), 28)
+            per = min(max(int(self._nt_get("nt_ds_perclass", 12)), 2), 60)
+            cfg.grid_h = cfg.grid_w = res
+            from . import datasets as nds
+            pats, targets, names = nds.to_patterns(
+                self._nt_ds["images"], self._nt_ds["labels"], res, res,
+                per_class=per, max_total=300, seed=cfg.seed,
+                invert=bool(self._nt_get("nt_ds_invert", False)))
+            cfg.n_out = max(cfg.n_out, len(names))
+            return pats, targets
+        return None, None
+
+    # ---- open / status ----------------------------------------------
+
+    def on_open_trainer(self, *_):
+        if not dpg.does_item_exist("neuro_win"):
+            return
+        dpg.configure_item("neuro_win", show=True)
+        self._nt_open = True
+        self._nt_maximized = True           # open filling the viewport
+        self._nt_fit_window()
+        dpg.focus_item("neuro_win")
+        if self._nt_paint is None:          # init the custom-pattern canvas
+            self._nt_paint_new()
+        if self.trainer is None:
+            self._nt_status("press 'Build network' to start", C_TEXT2)
+
+    def _nt_on_close(self):
+        self._nt_open = False
+
+    def _nt_fit_window(self):
+        """Size the studio to fill the viewport (the 'maximized' state)."""
+        vw = dpg.get_viewport_client_width()
+        vh = dpg.get_viewport_client_height()
+        if not vw or not vh:
+            return
+        m = 22
+        dpg.configure_item("neuro_win", pos=[m, 38],
+                           width=max(720, vw - 2 * m),
+                           height=max(480, vh - 38 - m))
+        if dpg.does_item_exist("nt_btn_max"):
+            dpg.configure_item("nt_btn_max", label=" Restore ")
+
+    def on_nt_toggle_max(self, *_):
+        self._nt_maximized = not self._nt_maximized
+        if self._nt_maximized:
+            self._nt_fit_window()
+            return
+        vw = dpg.get_viewport_client_width() or 1400
+        vh = dpg.get_viewport_client_height() or 900
+        w, h = min(1160, max(720, vw - 160)), min(780, max(480, vh - 140))
+        dpg.configure_item("neuro_win", width=w, height=h,
+                           pos=[max(20, (vw - w) // 2), max(30, (vh - h) // 2)])
+        if dpg.does_item_exist("nt_btn_max"):
+            dpg.configure_item("nt_btn_max", label=" Maximize ")
+
+    def _nt_tick_layout(self):
+        """Per-frame: keep the network-diagram drawlist sized to its canvas
+        column, so it tracks the window/viewport height with no scrollbar.
+        Cheap - it only reconfigures + redraws when the size actually changes."""
+        if not self._nt_open or not dpg.does_item_exist("nt_canvas_col"):
+            return
+        size = dpg.get_item_rect_size("nt_canvas_col")
+        if not size or size[0] < 60 or size[1] < 60:
+            return                                   # hidden / collapsed
+        w = max(360, int(size[0]) - 22)
+        h = max(220, int(size[1]) - 104)             # leave room for tab + caption
+        if (w, h) == self._nt_win_rect:
+            return
+        self._nt_win_rect = (w, h)
+        self._nt_diag_size = (w, h)
+        if dpg.does_item_exist("nt_diagram"):
+            dpg.configure_item("nt_diagram", width=w, height=h)
+            # redraw at the new size, but not while a worker is mutating the
+            # devices (the per-epoch snapshot redraws live during training)
+            if self.trainer is not None and not self.trainer_running:
+                self._nt_draw_diagram(self.trainer.weights_norm(),
+                                      self._last_present)
+
+    def _nt_status(self, text, color):
+        if dpg.does_item_exist("nt_status"):
+            dpg.configure_item("nt_status", label=f"● {text}")
+            th = self._status_themes.get(color)
+            if th is None:
+                th = self._mk_theme(f"ntstat_{color}", colors=[
+                    ("mvThemeCol_Button", (0, 0, 0, 0)),
+                    ("mvThemeCol_ButtonHovered", (0, 0, 0, 0)),
+                    ("mvThemeCol_ButtonActive", (0, 0, 0, 0)),
+                    ("mvThemeCol_Text", color)])
+                self._status_themes[color] = th
+            dpg.bind_item_theme("nt_status", th)
+
+    def _nt_busy(self, on):
+        if dpg.does_item_exist("nt_busy"):
+            dpg.configure_item("nt_busy", show=on)
+
+    # ---- parameter reading ------------------------------------------
+
+    def _nt_get(self, tag, default):
+        return dpg.get_value(tag) if dpg.does_item_exist(tag) else default
+
+    def _nt_device_factory(self):
+        keys = self._enabled_keys()
+        # fall back to a built-in default so the studio always works, even with
+        # nothing checked in the main window
+        key = keys[0] if keys else ("v2" if "v2" in SPEC_BY_KEY
+                                    else MODEL_SPECS[0].key)
+        spec = SPEC_BY_KEY.get(key)
+        if spec is None:
+            return None
+        pv = dict(self.param_values[key])
+        # silence the device's intrinsic STDP lock-in: in the crossbar the
+        # NETWORK rule decides plasticity direction, the device supplies the
+        # analog weight store (write nonlinearity / bounds / retention).
+        for silent in ("A_stdp", "A_stdp_V"):
+            if silent in pv:
+                pv[silent] = 0.0
+
+        def make(_cls=spec.cls, _pc=spec.params_cls, _pv=pv):
+            return _cls(_pc(**_pv))
+
+        return {"make": make, "kind": spec.input_kind, "label": spec.label}
+
+    def _nt_read_params(self):
+        N = neuro.NeuronParams(
+            tau_m=self._nt_get("nt_tau_m", 20.0),
+            v_threshold=self._nt_get("nt_vth", 1.0),
+            t_refractory=self._nt_get("nt_refrac", 5.0),
+            tau_syn=self._nt_get("nt_tausyn", 8.0),
+            epsp_gain=self._nt_get("nt_epsp", 11.0),
+            ipsp_gain=self._nt_get("nt_ipsp", 1.0),
+            inhibition=self._nt_get("nt_inhib", 0.9),
+            theta_plus=self._nt_get("nt_theta", 0.06),
+            teacher=self._nt_get("nt_teacher", 1.4))
+        kind = (self._nt_dev or {}).get("kind", "current")
+        ascale = 1e-12 if kind == "current" else 1.0   # pA -> A, or V
+        S = neuro.STDPParams(
+            a_plus=self._nt_get("nt_aplus", 1.0),
+            a_minus=self._nt_get("nt_aminus", 1.0),
+            offset=self._nt_get("nt_offset", 0.25),
+            tau_pre=self._nt_get("nt_taupre", 20.0),
+            pot_amp=self._nt_get("nt_potamp", 200.0) * ascale,
+            dep_amp=self._nt_get("nt_depamp", 200.0) * ascale,
+            pulse_width=max(self._nt_get("nt_pwidth", 10.0), 0.01) * 1e-3)
+        mode = self._nt_get("nt_mode", "supervised")
+        cfg = neuro.NetConfig(
+            grid_h=min(max(int(self._nt_get("nt_gh", 5)), 2), 14),
+            grid_w=min(max(int(self._nt_get("nt_gw", 5)), 2), 14),
+            n_out=min(max(int(self._nt_get("nt_nout", 4)), 1), 16),
+            mode="supervised" if mode.startswith("super") else "unsupervised",
+            present_ms=max(self._nt_get("nt_present", 120.0), 10.0),
+            dt_ms=max(self._nt_get("nt_dt", 1.0), 0.1),
+            max_rate_hz=max(self._nt_get("nt_rate", 180.0), 1.0),
+            seed=int(self._nt_get("nt_seed", 1)),
+            pattern_set=self._nt_get("nt_patset", "bars"))
+        return N, S, cfg
+
+    def on_nt_defaults(self, *_):
+        """Fill neuron / learning fields with values that suit the currently
+        selected device's drive kind (ECFET current vs FeFET voltage)."""
+        self._nt_dev = self._nt_device_factory()
+        kind = (self._nt_dev or {}).get("kind", "current")
+        common = {"nt_tau_m": 20, "nt_vth": 1.0, "nt_refrac": 5,
+                  "nt_tausyn": 8, "nt_ipsp": 1.0, "nt_inhib": 0.9,
+                  "nt_theta": 0.06, "nt_teacher": 1.4, "nt_pwidth": 10,
+                  "nt_aplus": 1.0, "nt_aminus": 1.0, "nt_offset": 0.25,
+                  "nt_taupre": 20}
+        if kind == "voltage":          # FeFET: gate-voltage programming
+            common.update(nt_epsp=6.0, nt_potamp=2.0, nt_depamp=2.0,
+                          nt_pwidth=1.0)
+            dpg.set_value("nt_amp_unit", "V")
+        else:                          # ECFET: gate-current programming (pA)
+            common.update(nt_epsp=11.0, nt_potamp=200, nt_depamp=200)
+            dpg.set_value("nt_amp_unit", "pA")
+        for tag, val in common.items():
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, val)
+        self._nt_status(f"defaults loaded for {kind}-driven synapse", C_GREEN)
+
+    # ---- build ------------------------------------------------------
+
+    def on_nt_build(self, *_):
+        if self.trainer_running:
+            return
+        self._nt_dev = self._nt_device_factory()
+        if not self._nt_dev:
+            self._nt_status("check a model (.va) in the main window first", C_RED)
+            self.log("[neuro] no device selected - enable a model first")
+            return
+        dpg.set_value("nt_amp_unit",
+                      "V" if self._nt_dev["kind"] == "voltage" else "pA")
+        N, S, cfg = self._nt_read_params()
+        try:
+            # custom / dataset sources supply explicit patterns (and may resize
+            # the grid + n_out); built-in sources return (None, None)
+            patterns, targets = self._nt_build_patterns(cfg)
+            self.trainer = neuro.Trainer(self._nt_dev["make"],
+                                         self._nt_dev["kind"], N, S, cfg,
+                                         patterns=patterns, targets=targets)
+        except Exception as e:                          # noqa: BLE001
+            self._nt_status(f"build failed: {e}", C_RED)
+            self.log(f"[neuro] build failed: {e!r}")
+            self.trainer = None
+            return
+        # reflect any grid / n_out the source chose back into the controls
+        dpg.set_value("nt_gh", cfg.grid_h)
+        dpg.set_value("nt_gw", cfg.grid_w)
+        dpg.set_value("nt_nout", cfg.n_out)
+        self._wevo = {j: [] for j in range(cfg.n_out)}
+        self._wevo_epochs = []
+        self._last_present = None
+        self._nt_reset_output()
+        self._nt_setup_rf_texture(cfg.n_out, cfg.grid_h, cfg.grid_w)
+        pol = "+" if self.trainer.pot_sign > 0 else "-"
+        dpg.set_value("nt_devlabel",
+                      f"synapse: {self._nt_dev['label']}   |   {cfg.grid_h}x"
+                      f"{cfg.grid_w} = {self.trainer.n_in} inputs  ->  "
+                      f"{cfg.n_out} neurons   |   "
+                      f"{self.trainer.n_in * cfg.n_out} device synapses   |   "
+                      f"potentiation drive: {pol}   |   mode: {cfg.mode}")
+        labels = [lbl for lbl, _ in self.trainer.patterns]
+        shown = ", ".join(dict.fromkeys(labels[:24]))    # unique, first few
+        dpg.set_value("nt_pat_txt", f"{len(labels)} patterns: {shown}"
+                      + (" ..." if len(labels) > 24 else ""))
+        self._apply_nt_snapshot(self._nt_snapshot(0, 0))
+        self._nt_status(f"built - {self.trainer.n_in} inputs x {cfg.n_out} "
+                        f"neurons", C_GREEN)
+        self.log(f"[neuro] built {self._nt_dev['label']} crossbar: "
+                 f"{cfg.grid_h}x{cfg.grid_w} -> {cfg.n_out}, mode {cfg.mode}, "
+                 f"{len(self.trainer.patterns)} patterns")
+
+    def _nt_setup_rf_texture(self, n_out, gh, gw):
+        cell = max(8, min(30, 130 // max(gw, 1)))
+        gap = 6
+        tw = n_out * gw * cell + (n_out - 1) * gap
+        th = gh * cell
+        if self._rf_tex and dpg.does_item_exist(self._rf_tex):
+            dpg.delete_item(self._rf_tex)
+        blank = self._blank_rgba(tw, th)
+        self._rf_tex = dpg.add_raw_texture(
+            tw, th, blank, format=dpg.mvFormat_Float_rgba, parent="nt_tex_reg")
+        self._rf_layout = (n_out, gh, gw, cell, gap, tw, th)
+        if dpg.does_item_exist("nt_rf_image"):
+            dpg.delete_item("nt_rf_image")
+        dpg.add_image(self._rf_tex, tag="nt_rf_image", parent="nt_rf_holder",
+                      width=tw, height=th)
+
+    @staticmethod
+    def _blank_rgba(tw, th):
+        img = np.empty((th * tw, 4), np.float32)
+        img[:] = (0.08, 0.09, 0.12, 1.0)
+        return img.reshape(-1)
+
+    def _nt_montage(self, Wn):
+        n_out, gh, gw, cell, gap, tw, th = self._rf_layout
+        lut = self._cmap_lut()
+        img = np.empty((th, tw, 4), np.float32)
+        img[:] = (0.08, 0.09, 0.12, 1.0)
+        for j in range(min(n_out, Wn.shape[0])):
+            rf = Wn[j].reshape(gh, gw)
+            rgb = lut[np.clip((rf * 255).astype(int), 0, 255)]    # (gh,gw,3)
+            block = np.repeat(np.repeat(rgb, cell, 0), cell, 1)
+            x0 = j * (gw * cell + gap)
+            img[:, x0:x0 + gw * cell, :3] = block
+        return img.reshape(-1)
+
+    # ---- snapshot (pure data, safe to build off-thread) -------------
+
+    def _nt_snapshot(self, epoch, epochs):
+        tr = self.trainer
+        Wn = tr.weights_norm()
+        W_uS = tr.weights_uS()
+        return {
+            "epoch": epoch, "epochs": epochs,
+            "Wn": Wn, "W_uS": W_uS, "rf_rgba": self._nt_montage(Wn),
+            "mean_w": [float(W_uS[j].mean()) for j in range(tr.n_out)],
+            "present": self._last_present,
+            "spikes": int(tr.spike_count.sum()),
+        }
+
+    # ---- snapshot rendering (main thread) ---------------------------
+
+    def _apply_nt_snapshot(self, snap):
+        if (self._rf_tex and dpg.does_item_exist(self._rf_tex)
+                and snap.get("rf_rgba") is not None):
+            dpg.set_value(self._rf_tex, snap["rf_rgba"])
+        self._nt_draw_weight_matrix(snap["W_uS"])
+        self._nt_draw_diagram(snap["Wn"], snap.get("present"))
+        if snap["epoch"] > 0:
+            self._wevo_epochs.append(snap["epoch"])
+            for j, mw in enumerate(snap["mean_w"]):
+                self._wevo.setdefault(j, []).append(mw)
+            self._nt_draw_wevo()
+        if snap.get("present"):
+            self._nt_draw_activity(*snap["present"])
+
+    def _nt_clear(self, group):
+        for s in self._nt_series.get(group, []):
+            if dpg.does_item_exist(s):
+                dpg.delete_item(s)
+        self._nt_series[group] = []
+
+    def _nt_draw_weight_matrix(self, W_uS):
+        if not dpg.does_item_exist("nt_wm_y"):
+            return
+        self._nt_clear("wm")
+        n_out, n_in = W_uS.shape
+        lo, hi = float(W_uS.min()), float(W_uS.max())
+        if hi - lo < 1e-6:
+            hi = lo + 1.0
+        s = dpg.add_heat_series(
+            W_uS.reshape(-1).tolist(), n_out, n_in, scale_min=lo, scale_max=hi,
+            bounds_min=(0.0, 0.0), bounds_max=(float(n_in), float(n_out)),
+            format="", parent="nt_wm_y")
+        self._nt_series["wm"] = [s]
+        dpg.configure_item("nt_wm_cbar", min_scale=lo, max_scale=hi)
+        dpg.fit_axis_data("nt_wm_x")
+        dpg.fit_axis_data("nt_wm_y")
+
+    def _nt_draw_diagram(self, Wn, present):
+        layer = "nt_diag_layer"
+        if not dpg.does_item_exist(layer) or self._rf_layout is None:
+            return
+        dpg.delete_item(layer, children_only=True)
+        n_out, gh, gw = self._rf_layout[:3]
+        n_in = gh * gw
+        Wd, Hd = self._nt_diag_size
+        # proportional layout, so it scales with the (now responsive) canvas
+        pad = max(20.0, Hd * 0.07)
+        gx0, gx1 = Wd * 0.05, Wd * 0.34       # input pixel-grid region
+        ox = Wd * 0.87                         # output-neuron column
+        sx = (gx1 - gx0) / max(gw, 1)
+        sy = (Hd - 2 * pad) / max(gh, 1)
+        ipos = {}
+        for r in range(gh):
+            for c in range(gw):
+                ipos[r * gw + c] = (gx0 + c * sx + sx / 2,
+                                    pad + r * sy + sy / 2)
+        opos = [(ox, pad + (j + 0.5) * (Hd - 2 * pad) / max(n_out, 1))
+                for j in range(n_out)]
+
+        vec = present[1] if present else None
+        counts = present[2]["n_out_spikes"] if present else None
+        winner = present[2]["winner"] if present else -1
+
+        # crossbar slab hint
+        sx0, sx1 = gx1 + Wd * 0.04, ox - Wd * 0.035
+        dpg.draw_rectangle((sx0, pad - 8), (sx1, Hd - pad + 8),
+                           color=(60, 70, 92, 120), fill=(26, 30, 40, 90),
+                           rounding=6, parent=layer)
+        dpg.draw_text((0.5 * (sx0 + sx1) - 34, pad - 24), "crossbar",
+                      size=14, color=(120, 132, 160), parent=layer)
+
+        # edges: strongest few synapses per neuron, brightness = weight
+        keep = min(n_in, 24)
+        for j in range(n_out):
+            order = np.argsort(Wn[j])[::-1][:keep]
+            for i in order:
+                w = float(Wn[j][i])
+                if w < 0.06:
+                    continue
+                col = self._cmap_color(w, alpha=int(55 + 200 * w))
+                dpg.draw_line(ipos[int(i)], opos[j], color=col,
+                              thickness=0.6 + 2.6 * w, parent=layer)
+
+        # input nodes (brightness = current pattern intensity)
+        rad = max(3.0, min(sx, sy) * 0.34)
+        for i, (x, y) in ipos.items():
+            inten = float(vec[i]) if vec is not None else 0.18
+            g = int(45 + 200 * inten)
+            dpg.draw_circle((x, y), rad, fill=(g, g, min(255, g + 25), 255),
+                            color=(90, 100, 120, 160), parent=layer)
+        dpg.draw_text((gx0 - 6, Hd - pad + 10), "inputs (pixel grid)",
+                      size=14, color=(140, 150, 172), parent=layer)
+
+        # output neurons (brightness = spikes this presentation)
+        orad = max(9.0, min(20.0, Hd * 0.045))
+        cmax = max(counts) if counts else 1
+        for j, (x, y) in enumerate(opos):
+            act = (counts[j] / cmax) if (counts and cmax) else 0.0
+            fill = self._cmap_color(0.15 + 0.85 * act, 255)
+            ring = (255, 178, 90, 255) if j == winner else (90, 100, 124, 220)
+            dpg.draw_circle((x, y), orad, fill=fill, color=ring, thickness=2.5,
+                            parent=layer)
+            lbl = f"N{j}" + (f"  {counts[j]}sp" if counts else "")
+            dpg.draw_text((x + orad + 5, y - 8), lbl, size=14,
+                          color=(200, 208, 224), parent=layer)
+        dpg.draw_text((ox - 30, Hd - pad + 10), "output neurons", size=14,
+                      color=(140, 150, 172), parent=layer)
+
+    def _nt_draw_wevo(self):
+        if not dpg.does_item_exist("nt_wevo_y"):
+            return
+        self._nt_clear("wevo")
+        xs = self._wevo_epochs
+        series = []
+        for j in sorted(self._wevo):
+            ys = self._wevo[j]
+            if not ys:
+                continue
+            series.append(dpg.add_line_series(
+                xs[:len(ys)], ys, label=f"neuron {j}", parent="nt_wevo_y"))
+        self._nt_series["wevo"] = series
+        dpg.fit_axis_data("nt_wevo_x")
+        dpg.fit_axis_data("nt_wevo_y")
+
+    def _nt_draw_activity(self, label, vec, res):
+        n_in = self.trainer.n_in if self.trainer else 0
+        if dpg.does_item_exist("nt_act_title"):
+            dpg.set_value("nt_act_title",
+                          f"pattern '{label}'  ->  winner neuron "
+                          f"{res['winner']}   (output spikes: "
+                          f"{res['n_out_spikes']})")
+        # raster
+        if dpg.does_item_exist("nt_rast_y"):
+            self._nt_clear("rast")
+            ser = []
+            in_sp = res["in_spikes"]
+            if in_sp:
+                xs = [t for t, _ in in_sp]
+                ys = [i for _, i in in_sp]
+                ser.append(dpg.add_scatter_series(xs, ys, label="inputs",
+                                                  parent="nt_rast_y"))
+            xs2, ys2 = [], []
+            for j, sp in enumerate(res["out_spikes"]):
+                xs2 += list(sp)
+                ys2 += [n_in + j] * len(sp)
+            if xs2:
+                ser.append(dpg.add_scatter_series(
+                    xs2, ys2, label="neuron spikes", parent="nt_rast_y"))
+            self._nt_series["rast"] = ser
+            dpg.fit_axis_data("nt_rast_x")
+            dpg.fit_axis_data("nt_rast_y")
+        # membrane
+        if dpg.does_item_exist("nt_mem_y"):
+            self._nt_clear("mem")
+            v = res["v_trace"]
+            dt = res["dt_ms"]
+            tarr = [k * dt for k in range(res["n_steps"])]
+            ser = []
+            for j in range(v.shape[1]):
+                ser.append(dpg.add_line_series(
+                    tarr, v[:, j].tolist(), label=f"N{j}", parent="nt_mem_y"))
+            vth = self.trainer.N.v_threshold if self.trainer else 1.0
+            ser.append(dpg.add_line_series(
+                [tarr[0], tarr[-1]] if tarr else [0, 1], [vth, vth],
+                label="threshold", parent="nt_mem_y"))
+            self._nt_series["mem"] = ser
+            dpg.fit_axis_data("nt_mem_x")
+            dpg.fit_axis_data("nt_mem_y")
+
+    # ---- train / test / stop / reset --------------------------------
+
+    def on_nt_train(self, *_):
+        if self.trainer_running:
+            return
+        if self.trainer is None:
+            self.on_nt_build()
+            if self.trainer is None:
+                return
+        epochs = max(1, int(self._nt_get("nt_epochs", 20)))
+        self.trainer_running = True
+        self._trainer_stop = False
+        self._nt_busy(True)
+        self._nt_status(f"training - {epochs} epochs", C_AMBER)
+        self.log(f"[neuro] training {epochs} epochs on "
+                 f"{len(self.trainer.patterns)} patterns")
+        threading.Thread(target=self._nt_train_worker, args=(epochs,),
+                         daemon=True).start()
+
+    def _nt_train_worker(self, epochs):
+        tr = self.trainer
+        pats = tr.patterns
+        n = len(pats)
+        rng = np.random.default_rng(tr.cfg.seed + 777)
+        done = 0
+        try:
+            for e in range(epochs):
+                if self._trainer_stop:
+                    break
+                for k in rng.permutation(n):
+                    if self._trainer_stop:
+                        break
+                    k = int(k)
+                    tgt = tr.target_of[k] if tr.cfg.mode == "supervised" else None
+                    res = tr.present(pats[k][1], target=tgt, learn=True)
+                    self._last_present = (pats[k][0], pats[k][1], res)
+                    self.q.put(("nt_spk", res["n_out_spikes"], res["winner"]))
+                done = e + 1
+                self.q.put(("nt_snap", self._nt_snapshot(done, epochs)))
+        except Exception as ex:                          # noqa: BLE001
+            self.q.put(("log", f"[neuro] training error: {ex!r}"))
+        self.q.put(("nt_done", {"epochs": done, "stopped": self._trainer_stop}))
+
+    def on_nt_stop(self, *_):
+        if self.trainer_running:
+            self._trainer_stop = True
+            self._nt_status("stopping...", C_AMBER)
+
+    def on_nt_reset(self, *_):
+        if self.trainer_running:
+            return
+        self.on_nt_build()
+
+    def on_nt_test(self, *_):
+        if self.trainer is None or self.trainer_running:
+            if self.trainer is None:
+                self._nt_status("build + train a network first", C_RED)
+            return
+        self.trainer_running = True
+        self._nt_busy(True)
+        self._nt_status("testing all patterns...", C_AMBER)
+        threading.Thread(target=self._nt_test_worker, daemon=True).start()
+
+    def _nt_test_worker(self):
+        tr = self.trainer
+        try:
+            rows = tr.classify()
+            k = 0
+            res = tr.present(tr.patterns[k][1], target=None, learn=False)
+            self._last_present = (tr.patterns[k][0] + " (test)",
+                                  tr.patterns[k][1], res)
+            snap = self._nt_snapshot(len(self._wevo_epochs), 0)
+            self.q.put(("nt_test", rows, snap))
+        except Exception as ex:                          # noqa: BLE001
+            self.q.put(("log", f"[neuro] test error: {ex!r}"))
+            self.q.put(("nt_test", [], None))
+
+    def _on_nt_done(self, info):
+        self.trainer_running = False
+        self._nt_busy(False)
+        msg = (f"stopped at epoch {info['epochs']}" if info["stopped"]
+               else f"trained {info['epochs']} epochs")
+        self._nt_status(msg, C_GREEN)
+        self.log(f"[neuro] {msg}")
+
+    def _on_nt_test(self, rows, snap):
+        self.trainer_running = False
+        self._nt_busy(False)
+        if snap is not None:
+            self._apply_nt_snapshot(snap)
+        if not rows:
+            self._nt_status("test failed", C_RED)
+            return
+        correct = sum(1 for r in rows if r["winner"] == r["target"])
+        mode = self.trainer.cfg.mode if self.trainer else "supervised"
+        lines = []
+        for r in rows:
+            mark = ""
+            if mode == "supervised":
+                mark = "  OK" if r["winner"] == r["target"] else "  x"
+            lines.append(f"  '{r['label']}'  ->  neuron {r['winner']}"
+                         f"{mark}   (spikes {r['counts']})")
+        head = (f"accuracy {correct}/{len(rows)} "
+                f"({100*correct/len(rows):.0f}%)\n" if mode == "supervised"
+                else f"{len(rows)} patterns, "
+                     f"{len({r['winner'] for r in rows})} distinct winners\n")
+        dpg.set_value("nt_test_txt", head + "\n".join(lines))
+        self._nt_status("test done - see the Learning tab", C_GREEN)
+        self.log(f"[neuro] test: " + head.strip().replace("\n", " "))
+
     def _about(self):
         self.log("NeuroVAT - neuromorphic Verilog-A tester. Behavioral Python "
                  "twins of the workspace .va models, neuromorphic stimulus "
@@ -4915,6 +6132,9 @@ class App:
         center = max(430, vw - LEFT_W - RIGHT_W - 44)
         if dpg.does_item_exist("center_child"):
             dpg.configure_item("center_child", width=center)
+        # keep the studio filling the viewport while it is maximized
+        if self._nt_open and self._nt_maximized:
+            self._nt_fit_window()
 
     # =================================================================
     # main loop
@@ -4947,6 +6167,18 @@ class App:
                     self._on_virtuoso_done(item[1], item[2])
                 elif kind == "virt_browse":
                     self._on_virt_browse(item[1], item[2])
+                elif kind == "nt_snap":
+                    self._apply_nt_snapshot(item[1])
+                elif kind == "nt_done":
+                    self._on_nt_done(item[1])
+                elif kind == "nt_test":
+                    self._on_nt_test(item[1], item[2])
+                elif kind == "nt_spk":
+                    self._on_nt_spk(item[1], item[2])
+                elif kind == "nt_dataset":
+                    self._on_nt_dataset(item[1], item[2])
+                elif kind == "nt_dataset_loaded":
+                    self._on_nt_dataset_loaded(item[1], item[2])
             except Exception as e:
                 self.log(f"[ui] error: {e!r}")
 
@@ -4959,6 +6191,8 @@ class App:
             self._tick_probe_drag()
             self._hide_tip_if_stale()
             self._tick_menu_dismiss()
+            self._nt_tick_layout()
+            self._nt_tick_paint()
             self._watch_code()
             dpg.render_dearpygui_frame()
             frame += 1
