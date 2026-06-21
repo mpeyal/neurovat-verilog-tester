@@ -346,6 +346,28 @@ class Trainer:
         return np.array([[device_weight(d) for d in row]
                          for row in self.crossbars[c]])
 
+    def set_weights(self, c, G_S):
+        """Restore a saved-model crossbar: write each device's retained
+        conductance (S) directly, clamped to the device range.  Sets the
+        nonvolatile store `G_nv` when the model has one (ECFET; `G` is a derived
+        property there), else the plain `G` (RRAM/memristor)."""
+        G = np.asarray(G_S, float)
+        for j, row in enumerate(self.crossbars[c]):
+            for i, dev in enumerate(row):
+                g = float(min(max(G[j][i], self.g_min), self.g_max))
+                if hasattr(dev, "G_nv"):
+                    dev.G_nv = g
+                    if hasattr(dev, "pools"):       # clear fast transients
+                        try:
+                            dev.pools = [0.0 for _ in dev.pools]
+                        except Exception:           # noqa: BLE001
+                            pass
+                else:
+                    try:
+                        dev.G = g
+                    except AttributeError:
+                        pass
+
     def weights_uS(self, c=0):
         return self.weights_S(c) * 1e6
 
