@@ -249,6 +249,43 @@ def to_patterns(images, labels, gh, gw, per_class=12, max_total=240,
     return patterns, targets, names
 
 
+def to_patterns_split(images, labels, gh, gw, train_per_class=12,
+                      test_per_class=8, n_classes=None, seed=0, invert=False):
+    """Like to_patterns, but returns DISJOINT train and test sets (held-out
+    images per class) so the GUI can report real generalisation accuracy.
+    Returns (train_pats, train_tgts, test_pats, test_tgts, class_names)."""
+    rng = np.random.default_rng(seed)
+    n = len(images)
+    if labels is None:
+        labels = np.zeros(n, int)
+    labels = np.asarray(labels).ravel().astype(int)
+    classes = sorted(set(labels.tolist()))
+    if n_classes:
+        classes = classes[:n_classes]
+    cls_index = {c: k for k, c in enumerate(classes)}
+
+    def render(i, c):
+        g = _resize(images[i], gh, gw)
+        g = g - g.min()
+        g = g / (g.max() or 1.0)
+        if invert:
+            g = 1.0 - g
+        return (str(c), g.reshape(-1).astype(np.float32)), cls_index[c]
+
+    tr_p, tr_t, te_p, te_t = [], [], [], []
+    for c in classes:
+        ids = np.where(labels == c)[0]
+        rng.shuffle(ids)
+        for i in ids[:train_per_class]:
+            p, t = render(int(i), c); tr_p.append(p); tr_t.append(t)
+        for i in ids[train_per_class:train_per_class + test_per_class]:
+            p, t = render(int(i), c); te_p.append(p); te_t.append(t)
+    order = rng.permutation(len(tr_p))
+    tr_p = [tr_p[i] for i in order]
+    tr_t = [tr_t[i] for i in order]
+    return tr_p, tr_t, te_p, te_t, [str(c) for c in classes]
+
+
 def download_mnist(cache_dir):
     """Fetch the keras MNIST .npz into cache_dir; return its path.  Raises on
     failure (offline, etc.) - the caller logs it."""

@@ -31,6 +31,7 @@ results/.agent_backup/
 results/agent_snapshot.json
 results/agent_spec.json
 results/agent_out.json
+results/neuro_snapshot.json
 results/gui_*.csv
 
 # test + screenshot artifacts (generated)
