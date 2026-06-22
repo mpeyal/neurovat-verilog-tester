@@ -295,3 +295,32 @@ def download_mnist(cache_dir):
     if not os.path.exists(dest):
         urllib.request.urlretrieve(MNIST_NPZ_URL, dest)
     return dest
+
+
+def _to_raw_github(url):
+    """Rewrite a GitHub 'blob' page URL to its raw-content URL so it downloads
+    the file, not the HTML page.  Other URLs pass through unchanged."""
+    if "github.com/" in url and "/blob/" in url:
+        url = url.replace("https://github.com/",
+                          "https://raw.githubusercontent.com/", 1)
+        url = url.replace("/blob/", "/", 1)
+    return url
+
+
+def download_url(url, cache_dir):
+    """Fetch a dataset from a direct / raw URL (raw GitHub, a mirror, ...) into
+    cache_dir and return the local path.  GitHub 'blob' links are auto-rewritten
+    to raw; the local name keeps the URL's filename so load_any can dispatch on
+    its extension (.npz / .csv / .idx / .gz / image)."""
+    import urllib.request
+    import urllib.parse
+    url = _to_raw_github(url.strip())
+    os.makedirs(cache_dir, exist_ok=True)
+    name = os.path.basename(urllib.parse.urlparse(url).path) or "dataset"
+    if "." not in name:                              # let load_any try IDX
+        name += ".idx"
+    dest = os.path.join(cache_dir, name)
+    req = urllib.request.Request(url, headers={"User-Agent": "neurovat/1.0"})
+    with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
+        f.write(r.read())
+    return dest

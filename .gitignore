@@ -26,6 +26,11 @@ probe*_tmp.*
 results/*.png
 results/*.csv
 
+# downloaded datasets (MNIST etc.) + saved-model JSON (outputs, not source)
+/datasets/
+results/models/
+/aved_model/
+
 # agent / GUI transient outputs
 results/.agent_backup/
 results/agent_snapshot.json

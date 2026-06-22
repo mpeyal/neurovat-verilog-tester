@@ -104,6 +104,7 @@ NT_CONTROLS = [
     ("nt_bg_rate", "background firing Hz"), ("nt_input_noise", "sensor noise 0-1"),
     ("nt_signal_frac", "fraction of afferents carrying the pattern 0-1"),
     ("nt_jitter", "spike jitter ms"), ("nt_vnoise", "membrane noise sigma"),
+    ("nt_pat_ms", "pattern-active ms within the window (rest = noise)"),
     ("nt_wnoise", "device write noise sigma_c2c"),
     ("nt_ds_res", "dataset downsample resolution"),
     ("nt_ds_perclass", "dataset images per class"),
@@ -424,6 +425,8 @@ class App:
         self._nt_last_metrics = None    # last eval summary (for the agent)
         self._nt_agent_run = False      # an agent-triggered train is in flight
         self._nt_agent_rounds = 0       # auto-analyze loop guard
+        self._nt_best_acc = 0.0         # best accuracy the auto-loop has reached
+        self._nt_no_improve = 0         # rounds since the best improved (patience)
         self._nt_cell = None            # selected synapse (c, j, i) to inspect
         self._nt_cell_hits = []         # [(c, j, i, x, y)] clickable cells on canvas
         self._nt_anim_t = 0.0           # cell-inspector animation clock (s)
@@ -4703,6 +4706,8 @@ class App:
             self._handle_command(text)
             return
         self._nt_agent_rounds = 0           # fresh user turn resets the auto-loop
+        self._nt_best_acc = 0.0
+        self._nt_no_improve = 0
         self._main_send(text)
 
     def _main_send(self, text):
@@ -5465,6 +5470,13 @@ class App:
                              "Gaussian temporal jitter (sigma, ms) applied to "
                              "every spike - blurs spike timing. Most meaningful "
                              "with latency encoding / tight patterns.")
+                self._nt_num("nt_pat_ms", "pattern ms", 0, 72, False,
+                             "How long the PATTERN is actually shown WITHIN "
+                             "PRESENT ms (centred in the window); the rest of "
+                             "the window is background-noise only - the embedded-"
+                             "pattern paradigm. 0 (or >= PRESENT ms) = pattern "
+                             "for the whole window. Needs 'bg rate' > 0 so the "
+                             "noise-only part actually fires.")
             with dpg.group(horizontal=True):
                 self._nt_num("nt_input_noise", "input noise", 0.0, 78, False,
                              "Per-presentation sensor noise on the pixels "
@@ -6010,10 +6022,18 @@ class App:
                         dpg.add_button(label=" Load folder... ",
                                        callback=lambda: dpg.show_item(
                                            "nt_ds_dir_dialog"))
-                    self._small("file: MNIST .idx/.gz, keras .npz, a CSV "
+                    dpg.add_input_text(
+                        tag="nt_ds_url", width=-1,
+                        hint="https://...  raw GitHub / direct URL to "
+                             ".npz / .csv / .idx.gz")
+                    b = dpg.add_button(label=" Fetch URL ", width=-1,
+                                       callback=self.on_nt_fetch_url)
+                    dpg.bind_item_theme(b, self.themes["primary"])
+                    self._small("file/URL: MNIST .idx/.gz, keras .npz, a CSV "
                                 "(label,pixels), or one image.  folder: the 4 "
                                 "MNIST ubyte files, or images in per-class "
-                                "subfolders.", color=C_MUTED)
+                                "subfolders.  GitHub 'blob' links auto-convert "
+                                "to raw.", color=C_MUTED)
                     with dpg.group(horizontal=True):
                         self._nt_num("nt_ds_res", "RESOLUTION", 14, 64, True,
                                      "Square grid the images are downsampled to "
@@ -6168,6 +6188,29 @@ class App:
             self.q.put(("nt_dataset", path, None))
         except Exception as e:                          # noqa: BLE001
             self.q.put(("nt_dataset", None, f"download failed: {e}"))
+
+    def on_nt_fetch_url(self, *_):
+        """Download a dataset straight from a URL (raw GitHub, a mirror, ...)
+        then load it through the normal pipeline (load_any dispatches by type)."""
+        url = (dpg.get_value("nt_ds_url") or "").strip()
+        if not url:
+            self._nt_status("paste a dataset URL first", C_AMBER)
+            return
+        if self._nt_busy_load:
+            return
+        self._nt_busy_load = True
+        self._nt_status("downloading from URL...", C_AMBER)
+        self.log(f"[neuro] fetching dataset from {url}")
+        threading.Thread(target=self._nt_url_worker, args=(url,),
+                         daemon=True).start()
+
+    def _nt_url_worker(self, url):
+        try:
+            from . import datasets as nds
+            path = nds.download_url(url, os.path.join(self.workdir, "datasets"))
+            self.q.put(("nt_dataset", path, None))      # -> _on_nt_dataset -> load
+        except Exception as e:                          # noqa: BLE001
+            self.q.put(("nt_dataset", None, f"URL download failed: {e}"))
 
     def _on_nt_ds_file(self, sender, app_data):
         sel = app_data.get("file_path_name") or ""
@@ -6564,7 +6607,8 @@ class App:
             bg_rate_hz=max(self._nt_get("nt_bg_rate", 0.0), 0.0),
             input_noise=min(max(self._nt_get("nt_input_noise", 0.0), 0.0), 1.0),
             signal_frac=min(max(self._nt_get("nt_signal_frac", 1.0), 0.0), 1.0),
-            jitter_ms=max(self._nt_get("nt_jitter", 0.0), 0.0))
+            jitter_ms=max(self._nt_get("nt_jitter", 0.0), 0.0),
+            pattern_ms=max(self._nt_get("nt_pat_ms", 0.0), 0.0))
         return N, S, cfg
 
     def on_nt_defaults(self, *_):
@@ -7737,10 +7781,22 @@ class App:
         n = len(pats)
         rng = np.random.default_rng(tr.cfg.seed + 777)
         done = 0
+        surrogate = (tr.cfg.learn_rule == "surrogate")
+        # The in-situ device optimiser oscillates AROUND the solution (a coarse,
+        # bounded write overshoots the per-pattern margin), so the final epoch is
+        # often NOT the best one. Two stabilisers (surrogate only): (1) anneal the
+        # LR 1.0 -> 0.15 over the run so late steps settle into the minimum;
+        # (2) keep the highest-train-accuracy weights seen and restore them at the
+        # end, with the LOWEST loss as the tie-breaker among equal-accuracy epochs.
+        best_acc, best_loss, best_w = -1.0, float("inf"), None
         try:
             for e in range(epochs):
                 if self._trainer_stop:
                     break
+                if surrogate:
+                    frac = e / max(epochs - 1, 1)
+                    tr.lr_scale = 0.15 + 0.85 * 0.5 * (1.0 + math.cos(math.pi * frac))
+                ep_loss = 0.0
                 for k in rng.permutation(n):
                     if self._trainer_stop:
                         break
@@ -7748,8 +7804,9 @@ class App:
                     # surrogate is supervised; STDP uses targets only in
                     # supervised mode
                     tgt = (tr.target_of[k] if (tr.cfg.mode == "supervised"
-                           or tr.cfg.learn_rule == "surrogate") else None)
+                           or surrogate) else None)
                     res = tr.train_step(pats[k][1], tgt)
+                    ep_loss += float(res.get("loss", 0.0) or 0.0)
                     self._last_present = (pats[k][0], pats[k][1], res)
                     self.q.put(("nt_spk", res["n_out_spikes"], res["winner"]))
                 done = e + 1
@@ -7759,6 +7816,19 @@ class App:
                 te_acc = (tr.eval_accuracy(use_test=True, max_n=40)
                           if tr.test_patterns else None)
                 self.q.put(("nt_acc", done, tr_acc, te_acc))
+                if surrogate and (tr_acc > best_acc + 1e-9 or
+                                  (abs(tr_acc - best_acc) <= 1e-9
+                                   and ep_loss < best_loss - 1e-9)):
+                    best_acc, best_loss = tr_acc, ep_loss
+                    best_w = tr.capture_weights()
+            # restore the best checkpoint so the reported metrics + saved weights
+            # reflect the network's PEAK, not whatever the last oscillation left.
+            if surrogate and best_w is not None and not self._trainer_stop:
+                tr.restore_weights(best_w)
+                self.q.put(("log",
+                            f"[neuro] restored best-train-acc weights "
+                            f"({100*best_acc:.0f}%)"))
+                self.q.put(("nt_snap", self._nt_snapshot(done, epochs)))
         except Exception as ex:                          # noqa: BLE001
             self.q.put(("log", f"[neuro] training error: {ex!r}"))
         self.q.put(("nt_done", {"epochs": done, "stopped": self._trainer_stop}))
@@ -7882,24 +7952,47 @@ class App:
                  + (f", test {100*te_acc:.1f}%" if has_test else "")
                  + f", macro-F1 {m['macro_f1']:.3f}, "
                  f"weighted-F1 {m['weighted_f1']:.3f}")
-        # close the agent loop: feed the fresh metrics back to the MAIN chat
+        # close the agent loop: keep tuning until it reaches the best accuracy
+        # (stops on a target, on a plateau, or at a generous safety cap - the
+        # loop only continues while the agent itself chooses to train again)
         if self._nt_agent_run:
             self._nt_agent_run = False
-            if self._nt_agent_rounds < 5 and not self.chat_busy:
-                self._nt_agent_rounds += 1
-                msg = ("The training + evaluation you started just finished. "
-                       "Metrics:\n" + self._nt_metrics_text() +
-                       "\n\nDiagnose what worked and what failed. If it can be "
-                       "improved, change one or two controls and train again "
-                       "(emit the nt_action blocks). If it is already good, say "
-                       "so and stop.")
-                self.append_chat("sys", f"run #{self._nt_agent_rounds} "
-                                 "finished — handing the metrics to the agent")
-                self.append_chat("you", "[auto] analyse the training result")
+            acc = te_acc if has_test else tr_acc
+            target = min(max(self._nt_get("nt_auto_target", 98.0), 1.0),
+                         100.0) / 100.0
+            PATIENCE, SAFETY = 5, 20
+            if acc > self._nt_best_acc + 1e-3:      # genuine improvement
+                self._nt_best_acc = acc
+                self._nt_no_improve = 0
+            else:
+                self._nt_no_improve += 1
+            self._nt_agent_rounds += 1
+            reached = acc >= target
+            plateaued = self._nt_no_improve >= PATIENCE
+            capped = self._nt_agent_rounds >= SAFETY
+            if not (reached or plateaued or capped) and not self.chat_busy:
+                msg = ("The training + evaluation you started just finished.\n"
+                       + self._nt_metrics_text()
+                       + f"\n\nBest accuracy so far this session: "
+                       f"{100*self._nt_best_acc:.1f}% (target "
+                       f"{100*target:.0f}%). KEEP IMPROVING toward the best "
+                       "accuracy: diagnose what limited it, change one or two "
+                       "controls, and train again (emit nt_action blocks). Only "
+                       "if you genuinely cannot do better, explain why and stop "
+                       "WITHOUT another train action.")
+                self.append_chat("sys", f"round #{self._nt_agent_rounds} done "
+                                 f"(best {100*self._nt_best_acc:.0f}%) — "
+                                 "auto-tuning toward best accuracy")
+                self.append_chat("you", "[auto] keep improving the accuracy")
                 self._main_send(msg)
             else:
-                self.append_chat("sys", "auto-tune loop paused (cap reached). "
-                                 "Ask the agent to continue if you want more.")
+                why = ("target reached" if reached else
+                       f"plateaued ({PATIENCE} rounds no gain)" if plateaued
+                       else f"safety cap ({SAFETY} rounds)")
+                self.append_chat(
+                    "sys", f"auto-tune finished — {why}. Best accuracy "
+                    f"{100*self._nt_best_acc:.0f}% over {self._nt_agent_rounds} "
+                    "rounds. Ask the agent to continue for more.")
 
     def _nt_draw_confusion(self, cm, names):
         if not dpg.does_item_exist("nt_cm_y"):

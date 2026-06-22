@@ -121,6 +121,9 @@ class NetConfig:
     #                            the rest fire only background noise (a FIXED
     #                            random subset, the embedded-pattern paradigm)
     jitter_ms: float = 0.0     # Gaussian temporal jitter (sigma) on every spike
+    pattern_ms: float = 0.0    # how long the PATTERN is shown within present_ms
+    #                            (centred); the rest of the window is background-
+    #                            noise only. 0 or >= present_ms = full window.
 
 
 # ================================================================ patterns ==
@@ -302,6 +305,11 @@ class Trainer:
         self.theta = [np.zeros(s) for s in self.layer_sizes[1:]]
         self.spike_count = np.zeros(self.n_out)
         self.learn_cap = 12.0                 # max per-presentation write gain
+        self.lr_scale = 1.0                   # surrogate LR multiplier; the train
+        #   loop anneals this 1->~0.15 over epochs so the in-situ device optimiser
+        #   settles INTO the solution instead of oscillating past it (the device
+        #   write is a coarse, bounded gradient step - large late steps overshoot
+        #   the per-pattern margin and knock a solved network back off).
         self.last_write = {}                  # (c,j,i) -> (potentiate, strength)
         #                                       last write event (cell animation)
 
@@ -367,6 +375,16 @@ class Trainer:
                         dev.G = g
                     except AttributeError:
                         pass
+
+    def capture_weights(self):
+        """Snapshot every crossbar's retained conductances (S) - cheap arrays the
+        train loop keeps as the best-so-far checkpoint."""
+        return [self.weights_S(c).copy() for c in range(self.n_layers)]
+
+    def restore_weights(self, snap):
+        """Write a capture_weights() snapshot back into the devices."""
+        for c, G in enumerate(snap):
+            self.set_weights(c, G)
 
     def weights_uS(self, c=0):
         return self.weights_S(c) * 1e6
@@ -447,7 +465,18 @@ class Trainer:
         mask = self.signal_mask if noise else np.ones(self.n_in)
         bg = cfg.bg_rate_hz if noise else 0.0
         vec = vec * mask
-        rates = vec * cfg.max_rate_hz + bg
+        rate_pat = vec * cfg.max_rate_hz            # (n_in,) the pattern's rates
+        # temporal embedding: show the pattern only for `pattern_ms` (centred)
+        # within the window; outside it, only the background fires
+        pat_ms = getattr(cfg, "pattern_ms", 0.0)
+        if noise and 0.0 < pat_ms < cfg.present_ms:
+            pat_steps = max(1, int(round(pat_ms / dt)))
+            onset = max(0, (n_steps - pat_steps) // 2)
+            tgate = np.zeros(n_steps)
+            tgate[onset:onset + pat_steps] = 1.0
+            rates = bg + tgate[:, None] * rate_pat[None, :]    # (n_steps, n_in)
+        else:
+            rates = bg + rate_pat                              # full window
         S = U < (1.0 - np.exp(-rates * dt * 1e-3))
         if cfg.encoding == "latency":
             onset = ((1.0 - vec) * 0.6 * n_steps).astype(int)
@@ -473,12 +502,17 @@ class Trainer:
 
     # ---- one stimulus presentation ---------------------------------------
 
-    def present(self, vec01, target=None, learn=True):
+    def present(self, vec01, target=None, learn=True, clean=False):
         """Run the network for one presentation of input intensities vec01.
 
         Returns a dict with the spike raster, output membrane traces and which
         neuron won - everything the GUI animates.  When learn=True the synapse
-        devices are programmed by the STDP events that occur."""
+        devices are programmed by the STDP events that occur.
+
+        clean=True (used by inference/evaluation) encodes the noise-free
+        canonical pattern with a FIXED rng, so a test is a deterministic,
+        repeatable measurement of the learned receptive fields - not one random
+        noisy Poisson draw - and it does not perturb the training rng stream."""
         cfg, N, S = self.cfg, self.N, self.S
         dt = cfg.dt_ms
         n_steps = max(1, int(round(cfg.present_ms / dt)))
@@ -487,8 +521,10 @@ class Trainer:
 
         # frozen normalised weights per crossbar for this presentation
         Wn = [self.weights_norm(c) for c in range(K)]
-        # front-end: pixel intensities -> input spike trains
-        S_in = self.encode_spikes(vec01, self.rng, noise=True)
+        # front-end: pixel intensities -> input spike trains.  A clean eval uses
+        # a fixed rng + noise-free pattern (deterministic, repeatable test).
+        rng_in = np.random.default_rng(20240517) if clean else self.rng
+        S_in = self.encode_spikes(vec01, rng_in, noise=not clean)
 
         d_syn = math.exp(-dt / N.tau_syn)
         d_pre = math.exp(-dt / S.tau_pre)
@@ -603,12 +639,12 @@ class Trainer:
         """Forward-only pass for testing - uses the SAME forward as training
         under each rule (so the surrogate trains and tests the same network)."""
         if self.cfg.learn_rule == "surrogate":
-            return self._surrogate_forward(vec01, None, learn=False)
-        return self.present(vec01, target=None, learn=False)
+            return self._surrogate_forward(vec01, None, learn=False, clean=True)
+        return self.present(vec01, target=None, learn=False, clean=True)
 
     # ---- surrogate-gradient (BPTT) training ------------------------------
 
-    def _surrogate_forward(self, vec01, target, learn=True):
+    def _surrogate_forward(self, vec01, target, learn=True, clean=False):
         """Forward (and, when learn=True, supervised backprop-through-time)
         across ALL crossbars.  A smooth fast-sigmoid surrogate stands in for the
         spike function's derivative; the loss is softmax cross-entropy on the
@@ -628,7 +664,9 @@ class Trainer:
         gains = [N.epsp_gain * (N.hidden_gain if (c + 1 < K) else 1.0)
                  for c in range(K)]
 
-        S_in = self.encode_spikes(vec01, self.rng, noise=True).astype(float)
+        # clean eval: fixed rng + noise-free pattern -> deterministic test
+        rng_in = np.random.default_rng(20240517) if clean else self.rng
+        S_in = self.encode_spikes(vec01, rng_in, noise=not clean).astype(float)
         # ---- forward, storing activations for the backward pass ----
         spk = [S_in]                              # spk[c]: (T, L[c])  spikes 0/1
         cache = []                                # per crossbar: (u, norm, pre)
@@ -703,7 +741,7 @@ class Trainer:
     def _apply_grad(self, c, dW):
         """Apply a gradient to crossbar c by programming each synapse THROUGH
         the device in the descent direction (-dW), magnitude ~ |gradient|."""
-        delta = -self.S.sg_lr * dW                # desired change in Wn
+        delta = -self.S.sg_lr * self.lr_scale * dW   # annealed change in Wn
         n_post, n_pre = self.layer_sizes[c + 1], self.layer_sizes[c]
         for j in range(n_post):
             row = delta[j]
