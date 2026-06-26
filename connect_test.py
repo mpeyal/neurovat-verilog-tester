@@ -6,10 +6,12 @@ Intended to run on WINDOWS, talking to Virtuoso on the Linux box
 (coen-cassia.boisestate.edu / 10.24.1.45) through an SSH tunnel.
 
 SETUP (run once, leave open, in a separate Windows terminal):
-    ssh -N -L 7777:/tmp/skill-server-default.sock mahmudulpeyal@coen-cassia.boisestate.edu
+    ssh -N -L 7777:/tmp/skill-server-mahmudulpeyal.sock mahmudulpeyal@coen-cassia.boisestate.edu
 
 The skillbridge client on Windows auto-uses TCP localhost:7777, which the
-tunnel forwards to the Linux Unix socket /tmp/skill-server-default.sock.
+tunnel forwards to the Linux Unix socket /tmp/skill-server-mahmudulpeyal.sock.
+(Use the PER-USER socket, not the shared -default.sock: on this multi-user host
+the default socket is owned by another account and just resets the connection.)
 
 On the Linux side, make sure the bridge is up first (type  skill()  in the CIW).
 

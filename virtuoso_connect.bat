@@ -5,7 +5,9 @@ REM and the skillbridge server is running (skill() in the CIW).
 
 setlocal
 set HOST=mahmudulpeyal@coen-cassia.boisestate.edu
-set TUNNEL=7777:/tmp/skill-server-default.sock
+REM per-user socket (the shared -default.sock is squatted by another account on
+REM this multi-user host); skill()/pyStartServer use ?id = login -> this socket.
+set TUNNEL=7777:/tmp/skill-server-mahmudulpeyal.sock
 
 REM If something is already listening on 7777, assume the tunnel is up.
 powershell -NoProfile -Command "if (Test-NetConnection -ComputerName localhost -Port 7777 -InformationLevel Quiet -WarningAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>&1

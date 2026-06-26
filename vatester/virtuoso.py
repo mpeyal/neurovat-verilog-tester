@@ -18,7 +18,13 @@ import threading
 import time
 
 HOST = "mahmudulpeyal@coen-cassia.boisestate.edu"
-REMOTE_SOCKET = "/tmp/skill-server-default.sock"
+# The skill server is started PER USER (skill()/pyStartServer use ?id = the
+# login name), so its socket is /tmp/skill-server-<user>.sock - NOT the shared
+# "default" socket. On this multi-user host the "default" socket is already
+# owned by another account and /tmp is sticky, so connecting to it just gets
+# reset (the WinError 10054 we kept hitting). Derive our own per-user socket.
+_USER = HOST.split("@", 1)[0]
+REMOTE_SOCKET = f"/tmp/skill-server-{_USER}.sock"
 PORT = 7777
 
 # View names treated as "Verilog/behavioral" source for the browser filter.
@@ -154,9 +160,17 @@ class VirtuosoLink:
                 version = str(ws["getVersion"]())
             except Exception as e:
                 raise RuntimeError(
-                    f"tunnel is up but skillbridge failed: {e} "
-                    "(is Virtuoso open with the skill server started in the "
-                    "CIW?)")
+                    f"tunnel is up but skillbridge failed: {e}\n\n"
+                    "The SSH tunnel is fine - the skill server didn't answer "
+                    "on your per-user socket:\n"
+                    f"    {self.remote_socket}\n"
+                    "Make sure THAT server is running on the host:\n"
+                    "  1) Virtuoso is open on the host;\n"
+                    "  2) in the CIW, start the skill server - run skill() (or "
+                    "pyStartServer with ?id set to your login so it creates the "
+                    "socket above; do NOT use the shared 'default' socket, it "
+                    "may belong to another user);\n"
+                    "  3) confirm with pyShowLog(), then click Connect again.")
             info = {"tunnel": how, "version": version}
             try:
                 info["libraries"] = [l.name for l in ws.dd.get_lib_list()]
