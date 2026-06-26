@@ -53,6 +53,9 @@ class NeuronParams:
     v_reset: float = 0.0       # reset potential after a spike
     v_rest: float = 0.0        # leak target
     t_refractory: float = 5.0  # refractory period (ms)
+    v_spike_peak: float = 1.6  # value drawn into the membrane trace ON the step a
+    #                            neuron fires, so the spike shows AT the threshold
+    #                            crossing (the reset + refractory floor then follow)
     tau_syn: float = 8.0       # synaptic (PSP) trace decay (ms)
 
     epsp_gain: float = 11.0    # excitatory PSP weight (EPSP height); drive is
@@ -250,6 +253,104 @@ def calibrate_pot_sign(make_device, amp, width):
     dev.step(0.0, width, abs(amp))
     up = float(dev.G) - g0
     return 1.0 if up >= 0.0 else -1.0
+
+
+def probe_lif(N, drive, present_ms, dt):
+    """Simulate ONE leaky integrate-and-fire output neuron driven by a CONSTANT
+    `drive` for present_ms (no crossbar, no weights) - exactly the network's
+    output-neuron dynamics (leak toward v_rest+drive, fire at threshold + the
+    adaptive homeostatic theta, reset, refractory).  Returns
+    (t_ms, V, threshold_trace, spike_times_ms) so the GUI can plot the sawtooth.
+    """
+    n = max(1, int(round(present_ms / dt)))
+    leak = dt / max(N.tau_m, 1e-6)
+    d_theta = math.exp(-dt / N.tau_theta) if N.tau_theta > 0 else 0.0
+    v, theta, refr = N.v_rest, 0.0, 0.0
+    t = np.arange(n) * dt
+    V = np.empty(n)
+    TH = np.empty(n)
+    spikes = []
+    rng = np.random.default_rng(12345)
+    for k in range(n):
+        active = refr <= 0
+        if active:
+            v += leak * (N.v_rest - v + drive)
+            if N.v_noise > 0:
+                v += rng.normal(0.0, N.v_noise)
+        else:
+            v = N.v_reset
+            refr -= dt
+        if N.tau_theta > 0:
+            theta *= d_theta
+        V[k] = v
+        TH[k] = N.v_threshold + theta
+        if active and v >= N.v_threshold + theta:
+            spikes.append(k * dt)
+            v = N.v_reset
+            refr = N.t_refractory
+            theta += N.theta_plus
+    return t, V, TH, spikes
+
+
+def fi_curve(N, present_ms, dt, drive_max, n_pts=26):
+    """Firing rate (Hz) vs constant drive - the neuron's f-I transfer curve."""
+    drives = np.linspace(0.0, drive_max, n_pts)
+    rates = np.array([len(probe_lif(N, float(d), present_ms, dt)[3])
+                      / (present_ms * 1e-3) for d in drives])
+    return drives, rates
+
+
+def probe_lif_psp(N, in_hz, epsp_w, present_ms, dt):
+    """Drive ONE LIF neuron with a regular EXCITATORY spike train (one input
+    spike every 1000/in_hz ms).  Each input spike adds `epsp_w` to a synaptic
+    PSP trace that decays with tau_syn; the membrane leaks toward that PSP - so
+    you SEE each EPSP bump, the leak between them, sub-threshold SUMMATION, and
+    the threshold crossing that finally triggers a spike + reset.  Returns
+    (t_ms, V, threshold_trace, out_spike_times, in_spike_times, psp_trace)."""
+    n = max(1, int(round(present_ms / dt)))
+    leak = dt / max(N.tau_m, 1e-6)
+    d_syn = math.exp(-dt / max(N.tau_syn, 1e-6))
+    d_theta = math.exp(-dt / N.tau_theta) if N.tau_theta > 0 else 0.0
+    period = max(1, int(round((1000.0 / max(in_hz, 1e-3)) / dt)))
+    v, theta, refr, x = N.v_rest, 0.0, 0.0, 0.0
+    t = np.arange(n) * dt
+    V = np.empty(n)
+    TH = np.empty(n)
+    P = np.empty(n)
+    outs, ins = [], []
+    rng = np.random.default_rng(7)
+    for k in range(n):
+        x *= d_syn
+        if k % period == 0:                # an EPSP arrives
+            x += epsp_w
+            ins.append(k * dt)
+        active = refr <= 0
+        if active:
+            v += leak * (N.v_rest - v + x)
+            if N.v_noise > 0:
+                v += rng.normal(0.0, N.v_noise)
+        else:
+            v = N.v_reset
+            refr -= dt
+        if N.tau_theta > 0:
+            theta *= d_theta
+        V[k] = v
+        TH[k] = N.v_threshold + theta
+        P[k] = x
+        if active and v >= N.v_threshold + theta:
+            outs.append(k * dt)
+            v = N.v_reset
+            refr = N.t_refractory
+            theta += N.theta_plus
+    return t, V, TH, outs, ins, P
+
+
+def fi_curve_psp(N, epsp_w, present_ms, dt, hz_max, n_pts=24):
+    """Output firing rate (Hz) vs INPUT spike rate - the spike transfer curve."""
+    hz = np.linspace(1.0, max(hz_max, 2.0), n_pts)
+    out = np.array([len(probe_lif_psp(N, float(h), epsp_w, present_ms, dt)[3])
+                    / (present_ms * 1e-3) for h in hz])
+    return hz, out
 
 
 class Trainer:
@@ -574,8 +675,6 @@ class Trainer:
                                                     int(active.sum()))
                 v[c][~active] = N.v_reset
                 refrac[c][~active] -= dt
-                if c == K - 1:
-                    v_trace[t] = v[c]
 
                 fired = np.nonzero(
                     (v[c] >= (N.v_threshold + self.theta[c])) & active)[0]
@@ -601,6 +700,15 @@ class Trainer:
                         if learn:                   # local STDP accrual
                             acc[c][j] += pre[c]
                             npost[c][j] += 1
+
+                if c == K - 1:
+                    # record the OUTPUT membrane AFTER reset, so refractory
+                    # neurons sit at the reset floor (a visible flat segment);
+                    # a neuron that fired this step is drawn as a spike peak so
+                    # the spike appears exactly at the threshold crossing
+                    v_trace[t] = v[c]
+                    if fired.size:
+                        v_trace[t][fired] = N.v_spike_peak
 
             for c in range(len(L)):                 # relax all layer traces
                 x[c] *= d_syn

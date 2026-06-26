@@ -5243,6 +5243,8 @@ class App:
                 with dpg.tab_bar(tag="nt_viz_tabs"):
                     with dpg.tab(label="  Canvas  "):
                         self._nt_canvas_tab()
+                    with dpg.tab(label="  Neuron  ", tag="nt_tab_neuron"):
+                        self._nt_neuron_tab()
                     with dpg.tab(label="  Cell  ", tag="nt_tab_cell"):
                         self._nt_cell_tab()
                     with dpg.tab(label="  Weights  "):
@@ -5281,9 +5283,113 @@ class App:
                                   tag="nt_wtrace_y")
 
     def _on_nt_viz_tab(self, *_):
-        if (dpg.does_item_exist("nt_viz_tabs")
-                and dpg.get_value("nt_viz_tabs") == "nt_tab_wtrace"):
+        if not dpg.does_item_exist("nt_viz_tabs"):
+            return
+        sel = dpg.get_value("nt_viz_tabs")
+        if sel == "nt_tab_wtrace":
             self._nt_draw_weight_traces()
+        elif sel == "nt_tab_neuron":
+            self._nt_probe_neuron()
+
+    def _nt_neuron_tab(self):
+        """A single-neuron bench: drive ONE LIF output neuron with the current
+        neuron parameters (left panel) - no network, no weights - and watch it
+        integrate, cross threshold and spike, plus its f-I transfer curve."""
+        with self._pad(left=6, top=4, bottom=0):
+            self._small("NEURON BENCH - drive ONE LIF neuron with the current "
+                        "neuron parameters (LEFT panel) and watch it integrate "
+                        "-> cross threshold -> spike + reset. No synapses/weights "
+                        "- just the neuron. Change params, re-Probe.",
+                        color=C_TEXT2)
+            with dpg.group(horizontal=True):
+                self._nt_num("nt_neuron_hz", "INPUT Hz", 250, 64, False,
+                             "Rate of incoming EXCITATORY input spikes (one EPSP "
+                             "every 1000/Hz ms). Faster than tau_syn -> EPSPs "
+                             "SUMMATE toward threshold; slower -> they leak away "
+                             "between (sub-threshold). Try 60 vs 250.")
+                self._nt_num("nt_neuron_epsp", "EPSP", 0.8, 56, False,
+                             "Height each input spike adds to the synaptic PSP "
+                             "(its weight). Bigger = fewer EPSPs to reach "
+                             "threshold.")
+                b = dpg.add_button(label=" Probe neuron ",
+                                   callback=self._nt_probe_neuron)
+                dpg.bind_item_theme(b, self.themes["primary"])
+                dpg.add_text("-", tag="nt_neuron_info", color=C_AGENT)
+            with dpg.child_window(height=-196, border=False):
+                with dpg.plot(width=-1, height=-1, tag="nt_nv_plot",
+                              no_menus=True):
+                    dpg.add_plot_legend()
+                    dpg.add_plot_axis(dpg.mvXAxis, label="time (ms)",
+                                      tag="nt_nv_x")
+                    dpg.add_plot_axis(dpg.mvYAxis, label="membrane V",
+                                      tag="nt_nv_y")
+            self._small("transfer curve: OUTPUT rate vs INPUT spike rate. Flat "
+                        "at low input (EPSPs leak before summing), then rises "
+                        "once they summate past threshold. Current input marked.",
+                        color=(126, 150, 220))
+            with dpg.plot(width=-1, height=-1, tag="nt_fi_plot", no_menus=True):
+                dpg.add_plot_legend()
+                dpg.add_plot_axis(dpg.mvXAxis, label="input rate (Hz)",
+                                  tag="nt_fi_x")
+                dpg.add_plot_axis(dpg.mvYAxis, label="output rate (Hz)",
+                                  tag="nt_fi_y")
+
+    def _nt_probe_neuron(self, *_):
+        """Drive one neuron with an EPSP spike train + sweep the input rate."""
+        if not dpg.does_item_exist("nt_nv_y"):
+            return
+        N, _S, _cfg = self._nt_read_params()
+        in_hz = max(float(self._nt_get("nt_neuron_hz", 250.0)), 1.0)
+        epsp = float(self._nt_get("nt_neuron_epsp", 0.8))
+        pms = max(self._nt_get("nt_present", 120.0), 10.0)
+        dt = max(self._nt_get("nt_dt", 1.0), 0.1)
+        t, V, TH, outs, ins, P = neuro.probe_lif_psp(N, in_hz, epsp, pms, dt)
+        rate = len(outs) / (pms * 1e-3)
+        # V(t): membrane + the EPSP drive (so the bumps are explicit) + threshold
+        # + output spike markers (top) + input-EPSP ticks (bottom)
+        self._nt_clear("nv")
+        tl = t.tolist()
+        ser = [dpg.add_line_series(tl, P.tolist(), label="EPSP drive (PSP)",
+                                   parent="nt_nv_y"),
+               dpg.add_line_series(tl, V.tolist(), label="membrane V",
+                                   parent="nt_nv_y"),
+               dpg.add_line_series(tl, TH.tolist(), label="threshold",
+                                   parent="nt_nv_y")]
+        if outs:
+            top = float(max(TH.max(), V.max())) + 0.15
+            ser.append(dpg.add_scatter_series(outs, [top] * len(outs),
+                                              label="output spike",
+                                              parent="nt_nv_y"))
+        if ins:
+            base = float(min(V.min(), 0.0)) - 0.12
+            ser.append(dpg.add_scatter_series(ins, [base] * len(ins),
+                                              label="input EPSP",
+                                              parent="nt_nv_y"))
+        self._nt_series["nv"] = ser
+        dpg.fit_axis_data("nt_nv_x")
+        dpg.fit_axis_data("nt_nv_y")
+        # spike transfer curve: output rate vs INPUT rate, current input marked
+        hz, orate = neuro.fi_curve_psp(N, epsp, pms, dt, max(in_hz * 1.4, 300.0))
+        self._nt_clear("fi")
+        fer = [dpg.add_line_series(hz.tolist(), orate.tolist(),
+                                   label="out vs in rate", parent="nt_fi_y"),
+               dpg.add_scatter_series([in_hz], [rate], label="current",
+                                      parent="nt_fi_y")]
+        self._nt_series["fi"] = fer
+        dpg.fit_axis_data("nt_fi_x")
+        dpg.fit_axis_data("nt_fi_y")
+        # readout: how many EPSPs summed before the first spike + adaptation note
+        n_sum = sum(1 for x in ins if outs and x <= outs[0]) if outs else len(ins)
+        isi = float(np.diff(outs).mean()) if len(outs) > 1 else None
+        info = (f"{in_hz:.0f} Hz in, EPSP {epsp:.2f}: {len(outs)} output spikes "
+                f"-> {rate:.0f} Hz"
+                + (f", ISI {isi:.0f} ms" if isi else "")
+                + (f"   ({n_sum} EPSPs summed to the 1st spike)" if outs else
+                   "   (sub-threshold - EPSPs leak away, no spike)")
+                + ("   theta adapts -> firing slows"
+                   if (N.tau_theta > 0 and N.theta_plus > 0 and len(outs) > 1)
+                   else ""))
+        dpg.set_value("nt_neuron_info", info)
 
     def _nt_controls(self):
         with dpg.collapsing_header(label="Network", default_open=True):
