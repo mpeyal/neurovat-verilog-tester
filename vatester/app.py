@@ -716,8 +716,12 @@ class App:
         self._small(label.upper(), color=(126, 150, 220))
         dpg.add_separator()
 
-    def _caption(self, text):
-        self._small(text, color=C_MUTED)
+    def _caption(self, text, tip=None):
+        t = self._small(text, color=C_MUTED)
+        if tip:                                  # hover the LABEL for help too
+            with dpg.tooltip(t):
+                dpg.add_text(tip, wrap=340)
+        return t
 
     @contextlib.contextmanager
     def _pad(self, left=8, top=2, bottom=4):
@@ -1485,7 +1489,7 @@ class App:
 
         with dpg.window(tag="virt_modal", label="Virtuoso connection",
                         modal=True, show=False, no_resize=True,
-                        no_collapse=True, width=470):
+                        no_collapse=True, width=470, autosize=True):
             with dpg.group(horizontal=True):
                 dpg.add_text("●", tag="virt_modal_dot", color=C_GREEN)
                 t = dpg.add_text("", tag="virt_modal_title", color=C_TEXT)
@@ -5168,16 +5172,17 @@ class App:
 
     def _nt_num(self, tag, label, default, width=78, is_int=False, tip=None):
         with dpg.group():
-            self._caption(label)
+            cap = self._caption(label)
             if is_int:
                 dpg.add_input_int(tag=tag, default_value=int(default),
                                   width=width, step=0)
             else:
                 dpg.add_input_double(tag=tag, default_value=float(default),
                                      width=width, format="%.4g", step=0)
-        if tip:
-            with dpg.tooltip(tag):
-                dpg.add_text(tip, wrap=320)
+        if tip:                                  # hover the LABEL or the box
+            for target in (cap, tag):
+                with dpg.tooltip(target):
+                    dpg.add_text(tip, wrap=340)
 
     def _build_neuro_dialogs(self):
         """Texture registry + dataset file pickers for the trainer (created in
@@ -5392,8 +5397,13 @@ class App:
         dpg.set_value("nt_neuron_info", info)
 
     def _nt_controls(self):
+        self._small("Tip: hover any field name or box for what it does.",
+                    color=(126, 150, 220))
         with dpg.collapsing_header(label="Network", default_open=True):
-            self._caption("SYNAPSE DEVICE")
+            self._caption("SYNAPSE DEVICE",
+                          "Which device twin is the synapse at each crossbar "
+                          "cross-point - its conductance IS the weight. ECFET = "
+                          "current-driven gate; FeFET = voltage-driven gate.")
             dpg.add_combo([s.label for s in MODEL_SPECS],
                           default_value=MODEL_SPECS[1].label, tag="nt_device",
                           width=-1, callback=self._on_nt_device_change)
@@ -5403,16 +5413,32 @@ class App:
                              "weight). ECFET = current-driven, FeFET = "
                              "voltage-driven.", wrap=320)
             with dpg.group(horizontal=True):
-                self._nt_num("nt_gh", "GRID H", 5, 60, True,
-                             "Input pixel grid height (one spiking input "
-                             "neuron per pixel).")
-                self._nt_num("nt_gw", "GRID W", 5, 60, True,
-                             "Input pixel grid width.")
-                self._nt_num("nt_nout", "NEURONS", 4, 64, True,
-                             "Number of output LIF neurons (crossbar columns).")
+                with dpg.group():
+                    self._caption("INPUT NEURONS (H x W)",
+                                  "The input is an H x W pixel grid and EACH "
+                                  "pixel is one spiking INPUT neuron, so input "
+                                  "neurons = H x W (e.g. 5 x 5 = 25). First box "
+                                  "= height, second = width.")
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_int(tag="nt_gh", default_value=5,
+                                          width=48, step=0)
+                        dpg.add_input_int(tag="nt_gw", default_value=5,
+                                          width=48, step=0)
+                dpg.add_spacer(width=14)
+                with dpg.group():
+                    self._caption("OUTPUT NEURONS",
+                                  "Number of OUTPUT (classifier) LIF neurons - "
+                                  "the crossbar columns, typically one per "
+                                  "class.")
+                    dpg.add_input_int(tag="nt_nout", default_value=4,
+                                      width=56, step=0)
             with dpg.group(horizontal=True):
                 with dpg.group():
-                    self._caption("HIDDEN LAYERS")
+                    self._caption("HIDDEN LAYERS",
+                                  "Stack extra crossbars: list hidden LIF layer "
+                                  "sizes between input and output (empty = single "
+                                  "crossbar; '8' = one hidden of 8; '8,4' = two). "
+                                  "Needed for non-linear tasks like XOR.")
                     dpg.add_input_text(tag="nt_hidden", width=150,
                                        hint="e.g.  8   or   8,4")
                 self._nt_num("nt_hidden_gain", "HIDDEN GAIN", 1.7, 78, False,
@@ -5432,12 +5458,20 @@ class App:
                              "best for accuracy.", wrap=330)
             with dpg.group(horizontal=True):
                 with dpg.group():
-                    self._caption("MODE")
+                    self._caption("MODE",
+                                  "supervised: a teacher current forces each "
+                                  "pattern's neuron to fire (reliable). "
+                                  "unsupervised: pure winner-take-all - neurons "
+                                  "self-organise to tile the patterns.")
                     dpg.add_combo(["supervised", "unsupervised"],
                                   default_value="supervised", tag="nt_mode",
                                   width=130)
                 with dpg.group():
-                    self._caption("PATTERNS")
+                    self._caption("PATTERNS",
+                                  "The training stimulus set: built-in "
+                                  "bars/letters/digits/random, logic gates "
+                                  "(nand/xor), your patterns/ plugins, hand-"
+                                  "painted 'custom', or a loaded 'dataset'.")
                     dpg.add_combo(self._patset_items(),
                                   default_value="bars", tag="nt_patset",
                                   width=110)
@@ -5450,7 +5484,12 @@ class App:
                              wrap=320)
             with dpg.group(horizontal=True):
                 with dpg.group():
-                    self._caption("LEARNING RULE")
+                    self._caption("LEARNING RULE",
+                                  "STDP (device-local): local spike-timing "
+                                  "plasticity, best matches real in-situ STDP, "
+                                  "weak on deep nets. Surrogate grad (BPTT): "
+                                  "supervised backprop through the device - "
+                                  "trains deep/multi-layer nets to high accuracy.")
                     dpg.add_combo(["STDP (device-local)",
                                    "Surrogate grad (BPTT)"],
                                   default_value="STDP (device-local)",
@@ -5476,7 +5515,10 @@ class App:
                              "pulse moves G gently, so it wants more passes.)")
                 self._nt_num("nt_present", "PRESENT ms", 120, 72, False,
                              "Duration each pattern is shown for.")
-                self._nt_num("nt_seed", "SEED", 1, 56, True)
+                self._nt_num("nt_seed", "SEED", 1, 56, True,
+                             "Random seed - fixes the spike noise, weight init "
+                             "and pattern sampling so a run repeats. Change it "
+                             "for a different random draw.")
             with dpg.group(horizontal=True):
                 self._nt_num("nt_rate", "RATE Hz", 180, 70, False,
                              "Peak Poisson spike rate for a fully-on pixel.")
@@ -5549,7 +5591,11 @@ class App:
                         "(off).", color=C_MUTED)
             with dpg.group(horizontal=True):
                 with dpg.group():
-                    self._caption("ENCODING")
+                    self._caption("ENCODING",
+                                  "How pixels become spikes. rate (Poisson): "
+                                  "intensity -> firing rate. latency (TTFS): "
+                                  "brighter pixels fire EARLIER - the spike "
+                                  "ORDER carries the pattern.")
                     dpg.add_combo(["rate (Poisson)", "latency (TTFS)"],
                                   default_value="rate (Poisson)",
                                   tag="nt_encoding", width=150)
