@@ -119,9 +119,11 @@ class FeFET:
             # the surviving OPPOSITE trace to lock in an order-dependent dVt
             if V > 0:
                 self.vt_stdp -= p.A_stdp_V * self.tr_dep   # post-after-pre -> Vt down
+                self.tr_dep = 0.0                          # consume harvested trace
                 self.tr_pot += 1.0
             else:
                 self.vt_stdp += p.A_stdp_V * self.tr_pot   # pre-after-post -> Vt up
+                self.tr_pot = 0.0                          # consume harvested trace
                 self.tr_dep += 1.0
 
         if V != 0.0:
@@ -143,7 +145,10 @@ class FeFET:
     @property
     def G(self):
         p = self.p
-        x = 1.0 / (1.0 + math.exp(-(p.Vread - self.Vth) / p.SS))
+        # clamp the sigmoid argument so an accumulated vt_stdp can never overflow
+        # math.exp (arg > ~709 raises OverflowError); +/-60 already saturates x.
+        z = max(min((p.Vread - self.Vth) / p.SS, 60.0), -60.0)
+        x = 1.0 / (1.0 + math.exp(-z))
         return p.Gmin + (p.Gmax - p.Gmin) * x
 
     @property

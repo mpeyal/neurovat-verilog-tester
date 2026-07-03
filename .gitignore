@@ -31,6 +31,9 @@ results/*.csv
 results/models/
 /aved_model/
 
+# generated slide-deck screenshots (rebuilt by tools/capture_shots.py)
+results/deck/
+
 # agent / GUI transient outputs
 results/.agent_backup/
 results/agent_snapshot.json
@@ -56,3 +59,6 @@ Thumbs.db
 # agent scratch plots in results/
 results/stdp_plot.py
 results/stdp_plot.png
+
+# control-bridge mailbox (runtime, per-session)
+control/

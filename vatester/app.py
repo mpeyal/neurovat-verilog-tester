@@ -45,9 +45,9 @@ C_SURF    = (22, 25, 32)
 C_SURF2   = (30, 34, 43)
 C_SURF3   = (39, 44, 56)
 C_BORDER  = (47, 53, 67)
-C_ACC     = (96, 134, 255)
-C_ACC_H   = (118, 152, 255)
-C_ACC_A   = (78, 112, 228)
+C_ACC     = (108, 148, 255)
+C_ACC_H   = (140, 174, 255)
+C_ACC_A   = (84, 120, 236)
 C_TEXT    = (231, 235, 243)
 C_TEXT2   = (158, 166, 184)
 C_MUTED   = (108, 116, 134)
@@ -308,8 +308,16 @@ def _defaults_of(params_cls):
 
 
 class App:
-    def __init__(self, workdir):
+    def __init__(self, workdir, bridge=None):
         self.workdir = os.path.abspath(workdir)
+        # control bridge (skillbridge-style): let an outside driver operate this
+        # running app via a file mailbox. ON by default; toggle live from the
+        # Tools menu, or launch with --no-bridge / NVAT_BRIDGE=0 to start off.
+        if bridge is None:
+            bridge = os.environ.get("NVAT_BRIDGE", "1") != "0"
+        self._bridge_enabled = bool(bridge)
+        self.control = None
+        self._log_lines = []            # plain-text mirror of the console (copyable)
         # register user/agent twins from the separate twins/ folder BEFORE the
         # model registry is consumed below
         self.dynamic_twins, self.twin_errors = register_dynamic_twins(self.workdir)
@@ -523,14 +531,16 @@ class App:
                 ("mvThemeCol_Button", C_SURF2),
                 ("mvThemeCol_ButtonHovered", C_SURF3),
                 ("mvThemeCol_ButtonActive", (49, 56, 72)),
-                ("mvThemeCol_Header", (37, 50, 86)),
-                ("mvThemeCol_HeaderHovered", (46, 62, 106)),
-                ("mvThemeCol_HeaderActive", (52, 70, 118)),
+                # accent-tinted section-header bars (Network / Neuron / ...)
+                ("mvThemeCol_Header", (42, 62, 118)),
+                ("mvThemeCol_HeaderHovered", (56, 82, 156)),
+                ("mvThemeCol_HeaderActive", (66, 96, 178)),
+                # the SELECTED tab pops in accent-blue; the rest stay quiet
                 ("mvThemeCol_Tab", (0, 0, 0, 0)),
-                ("mvThemeCol_TabHovered", C_SURF3),
-                ("mvThemeCol_TabActive", C_SURF2),
+                ("mvThemeCol_TabHovered", (48, 66, 112)),
+                ("mvThemeCol_TabActive", (50, 70, 134)),
                 ("mvThemeCol_TabUnfocused", (0, 0, 0, 0)),
-                ("mvThemeCol_TabUnfocusedActive", C_SURF2),
+                ("mvThemeCol_TabUnfocusedActive", (34, 40, 54)),
                 ("mvThemeCol_CheckMark", C_ACC),
                 ("mvThemeCol_SliderGrab", C_ACC),
                 ("mvThemeCol_SliderGrabActive", C_ACC_H),
@@ -547,18 +557,19 @@ class App:
             ],
             styles=[
                 ("mvStyleVar_WindowRounding", 0),
-                ("mvStyleVar_ChildRounding", 10),
-                ("mvStyleVar_FrameRounding", 7),
+                ("mvStyleVar_ChildRounding", 9),
+                ("mvStyleVar_FrameRounding", 8),
                 ("mvStyleVar_PopupRounding", 8),
-                ("mvStyleVar_GrabRounding", 6),
-                ("mvStyleVar_TabRounding", 6),
+                ("mvStyleVar_GrabRounding", 8),
+                ("mvStyleVar_TabRounding", 7),
                 ("mvStyleVar_ScrollbarRounding", 8),
-                ("mvStyleVar_WindowPadding", (14, 12)),
-                ("mvStyleVar_FramePadding", (10, 4)),
-                ("mvStyleVar_CellPadding", (8, 3)),
-                ("mvStyleVar_ItemSpacing", (10, 5)),
-                ("mvStyleVar_ItemInnerSpacing", (8, 4)),
-                ("mvStyleVar_ScrollbarSize", 11),
+                # tighter spacing -> denser / more compact rows
+                ("mvStyleVar_WindowPadding", (12, 9)),
+                ("mvStyleVar_FramePadding", (9, 3)),
+                ("mvStyleVar_CellPadding", (7, 2)),
+                ("mvStyleVar_ItemSpacing", (8, 4)),
+                ("mvStyleVar_ItemInnerSpacing", (6, 3)),
+                ("mvStyleVar_ScrollbarSize", 10),
                 ("mvStyleVar_ChildBorderSize", 1),
                 ("mvStyleVar_WindowBorderSize", 0),
             ],
@@ -580,7 +591,7 @@ class App:
             ("mvThemeCol_ButtonActive", C_ACC_A),
             ("mvThemeCol_Text", (250, 251, 255)),
         ], styles=[("mvStyleVar_FrameRounding", 8),
-                   ("mvStyleVar_FramePadding", (16, 7))])
+                   ("mvStyleVar_FramePadding", (14, 5))])
 
         self._mk_theme("stop", colors=[
             ("mvThemeCol_Button", (150, 52, 58)),
@@ -588,7 +599,7 @@ class App:
             ("mvThemeCol_ButtonActive", (200, 70, 76)),
             ("mvThemeCol_Text", (250, 250, 250)),
         ], styles=[("mvStyleVar_FrameRounding", 8),
-                   ("mvStyleVar_FramePadding", (16, 7))])
+                   ("mvStyleVar_FramePadding", (14, 5))])
 
         self._mk_theme("chip", colors=[
             ("mvThemeCol_Button", (35, 40, 52)),
@@ -1577,6 +1588,15 @@ class App:
             dpg.add_file_extension(".va", color=(220, 170, 255, 255))
             dpg.add_file_extension(".*")
 
+        # CSV picker for Tools > Fit LTP/LTD nonlinearity
+        with dpg.file_dialog(directory_selector=False, show=False, modal=True,
+                             width=620, height=420, tag="fit_csv_dialog",
+                             callback=self._on_fit_csv_file,
+                             default_path=self.workdir):
+            dpg.add_file_extension(".csv", color=(150, 220, 160, 255))
+            dpg.add_file_extension(".txt", color=(200, 200, 200, 255))
+            dpg.add_file_extension(".*")
+
         # confirm dialog for writing source back into a Virtuoso cellview
         with dpg.window(label="Write back to Virtuoso", tag="virt_write_modal",
                         modal=True, show=False, no_resize=True, width=470,
@@ -1735,6 +1755,45 @@ class App:
                                   callback=self.on_virtuoso_disconnect)
                 dpg.add_menu_item(label="List libraries",
                                   callback=self.on_virtuoso_libs)
+            with dpg.menu(label="Tools"):
+                with dpg.menu(label="Control bridge"):
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Status:")
+                        dpg.add_text("●", tag="bridge_dot", color=C_RED)
+                        dpg.add_text("disconnected", tag="bridge_state_txt",
+                                     color=C_RED)
+                    bi = dpg.add_menu_item(
+                        label="Connect bridge", tag="menu_bridge",
+                        callback=self._on_toggle_bridge)
+                    with dpg.tooltip(bi):
+                        dpg.add_text(
+                            "Connected: an outside driver - the agent or an\n"
+                            "external Claude Code - can operate this running app via\n"
+                            "the control/ file mailbox (python tools/nvat_ctl.py ...):\n"
+                            "run sims, set fields, screenshot, hot-reload edited twins.\n"
+                            "This is the LOCAL bridge, separate from the Cadence\n"
+                            "skillbridge in the Virtuoso menu. Disconnected: mailbox closed.")
+                dpg.add_separator()
+                ci = dpg.add_menu_item(label="Check twin ↔ .va params",
+                                       callback=self.on_check_consistency)
+                with dpg.tooltip(ci):
+                    dpg.add_text("Compare each .va's `parameter` values against\n"
+                                 "its Python twin's defaults; flags mismatches so\n"
+                                 "the twin and Verilog-A model stay in sync.")
+                oi = dpg.add_menu_item(label="Compile .va (OpenVAF)",
+                                       callback=self.on_openvaf_compile)
+                with dpg.tooltip(oi):
+                    dpg.add_text("Compile the enabled .va to OSDI with OpenVAF to\n"
+                                 "catch Verilog-A errors before Cadence. Needs\n"
+                                 "openvaf on PATH (or set NVAT_OPENVAF); reports\n"
+                                 "gracefully if it isn't installed.")
+                fi = dpg.add_menu_item(label="Fit LTP/LTD from CSV...",
+                                       callback=lambda: dpg.show_item("fit_csv_dialog"))
+                with dpg.tooltip(fi):
+                    dpg.add_text("Load a measured conductance-per-pulse CSV (1 col\n"
+                                 "G, or 2 cols pulse,G) and fit the LTP/LTD\n"
+                                 "nonlinearity + dynamic range + asymmetry.")
+                # (future tools go here as sibling items / submenus)
             with dpg.menu(label="Agent"):
                 dpg.add_menu_item(
                     label="Autonomous: edit + run + fix (auto-approve)",
@@ -1957,6 +2016,13 @@ class App:
                     self._source_tab()
                 with dpg.tab(label="  Log  ", tag="tab_log"):
                     with self._pad(left=8, top=8, bottom=0):
+                        with dpg.group(horizontal=True):
+                            dpg.add_button(label="Copy log",
+                                           callback=lambda: self._copy_log())
+                            dpg.add_button(label="Save to file",
+                                           callback=lambda: self._save_log())
+                            dpg.add_button(label="Clear",
+                                           callback=lambda: self._clear_log())
                         with dpg.child_window(tag="console", border=False):
                             pass
 
@@ -3162,12 +3228,17 @@ class App:
             self.q.put(("log", f"[run] done in "
                                f"{time.perf_counter() - t0:.2f} s"))
         if autosave and results:
-            outdir = os.path.join(self.workdir, "results")
-            os.makedirs(outdir, exist_ok=True)
-            for r in results:
-                stem = re.sub(r"[^\w]+", "_", r.label).strip("_")
-                p = r.save_csv(os.path.join(outdir, f"gui_{stem}.csv"))
-                self.q.put(("log", f"  csv -> {p}"))
+            # never let a save failure kill the worker before the "results"
+            # message below - that would strand sim_running=True forever.
+            try:
+                outdir = os.path.join(self.workdir, "results")
+                os.makedirs(outdir, exist_ok=True)
+                for r in results:
+                    stem = re.sub(r"[^\w]+", "_", r.label).strip("_")
+                    p = r.save_csv(os.path.join(outdir, f"gui_{stem}.csv"))
+                    self.q.put(("log", f"  csv -> {p}"))
+            except Exception as e:
+                self.q.put(("log", f"  [save] auto-save CSV failed: {e}"))
         self.q.put(("results", results, meta, unit, kind, live))
 
     # ---------------- STDP characterization --------------------------
@@ -4735,9 +4806,15 @@ class App:
             dpg.configure_item("btn_stop", show=True)
 
         def worker():
-            res = self.agent.send(text, ctx, allow_edits=edits,
-                                  allow_bash=bash, model=model,
-                                  autonomous=auto)
+            # always emit a terminal ("chat", ...) message, even on an
+            # unexpected error, so chat_busy can't stay True until restart.
+            try:
+                res = self.agent.send(text, ctx, allow_edits=edits,
+                                      allow_bash=bash, model=model,
+                                      autonomous=auto)
+            except Exception as e:
+                res = {"ok": False, "text": "",
+                       "error": f"{type(e).__name__}: {e}"}
             self.q.put(("chat", res, edits or bash))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -4970,11 +5047,16 @@ class App:
             self._twin_mtimes = cur
             self._prev_mtimes = cur
             return
-        changed = any(cur[k] != self._twin_mtimes.get(k) for k in cur)
-        # require stability across two polls so we don't read a half-written file
+        # _twin_mtimes is the currently-LOADED baseline; _prev_mtimes is only the
+        # previous poll. Reload when the folder has been STABLE for a poll
+        # (cur == prev, so we don't read a half-written file) AND differs from the
+        # loaded baseline. (The old code swapped both every poll, so it only fired
+        # on an a->b->a flicker and never on a real, persistent edit.)
         stable = cur == self._prev_mtimes
-        self._prev_mtimes, self._twin_mtimes = self._twin_mtimes, cur
+        changed = cur != self._twin_mtimes
+        self._prev_mtimes = cur
         if changed and stable and not self.sim_running:
+            self._twin_mtimes = cur     # adopt the new baseline
             self.log("[live] code changed (twin/analysis) - reloading + re-plotting")
             try:
                 self._reload_models()
@@ -5237,37 +5319,45 @@ class App:
                 dpg.add_loading_indicator(tag="nt_busy", show=False, radius=2.0,
                                           style=1, color=C_AMBER)
                 dpg.add_button(label="● ready", tag="nt_status")
-            dpg.add_text("synapse device + all parameters are in the LEFT panel "
-                         "- press 'Build network'", tag="nt_devlabel",
-                         color=C_TEXT2)
+            dpg.add_text("params: LEFT panel + Neuron tab   —   then Build "
+                         "network", tag="nt_devlabel", color=C_TEXT2)
             dpg.add_separator()
             # the visualization fills the center; the controls live in the LEFT
             # panel (swapped in for the device-tester sections on this tab)
             with dpg.child_window(width=-1, border=False, no_scrollbar=True,
                                   tag="nt_canvas_col"):
+                # grouped into 7 top-level tabs (related views nested) so the
+                # bar no longer overflows / truncates
                 with dpg.tab_bar(tag="nt_viz_tabs"):
-                    with dpg.tab(label="  Canvas  "):
+                    with dpg.tab(label="  Network  "):
                         self._nt_canvas_tab()
                     with dpg.tab(label="  Neuron  ", tag="nt_tab_neuron"):
                         self._nt_neuron_tab()
                     with dpg.tab(label="  Cell  ", tag="nt_tab_cell"):
                         self._nt_cell_tab()
-                    with dpg.tab(label="  Weights  "):
-                        self._nt_weights_tab()
+                    with dpg.tab(label="  Weights  ", tag="nt_tab_weights"):
+                        with dpg.tab_bar():
+                            with dpg.tab(label="  Maps  "):
+                                self._nt_weights_tab()
+                            with dpg.tab(label="  Trajectories  ",
+                                         tag="nt_tab_wtrace"):
+                                self._nt_wtrace_tab()
                     with dpg.tab(label="  Activity  "):
-                        self._nt_activity_tab()
-                    with dpg.tab(label=" Out spikes "):
-                        self._nt_output_tab()
-                    with dpg.tab(label=" In spikes "):
-                        self._nt_inspikes_tab()
-                    with dpg.tab(label=" Dataset "):
+                        with dpg.tab_bar():
+                            with dpg.tab(label="  Activation  "):
+                                self._nt_activity_tab()
+                            with dpg.tab(label="  Out spikes  "):
+                                self._nt_output_tab()
+                            with dpg.tab(label="  In spikes  "):
+                                self._nt_inspikes_tab()
+                    with dpg.tab(label="  Data  "):
                         self._nt_patterns_tab()
-                    with dpg.tab(label="  Learning  "):
-                        self._nt_learning_tab()
-                    with dpg.tab(label=" All weights ", tag="nt_tab_wtrace"):
-                        self._nt_wtrace_tab()
-                    with dpg.tab(label="  Metrics  "):
-                        self._nt_metrics_tab()
+                    with dpg.tab(label="  Results  "):
+                        with dpg.tab_bar():
+                            with dpg.tab(label="  Learning  "):
+                                self._nt_learning_tab()
+                            with dpg.tab(label="  Metrics  "):
+                                self._nt_metrics_tab()
                 dpg.set_item_callback("nt_viz_tabs", self._on_nt_viz_tab)
 
     def _nt_wtrace_tab(self):
@@ -5291,21 +5381,53 @@ class App:
         if not dpg.does_item_exist("nt_viz_tabs"):
             return
         sel = dpg.get_value("nt_viz_tabs")
-        if sel == "nt_tab_wtrace":
+        if sel == "nt_tab_weights":          # outer Weights tab (Maps / Trajectories)
             self._nt_draw_weight_traces()
         elif sel == "nt_tab_neuron":
             self._nt_probe_neuron()
 
     def _nt_neuron_tab(self):
-        """A single-neuron bench: drive ONE LIF output neuron with the current
-        neuron parameters (left panel) - no network, no weights - and watch it
-        integrate, cross threshold and spike, plus its f-I transfer curve."""
+        """Set the LIF + synaptic neuron parameters here (saved + used to Build
+        the network), and bench a single neuron: drive ONE LIF neuron with these
+        params, watch it integrate -> cross threshold -> spike, + its f-I curve."""
         with self._pad(left=6, top=4, bottom=0):
-            self._small("NEURON BENCH - drive ONE LIF neuron with the current "
-                        "neuron parameters (LEFT panel) and watch it integrate "
-                        "-> cross threshold -> spike + reset. No synapses/weights "
-                        "- just the neuron. Change params, re-Probe.",
-                        color=C_TEXT2)
+            with dpg.collapsing_header(
+                    label="Neuron parameters  (used when you Build the network)",
+                    default_open=True, tag="nt_neuron_params_hdr"):
+                with dpg.group(horizontal=True):     # all 9 on ONE compact row
+                    self._nt_num("nt_tau_m", "tau_m", 20, 46, False,
+                                 "Membrane time constant (ms) - how fast the "
+                                 "potential leaks back to rest.")
+                    self._nt_num("nt_vth", "V_th", 1.0, 46, False,
+                                 "V threshold: fire when the membrane crosses "
+                                 "this (+ the adaptive homeostatic theta).")
+                    self._nt_num("nt_refrac", "refrac", 5, 46, False,
+                                 "Refractory period (ms) - dead time after a "
+                                 "spike.")
+                    self._nt_num("nt_epsp", "EPSP", 11.0, 46, False,
+                                 "EPSP gain: how strongly an excitatory input "
+                                 "spike (scaled by the synapse conductance) "
+                                 "depolarises the neuron. Activity-normalised, so "
+                                 "one value works for 5x5 or 28x28.")
+                    self._nt_num("nt_ipsp", "IPSP", 1.0, 46, False,
+                                 "IPSP gain: feed-forward inhibition depth from "
+                                 "inhibitory inputs (hyperpolarising).")
+                    self._nt_num("nt_tausyn", "tau_syn", 8, 46, False,
+                                 "Synaptic (PSP) trace decay (ms).")
+                    self._nt_num("nt_inhib", "inhib", 0.9, 46, False,
+                                 "Lateral inhibition: winner-take-all competition "
+                                 "between output neurons. 0 disables it.")
+                    self._nt_num("nt_theta", "theta+", 0.06, 50, False,
+                                 "Homeostatic threshold bump per output spike "
+                                 "(keeps one neuron from hogging every pattern).")
+                    self._nt_num("nt_teacher", "teacher", 1.4, 50, False,
+                                 "Supervised teacher drive onto the target "
+                                 "neuron.")
+            dpg.add_separator()
+            self._small("BENCH - drive ONE LIF neuron with the parameters ABOVE "
+                        "and watch it integrate -> cross threshold -> spike + "
+                        "reset. No synapses/weights - just the neuron. Change "
+                        "params, re-Probe.", color=C_TEXT2)
             with dpg.group(horizontal=True):
                 self._nt_num("nt_neuron_hz", "INPUT Hz", 250, 64, False,
                              "Rate of incoming EXCITATORY input spikes (one EPSP "
@@ -5397,13 +5519,7 @@ class App:
         dpg.set_value("nt_neuron_info", info)
 
     def _nt_controls(self):
-        self._small("Tip: hover any field name or box for what it does.",
-                    color=(126, 150, 220))
         with dpg.collapsing_header(label="Network", default_open=True):
-            self._caption("SYNAPSE DEVICE",
-                          "Which device twin is the synapse at each crossbar "
-                          "cross-point - its conductance IS the weight. ECFET = "
-                          "current-driven gate; FeFET = voltage-driven gate.")
             dpg.add_combo([s.label for s in MODEL_SPECS],
                           default_value=MODEL_SPECS[1].label, tag="nt_device",
                           width=-1, callback=self._on_nt_device_change)
@@ -5524,38 +5640,9 @@ class App:
                              "Peak Poisson spike rate for a fully-on pixel.")
                 self._nt_num("nt_dt", "STEP ms", 1.0, 60, False,
                              "Integration time-step.")
-        with dpg.collapsing_header(label="Neuron (LIF + PSP)", default_open=True):
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_tau_m", "tau_m ms", 20, 66, False,
-                             "Membrane time constant - how fast the potential "
-                             "leaks back to rest.")
-                self._nt_num("nt_vth", "V threshold", 1.0, 70, False,
-                             "Fire when the membrane potential crosses this "
-                             "(+ the adaptive homeostatic theta).")
-                self._nt_num("nt_refrac", "refrac ms", 5, 64, False,
-                             "Dead time after a spike.")
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_epsp", "EPSP gain", 11.0, 70, False,
-                             "Excitatory post-synaptic potential weight - how "
-                             "strongly an excitatory input spike (scaled by the "
-                             "synapse conductance) depolarises the neuron. The "
-                             "drive is activity-normalised, so the same value "
-                             "works for a 5x5 grid or 28x28 MNIST.")
-                self._nt_num("nt_ipsp", "IPSP gain", 1.0, 70, False,
-                             "Inhibitory post-synaptic potential depth - "
-                             "feed-forward inhibition from inhibitory inputs "
-                             "(hyperpolarising).")
-                self._nt_num("nt_tausyn", "tau_syn ms", 8, 66, False,
-                             "Synaptic (PSP) trace decay.")
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_inhib", "lateral inhib", 0.9, 78, False,
-                             "Winner-take-all lateral inhibition between output "
-                             "neurons (competition). 0 disables it.")
-                self._nt_num("nt_theta", "theta+ homeo", 0.06, 78, False,
-                             "Homeostatic threshold bump per output spike "
-                             "(keeps one neuron from hogging every pattern).")
-                self._nt_num("nt_teacher", "teacher", 1.4, 60, False,
-                             "Supervised teacher drive onto the target neuron.")
+        # (Neuron LIF + PSP parameters moved to the center "Neuron" tab to
+        #  declutter this panel - same widget tags, so Build/Save/Load are
+        #  unchanged. See _nt_neuron_tab.)
         with dpg.collapsing_header(label="Synapse learning (STDP)",
                                    default_open=True):
             self._small("the network rule sets the DIRECTION of each write; the "
@@ -6628,12 +6715,17 @@ class App:
         if dpg.does_item_exist("nt_status"):
             dpg.configure_item("nt_status", label=f"● {text}")
             th = self._status_themes.get(color)
-            if th is None:
+            if th is None:                          # a colored status "pill"
+                r, g, b = color[:3]
                 th = self._mk_theme(f"ntstat_{color}", colors=[
-                    ("mvThemeCol_Button", (0, 0, 0, 0)),
-                    ("mvThemeCol_ButtonHovered", (0, 0, 0, 0)),
-                    ("mvThemeCol_ButtonActive", (0, 0, 0, 0)),
-                    ("mvThemeCol_Text", color)])
+                    ("mvThemeCol_Button", (r, g, b, 28)),
+                    ("mvThemeCol_ButtonHovered", (r, g, b, 40)),
+                    ("mvThemeCol_ButtonActive", (r, g, b, 40)),
+                    ("mvThemeCol_Border", (r, g, b, 130)),
+                    ("mvThemeCol_Text", color)],
+                    styles=[("mvStyleVar_FrameRounding", 11),
+                            ("mvStyleVar_FrameBorderSize", 1),
+                            ("mvStyleVar_FramePadding", (12, 3))])
                 self._status_themes[color] = th
             dpg.bind_item_theme("nt_status", th)
 
@@ -6918,6 +7010,9 @@ class App:
     def on_nt_build(self, *_):
         if self.trainer_running:
             return
+        # a rebuild can change the grid/neuron dims; drop any stale cell selection
+        # so the Cell inspector can't dereference an out-of-range (c, j, i).
+        self._nt_cell = None
         self._nt_dev = self._nt_device_factory()
         if not self._nt_dev:
             self._nt_status("check a model (.va) in the main window first", C_RED)
@@ -7053,7 +7148,10 @@ class App:
                 and snap.get("rf_rgba") is not None):
             dpg.set_value(self._rf_tex, snap["rf_rgba"])
         self._nt_wuS_all = snap["W_uS_all"]            # for the crossbar selector
-        c = min(int(self._nt_get("nt_xbar_sel_idx", 0)), len(snap["W_uS_all"]) - 1)
+        # _nt_xbar_sel_idx is a plain attribute (set by the crossbar selector),
+        # NOT a DPG item - reading it via _nt_get always returned the default 0.
+        c = min(int(getattr(self, "_nt_xbar_sel_idx", 0)),
+                len(snap["W_uS_all"]) - 1)
         self._nt_draw_weight_matrix(snap["W_uS_all"][c])
         self._nt_draw_diagram(snap["Wn_all"], snap.get("present"))
         if snap["epoch"] > 0:
@@ -7508,7 +7606,10 @@ class App:
             dpg.configure_item("nt_cell_draw", width=max(360, int(size[0]) - 8),
                                height=max(220, int(size[1]) - 8))
         self._nt_anim_t += 0.02
-        self._nt_draw_cell()
+        try:
+            self._nt_draw_cell()
+        except Exception as e:      # never let a render-loop tick crash the app
+            self.log(f"[nt] cell inspector draw skipped: {e}")
 
     CELL_CYCLE = 5.0                 # seconds: READ (0..0.62) then WRITE (..1)
 
@@ -7524,6 +7625,10 @@ class App:
             self._nt_cell = (0, 0, int(np.argmax(W0[0])))
         c, j, i = self._nt_cell
         Wn = tr.weights_norm(c)
+        # a rebuild to a smaller crossbar can leave j/i past the new dims
+        if j >= len(Wn) or int(i) >= len(Wn[0]):
+            self._nt_cell = (c, 0, int(np.argmax(Wn[0])))
+            c, j, i = self._nt_cell
         g = float(Wn[j][int(i)])
         g_uS = float(tr.weights_uS(c)[j][int(i)])
         kind = (self._nt_dev or {}).get("kind", "current")
@@ -8213,14 +8318,37 @@ class App:
 
     def log(self, msg):
         stamp = time.strftime("%H:%M:%S")
-        t = dpg.add_text(f"{stamp}  {msg}", parent="console",
-                         wrap=1200, color=C_TEXT2)
+        line = f"{stamp}  {msg}"
+        self._log_lines.append(line)            # copyable/readable plain-text mirror
+        if len(self._log_lines) > 500:
+            self._log_lines = self._log_lines[-500:]
+        t = dpg.add_text(line, parent="console", wrap=1200, color=C_TEXT2)
         if "mono" in self.fonts:
             dpg.bind_item_font(t, self.fonts["mono"])
         kids = dpg.get_item_children("console", 1) or []
         if len(kids) > 500:
             dpg.delete_item(kids[0])
         self._scroll_bottom("console")
+
+    def _copy_log(self):
+        """Copy the whole console to the clipboard (add_text isn't selectable)."""
+        dpg.set_clipboard_text("\n".join(self._log_lines))
+        self.log(f"[log] copied {len(self._log_lines)} lines to clipboard")
+
+    def _save_log(self):
+        path = os.path.join(self.workdir, "results", "session_log.txt")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(self._log_lines) + "\n")
+            self.log(f"[log] saved -> {path}")
+        except OSError as e:
+            self.log(f"[log] save failed: {e}")
+
+    def _clear_log(self):
+        self._log_lines = []
+        for k in (dpg.get_item_children("console", 1) or []):
+            dpg.delete_item(k)
 
     def _on_resize(self):
         vw = dpg.get_viewport_client_width()
@@ -8276,8 +8404,124 @@ class App:
             except Exception as e:
                 self.log(f"[ui] error: {e!r}")
 
+    # ---------------- Tools menu: model utilities --------------------
+    def _twin_defaults(self):
+        """{model_key: {param_name: numeric default}} from the twin dataclasses."""
+        out = {}
+        for key, spec in SPEC_BY_KEY.items():
+            d = _defaults_of(spec.params_cls)
+            out[key] = {k: v for k, v in d.items()
+                        if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        return out
+
+    def check_va_consistency(self):
+        """Tools: compare every mapped .va's params to its twin. Returns a report."""
+        from vatester import tools_ext as T
+        res = T.check_consistency(self.va_files, self._twin_defaults(), TWIN_FILE)
+        head, lines = T.format_consistency(res)
+        self.log("[tools] " + head)
+        for ln in lines:
+            self.log(ln)
+        return res
+
+    def _goto_log(self):
+        """Surface the console so Tools output is visible (matches Virtuoso menu)."""
+        if dpg.does_item_exist("center_tabs"):
+            dpg.set_value("center_tabs", "tab_log")
+
+    def on_check_consistency(self, *_):
+        self._goto_log()
+        self.check_va_consistency()
+
+    def openvaf_compile_va(self, path=None):
+        """Tools: compile .va(s) with OpenVAF. path=None -> enabled (else all)."""
+        from vatester import tools_ext as T
+        if path:
+            targets = [path]
+        else:
+            en = set(self._enabled_keys())
+            targets = [v.path for v in self.va_files if v.model_key in en] \
+                or [v.path for v in self.va_files]
+        if not targets:
+            self.log("[openvaf] no .va files to compile")
+            return {"results": []}
+        results = []
+        for p in targets:
+            r = T.openvaf_compile(p, workdir=self.workdir)
+            r["va"] = os.path.basename(p)
+            results.append(r)
+            if not r["available"]:
+                self.log("[openvaf] " + r["output"])
+                break
+            tag = "OK" if r["ok"] else f"FAILED (rc={r.get('returncode')})"
+            msg = f"[openvaf] {r['va']}: {tag}"
+            if r.get("osdi"):
+                msg += f" -> {os.path.basename(r['osdi'])}"
+            self.log(msg)
+            if not r["ok"] and r.get("output"):
+                for ln in r["output"].splitlines()[-8:]:
+                    self.log("  " + ln)
+        return {"results": results}
+
+    def on_openvaf_compile(self, *_):
+        self._goto_log()
+        self.openvaf_compile_va()
+
+    def fit_curve_csv(self, path):
+        """Tools: fit the LTP/LTD nonlinearity of a measured G-per-pulse CSV."""
+        from vatester import tools_ext as T
+        try:
+            g = T.read_curve_csv(path)
+            res = T.fit_ltp_ltd(g)
+        except Exception as e:
+            self.log(f"[fit] failed: {e}")
+            return {"ok": False, "error": str(e)}
+        self.log(f"[fit] {os.path.basename(path)}")
+        for ln in T.format_fit(res):
+            self.log(ln)
+        res["ok"] = True
+        return res
+
+    def _on_fit_csv_file(self, sender, app_data):
+        sel = app_data.get("file_path_name") or ""
+        paths = list((app_data.get("selections") or {}).values())
+        path = paths[0] if paths else sel
+        if path:
+            self._goto_log()
+            self.fit_curve_csv(path)
+
+    def _on_toggle_bridge(self, *_):
+        """Tools menu: connect/disconnect the control bridge at runtime."""
+        want = not self._bridge_enabled    # flip current state
+        self._bridge_enabled = want
+        if self.control is not None:        # None only pre-run; flag suffices then
+            if want:
+                self.control.start()
+            else:
+                self.control.stop()
+            want = self.control.active      # reflect what actually happened
+            self._bridge_enabled = want
+        self._set_bridge_menu(want)
+
+    def _set_bridge_menu(self, connected):
+        """Refresh the Tools-menu status line + action label to match state."""
+        if not dpg.does_item_exist("bridge_dot"):
+            return
+        col = C_GREEN if connected else C_RED
+        dpg.configure_item("bridge_dot", color=col)
+        dpg.set_value("bridge_state_txt",
+                      "connected" if connected else "disconnected")
+        dpg.configure_item("bridge_state_txt", color=col)
+        dpg.set_item_label("menu_bridge",
+                           "Disconnect bridge" if connected else "Connect bridge")
+
     def run(self, smoke_frames=0):
         self.build()
+        # always instantiate so the Tools-menu toggle can flip it live; it only
+        # opens the mailbox when active (default = self._bridge_enabled).
+        from vatester.control_bridge import ControlBridge
+        self.control = ControlBridge(self, active=self._bridge_enabled)
+        self._set_bridge_menu(self.control.active)      # sync the Tools status
         frame = 0
         while dpg.is_dearpygui_running():
             self._process_queue()
@@ -8290,6 +8534,8 @@ class App:
             self._nt_tick_cell_anim()
             self._watch_code()
             self._nt_watch_patterns()
+            if self.control is not None:        # process one bridge command/frame
+                self.control.poll()
             dpg.render_dearpygui_frame()
             frame += 1
             if smoke_frames and frame >= smoke_frames:
@@ -8300,5 +8546,8 @@ class App:
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
-def main(workdir=None, smoke_frames=0):
-    App(workdir or os.getcwd()).run(smoke_frames=smoke_frames)
+def main(workdir=None, smoke_frames=0, bridge=None):
+    # keep the smoke self-test clean: never open the mailbox during it
+    if smoke_frames:
+        bridge = False
+    App(workdir or os.getcwd(), bridge=bridge).run(smoke_frames=smoke_frames)

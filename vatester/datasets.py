@@ -75,7 +75,11 @@ def _find_mnist_in_dir(path):
 # ---------------------------------------------------------------- loaders ---
 
 def load_npz(path):
-    z = np.load(path, allow_pickle=True)
+    # allow_pickle=False: a .npz can be downloaded from a user/agent-supplied
+    # URL, and allow_pickle=True would execute a pickled object array on load
+    # (arbitrary code). These datasets are numeric image/label arrays, so
+    # pickled objects are never needed here.
+    z = np.load(path, allow_pickle=False)
     keys = list(z.keys())
     def first(cands):
         for k in cands:

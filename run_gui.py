@@ -28,6 +28,12 @@ if __name__ == "__main__":
                     default=os.path.dirname(os.path.abspath(__file__)),
                     help="folder to scan for .va files (default: app folder)")
     ap.add_argument("--smoke", type=int, default=0, metavar="N",
-                    help="render N framessstarts then exit (self-test)")
+                    help="render N fi i nramessstarts then exit (self-test)")
+    # control bridge is ON by default (toggle live from the Tools menu); use
+    # --no-bridge to start with it off. See tools/nvat_ctl.py.
+    ap.add_argument("--no-bridge", dest="bridge", action="store_false",
+                    help="start with the control bridge disabled "
+                         "(it is enabled by default; toggle it in Tools menu)")
+    ap.set_defaults(bridge=True)
     args = ap.parse_args()
-    main(args.workspace, smoke_frames=args.smoke)
+    main(args.workspace, smoke_frames=args.smoke, bridge=args.bridge)

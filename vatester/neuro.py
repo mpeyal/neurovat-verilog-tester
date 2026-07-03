@@ -689,7 +689,7 @@ class Trainer:
                         fired = np.array([win])
                     for j in fired:
                         spikes[c + 1][int(j)].append(tm)
-                        if c == K - 1:
+                        if c == K - 1 and learn:    # don't pollute totals on eval
                             self.spike_count[j] += 1
                         v[c][j] = N.v_reset
                         refrac[c][j] = N.t_refractory
@@ -834,8 +834,9 @@ class Trainer:
         layer_spikes = [[(np.nonzero(spk[c][:, n])[0] * dt).tolist()
                          for n in range(L[c])] for c in range(len(spk))]
         out_spikes = layer_spikes[-1]
-        for j, ts in enumerate(out_spikes):
-            self.spike_count[j] += len(ts)
+        if learn:                                   # don't pollute totals on eval
+            for j, ts in enumerate(out_spikes):
+                self.spike_count[j] += len(ts)
         in_spikes = [(tm, i) for i, ts in enumerate(layer_spikes[0]) for tm in ts]
         self._t_dev += cfg.present_ms * 1e-3
         return {

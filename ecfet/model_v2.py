@@ -219,14 +219,16 @@ class EcfetV2:
             # A_stdp * sum(trace) = A_stdp * 3-exp(dt) is the window value.
             ws = p.stdp_weights
             potentiating = (-math.copysign(1.0, Ieff) * p.polarity) > 0.0
-            if potentiating:
-                self.G_nv += p.A_stdp * sum(self.tr_dep)   # post-before-pre -> LTP
-                for i in range(3):
-                    self.tr_pot[i] += ws[i]
-            else:
-                self.G_nv -= p.A_stdp * sum(self.tr_pot)   # pre-before-post -> LTD
-                for i in range(3):
-                    self.tr_dep[i] += ws[i]
+            if potentiating:                               # post-before-pre -> LTP
+                self.G_nv += p.A_stdp * sum(self.tr_dep)
+                self.tr_dep = [0.0, 0.0, 0.0]              # consume harvested trace
+                for i in range(3):                         # saturate at 1-pulse weight
+                    self.tr_pot[i] = min(self.tr_pot[i] + ws[i], ws[i])
+            else:                                          # pre-before-post -> LTD
+                self.G_nv -= p.A_stdp * sum(self.tr_pot)
+                self.tr_pot = [0.0, 0.0, 0.0]             # consume harvested trace
+                for i in range(3):                         # saturate at 1-pulse weight
+                    self.tr_dep[i] = min(self.tr_dep[i] + ws[i], ws[i])
             self.G_nv = min(max(self.G_nv, p.Gmin), p.Gmax)
 
         # 1) volatile pools always relax (exact exponential update)

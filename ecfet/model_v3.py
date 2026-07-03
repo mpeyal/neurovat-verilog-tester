@@ -360,7 +360,7 @@ class EcfetV3:
             h = dt / n_sub
             dx_sub = sign * abs(Ieff) * h / p.Q_full * eta * cf
             cw = p.pool_weights
-            edl_factor = p.kappa_v / (1.0 - p.kappa_v)
+            edl_factor = p.kappa_v / max(1.0 - p.kappa_v, 1e-9)
             for _ in range(n_sub):
                 x_new = min(max(self.x + dx_sub, 0.0), 1.0)
                 G_new = p.G_of_x(x_new)
