@@ -2003,10 +2003,18 @@ class Component extends DCLogic {
     this.setState({ virtBrowser: true });
   }
   _toggleLib(name) { this.setState(s => ({ virt: Object.assign({}, s.virt, { expanded: s.virt.expanded === name ? null : name }) })); }
-  _openVaFromLib(lib, cell) {
+  async _openVaFromLib(lib, cell) {
     if (!cell.va) { this._log("[virtuoso] " + lib + "/" + cell.cell + " has no Verilog-A view (" + cell.view + ")", "err"); return; }
-    this.setState({ virtBrowser: false, ws: "code", loadedVa: { lib: lib, cell: cell.cell } });
-    this._log("[virtuoso] hiOpenCellView(\"" + lib + "\", \"" + cell.cell + "\", \"veriloga\") \u2014 pulled into editor", "ok");
+    const view = cell.view || "veriloga";
+    this.setState({ virtBrowser: false, ws: "code", loadedVa: { lib: lib, cell: cell.cell, view: view } });
+    this._log("[virtuoso] hiOpenCellView(\"" + lib + "\", \"" + cell.cell + "\", \"" + view + "\") \u2014 fetching source\u2026", "muted");
+    // Actually pull the source into the editor via the backend (not just a log).
+    const { data, live } = await this._be("load_from_virtuoso", { lib: lib, cell: cell.cell, view: view },
+      () => ({ source: this._genVa(this.state.essentials) }));
+    const src = (data && data.source) || this._genVa(this.state.essentials);
+    const dev = /v3/i.test(cell.cell) ? "v3" : /fefet|fe_cap/i.test(cell.cell) ? "fefet" : "v2";
+    this.setState({ vaCode: src, preset: "custom", device: dev, devSel: { v2: dev === "v2", v3: dev === "v3", fefet: dev === "fefet" } });
+    this._log("[virtuoso] " + (live ? "loaded" : "loaded (twin stub)") + " " + lib + "/" + cell.cell + " into editor \u00b7 " + this._parseVa(src).length + " params \u00b7 device " + dev, live ? "ok" : "muted");
   }
   _closeMenu() { this.setState({ menu: null }); }
 
