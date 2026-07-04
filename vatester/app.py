@@ -110,6 +110,27 @@ NT_CONTROLS = [
     ("nt_ds_perclass", "dataset images per class"),
 ]
 
+# ---- selectable display units --------------------------------------------
+# Each dimension has an ordered unit list; the CANONICAL unit (factor 1.0) is the
+# one the engine expects (pA for current, V for voltage, ms for time, Hz for
+# frequency).  A field stores its number in the currently-selected unit; reads go
+# through _nt_getu() which multiplies by the factor below to get the canonical
+# value, and switching a unit rescales the number so the physical value is fixed.
+UNIT_SETS = {
+    "current": ["pA", "nA", "uA", "mA", "A", "kA", "MA"],
+    "voltage": ["uV", "mV", "V", "kV"],
+    "time":    ["ns", "us", "ms", "s"],
+    "freq":    ["mHz", "Hz", "kHz", "MHz"],
+}
+UNIT_FACTOR = {
+    "pA": 1.0, "nA": 1e3, "uA": 1e6, "mA": 1e9, "A": 1e12, "kA": 1e15, "MA": 1e18,
+    "uV": 1e-6, "mV": 1e-3, "V": 1.0, "kV": 1e3,
+    "ns": 1e-6, "us": 1e-3, "ms": 1.0, "s": 1e3,
+    "mHz": 1e-3, "Hz": 1.0, "kHz": 1e3, "MHz": 1e6,
+}
+UNIT_DIM = {u: dim for dim, us in UNIT_SETS.items() for u in us}
+CANON_UNIT = {"current": "pA", "voltage": "V", "time": "ms", "freq": "Hz"}
+
 NT_AGENT_SYSTEM = """
 === NEUROMORPHIC TRAINER (the "Neuro Trainer" tab in this same app) ===
 This app ALSO has a Neuromorphic Trainer: a spiking neural network whose synapses
@@ -367,6 +388,7 @@ class App:
         self._backup_dir = None     # snapshot of editable files before agent
         self._last_compute = "transient"  # "transient" | "stdp" (live re-run)
         self._restart = False       # set to relaunch and apply GUI-code edits
+        self._studio_proc = None    # web GUI (studio/) server we launched
         self._series = []
         self._ana_series = []
         self.sim_running = False
@@ -434,7 +456,10 @@ class App:
         self._nt_agent_run = False      # an agent-triggered train is in flight
         self._nt_agent_rounds = 0       # auto-analyze loop guard
         self._nt_best_acc = 0.0         # best accuracy the auto-loop has reached
+        self._nt_best_seen = 0.0        # best eval acc for the BEST stat card
         self._nt_no_improve = 0         # rounds since the best improved (patience)
+        self._nt_last_patset = "bars"   # last built-in set (for DATA SOURCE cards)
+        self._nt_units = {}             # tag -> selected display unit (see _nt_getu)
         self._nt_cell = None            # selected synapse (c, j, i) to inspect
         self._nt_cell_hits = []         # [(c, j, i, x, y)] clickable cells on canvas
         self._nt_anim_t = 0.0           # cell-inspector animation clock (s)
@@ -630,6 +655,38 @@ class App:
             ("mvThemeCol_Border", C_BORDER),
         ], styles=[("mvStyleVar_ChildRounding", 9),
                    ("mvStyleVar_WindowPadding", (10, 8))])
+
+        # a DATA SOURCE card that is the selected one: accent border + tint
+        self._mk_theme("card_active", colors=[
+            ("mvThemeCol_ChildBg", (34, 48, 92)),
+            ("mvThemeCol_Border", C_ACC),
+        ], styles=[("mvStyleVar_ChildRounding", 9),
+                   ("mvStyleVar_WindowPadding", (10, 8)),
+                   ("mvStyleVar_ChildBorderSize", 2)])
+
+        # raster preview dots: tiny circles, clean = accent blue, noisy = amber
+        for _nm, _col in (("dot_clean", C_ACC), ("dot_noise", C_AMBER)):
+            with dpg.theme() as _th:
+                with dpg.theme_component(dpg.mvScatterSeries):
+                    dpg.add_theme_color(dpg.mvPlotCol_MarkerFill, _col,
+                                        category=dpg.mvThemeCat_Plots)
+                    dpg.add_theme_color(dpg.mvPlotCol_MarkerOutline, _col,
+                                        category=dpg.mvThemeCat_Plots)
+                    dpg.add_theme_style(dpg.mvPlotStyleVar_Marker,
+                                        dpg.mvPlotMarker_Circle,
+                                        category=dpg.mvThemeCat_Plots)
+                    dpg.add_theme_style(dpg.mvPlotStyleVar_MarkerSize, 1.6,
+                                        category=dpg.mvThemeCat_Plots)
+            self.themes[_nm] = _th
+
+        # explicit line-series colours for the neuron probe plots
+        for _nm, _col in (("ln_amber", C_AMBER), ("ln_blue", C_ACC),
+                          ("ln_green", C_GREEN), ("ln_muted", (150, 160, 180))):
+            with dpg.theme() as _th:
+                with dpg.theme_component(dpg.mvLineSeries):
+                    dpg.add_theme_color(dpg.mvPlotCol_Line, _col,
+                                        category=dpg.mvThemeCat_Plots)
+            self.themes[_nm] = _th
 
         # right-click context menu on the STDP plot: rounded dark popup with
         # full-width hover-highlighted rows
@@ -1793,6 +1850,16 @@ class App:
                     dpg.add_text("Load a measured conductance-per-pulse CSV (1 col\n"
                                  "G, or 2 cols pulse,G) and fit the LTP/LTD\n"
                                  "nonlinearity + dynamic range + asymmetry.")
+                dpg.add_separator()
+                wi = dpg.add_menu_item(label="Open Web GUI (Studio)",
+                                       callback=self.on_open_studio)
+                with dpg.tooltip(wi):
+                    dpg.add_text("NeuroVAT Studio - the browser front-end on\n"
+                                 "http://127.0.0.1:8000 (localhost only), driven\n"
+                                 "by the SAME ecfet engine as this app. Starts\n"
+                                 "the server if needed, then opens your browser;\n"
+                                 "reuses a running one. Same as:\n"
+                                 "  python run_gui.py --web")
                 # (future tools go here as sibling items / submenus)
             with dpg.menu(label="Agent"):
                 dpg.add_menu_item(
@@ -5324,11 +5391,14 @@ class App:
             dpg.add_separator()
             # the visualization fills the center; the controls live in the LEFT
             # panel (swapped in for the device-tester sections on this tab)
-            with dpg.child_window(width=-1, border=False, no_scrollbar=True,
+            with dpg.child_window(width=-1, border=False,
                                   tag="nt_canvas_col"):
                 # grouped into 7 top-level tabs (related views nested) so the
                 # bar no longer overflows / truncates
                 with dpg.tab_bar(tag="nt_viz_tabs"):
+                    # Data first - you manage the dataset before wiring the net
+                    with dpg.tab(label="  Data  ", tag="nt_tab_data"):
+                        self._nt_patterns_tab()
                     with dpg.tab(label="  Network  "):
                         self._nt_canvas_tab()
                     with dpg.tab(label="  Neuron  ", tag="nt_tab_neuron"):
@@ -5350,8 +5420,6 @@ class App:
                                 self._nt_output_tab()
                             with dpg.tab(label="  In spikes  "):
                                 self._nt_inspikes_tab()
-                    with dpg.tab(label="  Data  "):
-                        self._nt_patterns_tab()
                     with dpg.tab(label="  Results  "):
                         with dpg.tab_bar():
                             with dpg.tab(label="  Learning  "):
@@ -5359,6 +5427,8 @@ class App:
                             with dpg.tab(label="  Metrics  "):
                                 self._nt_metrics_tab()
                 dpg.set_item_callback("nt_viz_tabs", self._on_nt_viz_tab)
+        # Data is the default tab - populate its live rasters right away
+        self._nt_encoding_preview()
 
     def _nt_wtrace_tab(self):
         with self._pad(left=6, top=4, bottom=0):
@@ -5385,138 +5455,355 @@ class App:
             self._nt_draw_weight_traces()
         elif sel == "nt_tab_neuron":
             self._nt_probe_neuron()
+        elif sel == "nt_tab_data":
+            self._nt_encoding_preview()
 
     def _nt_neuron_tab(self):
-        """Set the LIF + synaptic neuron parameters here (saved + used to Build
-        the network), and bench a single neuron: drive ONE LIF neuron with these
-        params, watch it integrate -> cross threshold -> spike, + its f-I curve."""
+        """A current-injection probe: inject a Step / Pulse / Ramp of current (in
+        units of rheobase) into one LIF neuron and watch the membrane integrate
+        -> spike -> reset, alongside the f-I curve.  The neuron's parameters live
+        in the LEFT panel's 'Neuron (LIF)' section."""
         with self._pad(left=6, top=4, bottom=0):
-            with dpg.collapsing_header(
-                    label="Neuron parameters  (used when you Build the network)",
-                    default_open=True, tag="nt_neuron_params_hdr"):
-                with dpg.group(horizontal=True):     # all 9 on ONE compact row
-                    self._nt_num("nt_tau_m", "tau_m", 20, 46, False,
-                                 "Membrane time constant (ms) - how fast the "
-                                 "potential leaks back to rest.")
-                    self._nt_num("nt_vth", "V_th", 1.0, 46, False,
-                                 "V threshold: fire when the membrane crosses "
-                                 "this (+ the adaptive homeostatic theta).")
-                    self._nt_num("nt_refrac", "refrac", 5, 46, False,
-                                 "Refractory period (ms) - dead time after a "
-                                 "spike.")
-                    self._nt_num("nt_epsp", "EPSP", 11.0, 46, False,
-                                 "EPSP gain: how strongly an excitatory input "
-                                 "spike (scaled by the synapse conductance) "
-                                 "depolarises the neuron. Activity-normalised, so "
-                                 "one value works for 5x5 or 28x28.")
-                    self._nt_num("nt_ipsp", "IPSP", 1.0, 46, False,
-                                 "IPSP gain: feed-forward inhibition depth from "
-                                 "inhibitory inputs (hyperpolarising).")
-                    self._nt_num("nt_tausyn", "tau_syn", 8, 46, False,
-                                 "Synaptic (PSP) trace decay (ms).")
-                    self._nt_num("nt_inhib", "inhib", 0.9, 46, False,
-                                 "Lateral inhibition: winner-take-all competition "
-                                 "between output neurons. 0 disables it.")
-                    self._nt_num("nt_theta", "theta+", 0.06, 50, False,
-                                 "Homeostatic threshold bump per output spike "
-                                 "(keeps one neuron from hogging every pattern).")
-                    self._nt_num("nt_teacher", "teacher", 1.4, 50, False,
-                                 "Supervised teacher drive onto the target "
-                                 "neuron.")
-            dpg.add_separator()
-            self._small("BENCH - drive ONE LIF neuron with the parameters ABOVE "
-                        "and watch it integrate -> cross threshold -> spike + "
-                        "reset. No synapses/weights - just the neuron. Change "
-                        "params, re-Probe.", color=C_TEXT2)
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_neuron_hz", "INPUT Hz", 250, 64, False,
-                             "Rate of incoming EXCITATORY input spikes (one EPSP "
-                             "every 1000/Hz ms). Faster than tau_syn -> EPSPs "
-                             "SUMMATE toward threshold; slower -> they leak away "
-                             "between (sub-threshold). Try 60 vs 250.")
-                self._nt_num("nt_neuron_epsp", "EPSP", 0.8, 56, False,
-                             "Height each input spike adds to the synaptic PSP "
-                             "(its weight). Bigger = fewer EPSPs to reach "
-                             "threshold.")
-                b = dpg.add_button(label=" Probe neuron ",
-                                   callback=self._nt_probe_neuron)
-                dpg.bind_item_theme(b, self.themes["primary"])
-                dpg.add_text("-", tag="nt_neuron_info", color=C_AGENT)
-            with dpg.child_window(height=-196, border=False):
-                with dpg.plot(width=-1, height=-1, tag="nt_nv_plot",
-                              no_menus=True):
-                    dpg.add_plot_legend()
-                    dpg.add_plot_axis(dpg.mvXAxis, label="time (ms)",
-                                      tag="nt_nv_x")
-                    dpg.add_plot_axis(dpg.mvYAxis, label="membrane V",
-                                      tag="nt_nv_y")
-            self._small("transfer curve: OUTPUT rate vs INPUT spike rate. Flat "
-                        "at low input (EPSPs leak before summing), then rises "
-                        "once they summate past threshold. Current input marked.",
-                        color=(126, 150, 220))
-            with dpg.plot(width=-1, height=-1, tag="nt_fi_plot", no_menus=True):
-                dpg.add_plot_legend()
-                dpg.add_plot_axis(dpg.mvXAxis, label="input rate (Hz)",
-                                  tag="nt_fi_x")
-                dpg.add_plot_axis(dpg.mvYAxis, label="output rate (Hz)",
-                                  tag="nt_fi_y")
+            with self._card(height=490):
+                # header: title + summary  |  Step / Pulse / Ramp toggle (right)
+                with dpg.table(header_row=False, borders_innerV=False,
+                               policy=dpg.mvTable_SizingStretchProp,
+                               pad_outerX=False):
+                    dpg.add_table_column()
+                    dpg.add_table_column(width_fixed=True,
+                                         init_width_or_weight=210)
+                    with dpg.table_row():
+                        with dpg.group(horizontal=True):
+                            t = dpg.add_text("Neuron probe")
+                            if "bold" in self.fonts:
+                                dpg.bind_item_font(t, self.fonts["bold"])
+                            self._small("LIF output neuron - inject current, read "
+                                        "membrane & spikes", tag="nt_np_sub",
+                                        color=C_MUTED)
+                        with dpg.group(horizontal=True):
+                            for m in ("step", "pulse", "ramp"):
+                                dpg.add_button(label=f" {m.capitalize()} ",
+                                               width=62, tag=f"nt_np_mode_{m}",
+                                               callback=(lambda s, a, mm=m:
+                                                         self._nt_set_probe_mode(mm)))
+                dpg.add_spacer(height=2)
+                # inject-current slider (in units of rheobase)
+                with dpg.group(horizontal=True):
+                    self._small("inject I", color=C_TEXT2)
+                    dpg.add_slider_float(tag="nt_inject_i", width=-140,
+                                         default_value=1.20, min_value=0.0,
+                                         max_value=3.0, format="%.2f",
+                                         callback=lambda *_: self._nt_probe_neuron())
+                    self._small("x rheobase", color=C_MUTED)
+                dpg.add_spacer(height=2)
+                # four readout tiles
+                with dpg.table(header_row=False, borders_innerV=False,
+                               policy=dpg.mvTable_SizingStretchSame,
+                               pad_outerX=False):
+                    for _ in range(4):
+                        dpg.add_table_column()
+                    with dpg.table_row():
+                        self._stat_card("firing rate", "nt_np_rate", "--",
+                                        C_GREEN)
+                        self._stat_card("spikes", "nt_np_spikes", "0")
+                        self._stat_card("I_inj", "nt_np_iinj", "--", C_ACC)
+                        self._stat_card("regime", "nt_np_regime", "--", C_ACC)
+                dpg.add_spacer(height=4)
+                # V(t) and f-I plots, side by side
+                with dpg.table(header_row=False, borders_innerV=False,
+                               policy=dpg.mvTable_SizingStretchSame,
+                               pad_outerX=False):
+                    dpg.add_table_column()
+                    dpg.add_table_column()
+                    with dpg.table_row():
+                        with dpg.group():
+                            with dpg.group(horizontal=True):
+                                self._small("Membrane potential V(t)  -  spikes "
+                                            "at threshold, reset + refractory",
+                                            color=C_TEXT2)
+                                self._nt_zoom_btns("nt_nv_x", "nt_nv_y")
+                            with dpg.plot(width=-1, height=316, no_menus=True,
+                                          tag="nt_nv_plot"):
+                                dpg.add_plot_legend(
+                                    location=dpg.mvPlot_Location_NorthEast)
+                                dpg.add_plot_axis(dpg.mvXAxis, label="time (ms)",
+                                                  tag="nt_nv_x")
+                                dpg.add_plot_axis(dpg.mvYAxis, label="membrane V",
+                                                  tag="nt_nv_y")
+                        with dpg.group():
+                            with dpg.group(horizontal=True):
+                                self._small("F-I curve  -  rate vs drive",
+                                            color=C_TEXT2)
+                                self._nt_zoom_btns("nt_fi_x", "nt_fi_y")
+                            with dpg.plot(width=-1, height=316, no_menus=True,
+                                          tag="nt_fi_plot"):
+                                dpg.add_plot_legend(
+                                    location=dpg.mvPlot_Location_NorthWest)
+                                dpg.add_plot_axis(dpg.mvXAxis,
+                                                  label="I_inj (x rheobase)",
+                                                  tag="nt_fi_x")
+                                dpg.add_plot_axis(dpg.mvYAxis, label="rate (Hz)",
+                                                  tag="nt_fi_y")
+        self._nt_set_probe_mode(getattr(self, "_nt_probe_mode", "step"))
+
+    def _nt_zoom_btns(self, xax, yax):
+        for lbl, f in ((" - ", 1.30), (" + ", 0.77)):
+            dpg.add_button(label=lbl, width=28,
+                           callback=lambda s, a, x=xax, y=yax, ff=f:
+                           self._nt_zoom_axes(x, y, ff))
+        dpg.add_button(label="Fit", width=38,
+                       callback=lambda s, a, x=xax, y=yax:
+                       self._nt_fit_axes(x, y))
+
+    def _nt_zoom_axes(self, xax, yax, f):
+        for ax in (xax, yax):
+            try:
+                lo, hi = dpg.get_axis_limits(ax)
+                c, half = 0.5 * (lo + hi), 0.5 * (hi - lo) * f
+                dpg.set_axis_limits(ax, c - half, c + half)
+            except Exception:                               # noqa: BLE001
+                pass
+
+    def _nt_fit_axes(self, xax, yax):
+        for ax in (xax, yax):
+            dpg.set_axis_limits_auto(ax)
+            dpg.fit_axis_data(ax)
+
+    def _nt_set_probe_mode(self, mode):
+        self._nt_probe_mode = mode
+        for m in ("step", "pulse", "ramp"):
+            tag = f"nt_np_mode_{m}"
+            if dpg.does_item_exist(tag):
+                dpg.bind_item_theme(tag, self.themes[
+                    "primary" if m == mode else "chip"])
+        self._nt_probe_neuron()
 
     def _nt_probe_neuron(self, *_):
-        """Drive one neuron with an EPSP spike train + sweep the input rate."""
+        """Inject a Step / Pulse / Ramp current (x rheobase) into one LIF neuron
+        and draw V(t) + the f-I curve with the current operating point marked."""
         if not dpg.does_item_exist("nt_nv_y"):
             return
         N, _S, _cfg = self._nt_read_params()
-        in_hz = max(float(self._nt_get("nt_neuron_hz", 250.0)), 1.0)
-        epsp = float(self._nt_get("nt_neuron_epsp", 0.8))
-        pms = max(self._nt_get("nt_present", 120.0), 10.0)
-        dt = max(self._nt_get("nt_dt", 1.0), 0.1)
-        t, V, TH, outs, ins, P = neuro.probe_lif_psp(N, in_hz, epsp, pms, dt)
+        pms = 200.0                                         # fixed bench window
+        dt = max(self._nt_getu("nt_dt", 1.0), 0.1)
+        rheo = max(N.v_threshold - N.v_rest, 1e-6)          # min drive to fire
+        imult = max(float(self._nt_get("nt_inject_i", 1.2)), 0.0)
+        idrive = imult * rheo
+        mode = getattr(self, "_nt_probe_mode", "step")
+        n = max(1, int(round(pms / dt)))
+        if mode == "pulse":
+            drive = np.zeros(n)
+            drive[int(n * 0.30):int(n * 0.78)] = idrive
+        elif mode == "ramp":
+            drive = np.linspace(0.0, idrive, n)
+        else:                                               # step
+            drive = np.full(n, idrive)
+        t, V, TH, outs = neuro.probe_lif_wave(N, drive, dt)
         rate = len(outs) / (pms * 1e-3)
-        # V(t): membrane + the EPSP drive (so the bumps are explicit) + threshold
-        # + output spike markers (top) + input-EPSP ticks (bottom)
+        # draw each output spike as a vertical action-potential in the V(t) line
+        Vd = V.copy()
+        peak = float(max(TH.max(), V.max())) + 0.4
+        for ts in outs:
+            Vd[min(int(round(ts / dt)), len(Vd) - 1)] = peak
         self._nt_clear("nv")
         tl = t.tolist()
-        ser = [dpg.add_line_series(tl, P.tolist(), label="EPSP drive (PSP)",
-                                   parent="nt_nv_y"),
-               dpg.add_line_series(tl, V.tolist(), label="membrane V",
-                                   parent="nt_nv_y"),
-               dpg.add_line_series(tl, TH.tolist(), label="threshold",
-                                   parent="nt_nv_y")]
-        if outs:
-            top = float(max(TH.max(), V.max())) + 0.15
-            ser.append(dpg.add_scatter_series(outs, [top] * len(outs),
-                                              label="output spike",
-                                              parent="nt_nv_y"))
-        if ins:
-            base = float(min(V.min(), 0.0)) - 0.12
-            ser.append(dpg.add_scatter_series(ins, [base] * len(ins),
-                                              label="input EPSP",
-                                              parent="nt_nv_y"))
-        self._nt_series["nv"] = ser
-        dpg.fit_axis_data("nt_nv_x")
-        dpg.fit_axis_data("nt_nv_y")
-        # spike transfer curve: output rate vs INPUT rate, current input marked
-        hz, orate = neuro.fi_curve_psp(N, epsp, pms, dt, max(in_hz * 1.4, 300.0))
+        s_th = dpg.add_line_series(tl, TH.tolist(), label="V_th",
+                                   parent="nt_nv_y")
+        s_v = dpg.add_line_series(tl, Vd.tolist(), label="V(t)",
+                                  parent="nt_nv_y")
+        dpg.bind_item_theme(s_th, self.themes["ln_amber"])
+        dpg.bind_item_theme(s_v, self.themes["ln_blue"])
+        self._nt_series["nv"] = [s_th, s_v]
+        self._nt_fit_axes("nt_nv_x", "nt_nv_y")
+        # f-I curve (rate vs drive in x rheobase) + current operating point
+        drives, rates = neuro.fi_curve(N, pms, dt, 3.0 * rheo)
+        xs, ymax = (drives / rheo).tolist(), float(max(rates.max(), 1.0))
         self._nt_clear("fi")
-        fer = [dpg.add_line_series(hz.tolist(), orate.tolist(),
-                                   label="out vs in rate", parent="nt_fi_y"),
-               dpg.add_scatter_series([in_hz], [rate], label="current",
-                                      parent="nt_fi_y")]
-        self._nt_series["fi"] = fer
-        dpg.fit_axis_data("nt_fi_x")
-        dpg.fit_axis_data("nt_fi_y")
-        # readout: how many EPSPs summed before the first spike + adaptation note
-        n_sum = sum(1 for x in ins if outs and x <= outs[0]) if outs else len(ins)
-        isi = float(np.diff(outs).mean()) if len(outs) > 1 else None
-        info = (f"{in_hz:.0f} Hz in, EPSP {epsp:.2f}: {len(outs)} output spikes "
-                f"-> {rate:.0f} Hz"
-                + (f", ISI {isi:.0f} ms" if isi else "")
-                + (f"   ({n_sum} EPSPs summed to the 1st spike)" if outs else
-                   "   (sub-threshold - EPSPs leak away, no spike)")
-                + ("   theta adapts -> firing slows"
-                   if (N.tau_theta > 0 and N.theta_plus > 0 and len(outs) > 1)
-                   else ""))
-        dpg.set_value("nt_neuron_info", info)
+        s_fi = dpg.add_line_series(xs, rates.tolist(), label="f(I)",
+                                   parent="nt_fi_y")
+        s_ii = dpg.add_line_series([imult, imult], [0.0, ymax], label="I_inj",
+                                   parent="nt_fi_y")
+        dpg.bind_item_theme(s_fi, self.themes["ln_green"])
+        dpg.bind_item_theme(s_ii, self.themes["ln_blue"])
+        self._nt_series["fi"] = [s_fi, s_ii]
+        self._nt_fit_axes("nt_fi_x", "nt_fi_y")
+        # regime label
+        if rate <= 0:
+            regime = "subthreshold"
+        elif mode == "ramp":
+            regime = "adapting"
+        elif len(outs) == 1:
+            regime = "single"
+        else:
+            regime = "tonic"
+        self._nt_stat("nt_np_rate", f"{rate:.0f} Hz")
+        self._nt_stat("nt_np_spikes", str(len(outs)))
+        self._nt_stat("nt_np_iinj", f"{imult:.2f}")
+        self._nt_stat("nt_np_regime", regime)
+        if dpg.does_item_exist("nt_np_sub"):
+            dpg.set_value("nt_np_sub",
+                          f"LIF - tau_m {N.tau_m:.0f} ms - V_th "
+                          f"{N.v_threshold:.2g} - inject current, read membrane "
+                          f"& spikes")
+
+    @contextlib.contextmanager
+    def _ctl_table(self, label_w=90):
+        """A borderless 2-col form table: fixed label column + stretch input."""
+        with dpg.table(header_row=False, borders_innerH=False,
+                       borders_outerH=False, borders_innerV=False,
+                       borders_outerV=False, pad_outerX=False,
+                       policy=dpg.mvTable_SizingStretchProp) as t:
+            dpg.add_table_column(width_fixed=True, init_width_or_weight=label_w)
+            dpg.add_table_column()
+            yield t
+
+    def _ctl_row(self, label, tag=None, kind="double", default=0.0, tip=None,
+                 items=None, dv=None, callback=None, hint=None, unit=None):
+        """One aligned 'label | input' row inside an open _ctl_table.  When
+        `unit` (a dimension: current/voltage/time/freq/amp) is given, the input
+        shares its cell with a small unit dropdown."""
+        with dpg.table_row():
+            cap = self._small(label, color=C_TEXT2)
+            if kind == "int":
+                w = dpg.add_input_int(tag=tag, default_value=int(default),
+                                      width=-1, step=0, callback=callback)
+            elif kind == "combo":
+                w = dpg.add_combo(items or [], default_value=dv, tag=tag,
+                                  width=-1, callback=callback)
+            elif kind == "text":
+                w = dpg.add_input_text(tag=tag, width=-1, hint=hint or "",
+                                       callback=callback)
+            elif unit:
+                with dpg.group(horizontal=True):
+                    w = dpg.add_input_double(tag=tag, default_value=float(default),
+                                             width=-62, format="%.4g", step=0,
+                                             callback=callback)
+                    self._nt_unit_combo(tag, unit)
+            else:
+                w = dpg.add_input_double(tag=tag, default_value=float(default),
+                                         width=-1, format="%.4g", step=0,
+                                         callback=callback)
+            if tip:
+                for tg in (cap, w):
+                    with dpg.tooltip(tg):
+                        dpg.add_text(tip, wrap=300)
+
+    # ---- web-style card primitives ----------------------------------
+
+    @contextlib.contextmanager
+    def _card(self, title=None, tag=None, width=-1, height=0, tip=None):
+        """A rounded surface panel (web-style card) with an optional title."""
+        kw = {}
+        if tag:
+            kw["tag"] = tag
+        with dpg.child_window(width=width, height=height, border=True,
+                              autosize_y=(height == 0), **kw) as cw:
+            dpg.bind_item_theme(cw, self.themes["card"])
+            if title:
+                h = self._small(title.upper(), color=(126, 150, 220))
+                if tip:
+                    with dpg.tooltip(h):
+                        dpg.add_text(tip, wrap=320)
+                dpg.add_spacer(height=4)
+            yield cw
+
+    def _stat_card(self, label, tag, value="--", color=None):
+        """A compact metric tile: small caps label over a big value."""
+        with dpg.child_window(width=-1, height=62, border=True) as cw:
+            dpg.bind_item_theme(cw, self.themes["card"])
+            self._small(label.upper(), color=C_MUTED)
+            v = dpg.add_text(value, tag=tag, color=color or C_TEXT)
+            if "h2" in self.fonts:
+                dpg.bind_item_font(v, self.fonts["h2"])
+
+    def _nt_stat(self, tag, value):
+        if dpg.does_item_exist(tag):
+            dpg.set_value(tag, value)
+
+    def _nt_source_card(self, kind, title):
+        """One clickable DATA SOURCE radio card: a dot + title + live subtitle.
+        Child windows can't take a clicked-handler, so a single global mouse
+        handler (added once) routes a click to whichever card is hovered."""
+        with dpg.child_window(width=-1, height=58, border=True,
+                              tag=f"nt_srccard_{kind}") as cw:
+            dpg.bind_item_theme(cw, self.themes["card"])
+            with dpg.group(horizontal=True):
+                dpg.add_text("O", tag=f"nt_srcdot_{kind}", color=C_MUTED)
+                with dpg.group():
+                    t = dpg.add_text(title, color=C_TEXT)
+                    if "bold" in self.fonts:
+                        dpg.bind_item_font(t, self.fonts["bold"])
+                    self._small("-", tag=f"nt_srcsub_{kind}", color=C_MUTED)
+        if not getattr(self, "_nt_src_click_bound", False):
+            self._nt_src_click_bound = True
+            with dpg.handler_registry():
+                dpg.add_mouse_click_handler(
+                    button=dpg.mvMouseButton_Left,
+                    callback=self._nt_source_click)
+
+    def _nt_source_click(self, *_):
+        for kind in ("set", "custom", "dataset"):
+            tag = f"nt_srccard_{kind}"
+            if dpg.does_item_exist(tag) and dpg.is_item_hovered(tag):
+                self._nt_set_source(kind)
+                return
+
+    def _nt_set_source(self, kind, *_):
+        """DATA SOURCE cards: point the 'patterns' combo at the chosen source."""
+        if not dpg.does_item_exist("nt_patset"):
+            return
+        if kind == "custom":
+            dpg.set_value("nt_patset", "custom")
+        elif kind == "dataset":
+            dpg.set_value("nt_patset", "dataset")
+        else:                                   # a built-in pattern set
+            cur = dpg.get_value("nt_patset")
+            if cur in ("custom", "dataset"):
+                dpg.set_value("nt_patset", self._nt_last_patset or "bars")
+        self._nt_refresh_source()
+        self._nt_encoding_preview()
+
+    def _patset_class_count(self, name, gh, gw):
+        """How many classes the named pattern set has (for the card subtitle)."""
+        try:
+            if name in ("bars", "letters", "digits", "random"):
+                return len(neuro.make_patterns(name, gh, gw))
+            if name in PATTERN_PLUGINS:
+                pats, _ = PATTERN_PLUGINS[name]["make"](self._nt_read_params()[2])
+                return len(pats)
+        except Exception:                                   # noqa: BLE001
+            pass
+        return None
+
+    def _nt_refresh_source(self):
+        """Highlight the active DATA SOURCE card and refresh every subtitle."""
+        if not dpg.does_item_exist("nt_patset"):
+            return
+        cur = dpg.get_value("nt_patset")
+        if cur not in ("custom", "dataset"):
+            self._nt_last_patset = cur
+        active = ("custom" if cur == "custom"
+                  else "dataset" if cur == "dataset" else "set")
+        gh = int(self._nt_get("nt_gh", 5))
+        gw = int(self._nt_get("nt_gw", 5))
+        n = self._patset_class_count(self._nt_last_patset, gh, gw)
+        subs = {
+            "set": (f"{self._nt_last_patset}"
+                    + (f"  -  {n} classes" if n else "")),
+            "custom": f"{len(self._nt_custom)} patterns",
+            "dataset": getattr(self, "_nt_ds_label", None) or "none loaded",
+        }
+        for kind in ("set", "custom", "dataset"):
+            on = (kind == active)
+            if dpg.does_item_exist(f"nt_srccard_{kind}"):
+                dpg.bind_item_theme(f"nt_srccard_{kind}",
+                                    self.themes["card_active" if on else "card"])
+            if dpg.does_item_exist(f"nt_srcdot_{kind}"):
+                dpg.set_value(f"nt_srcdot_{kind}", "(*)" if on else "O")
+                dpg.configure_item(f"nt_srcdot_{kind}",
+                                   color=C_ACC if on else C_MUTED)
+            if dpg.does_item_exist(f"nt_srcsub_{kind}"):
+                dpg.set_value(f"nt_srcsub_{kind}", subs[kind])
 
     def _nt_controls(self):
         with dpg.collapsing_header(label="Network", default_open=True):
@@ -5524,211 +5811,118 @@ class App:
                           default_value=MODEL_SPECS[1].label, tag="nt_device",
                           width=-1, callback=self._on_nt_device_change)
             with dpg.tooltip("nt_device"):
-                dpg.add_text("Which device twin is the synapse at every "
-                             "crossbar cross-point (its conductance = the "
-                             "weight). ECFET = current-driven, FeFET = "
-                             "voltage-driven.", wrap=320)
-            with dpg.group(horizontal=True):
-                with dpg.group():
-                    self._caption("INPUT NEURONS (H x W)",
-                                  "The input is an H x W pixel grid and EACH "
-                                  "pixel is one spiking INPUT neuron, so input "
-                                  "neurons = H x W (e.g. 5 x 5 = 25). First box "
-                                  "= height, second = width.")
+                dpg.add_text("Which device twin is the synapse at every crossbar "
+                             "cross-point (its conductance = the weight). ECFET = "
+                             "current-driven, FeFET = voltage-driven.", wrap=300)
+            with self._ctl_table():
+                with dpg.table_row():
+                    cap = self._small("input grid", color=C_TEXT2)
                     with dpg.group(horizontal=True):
-                        dpg.add_input_int(tag="nt_gh", default_value=5,
-                                          width=48, step=0)
-                        dpg.add_input_int(tag="nt_gw", default_value=5,
-                                          width=48, step=0)
-                dpg.add_spacer(width=14)
-                with dpg.group():
-                    self._caption("OUTPUT NEURONS",
-                                  "Number of OUTPUT (classifier) LIF neurons - "
-                                  "the crossbar columns, typically one per "
-                                  "class.")
-                    dpg.add_input_int(tag="nt_nout", default_value=4,
-                                      width=56, step=0)
-            with dpg.group(horizontal=True):
-                with dpg.group():
-                    self._caption("HIDDEN LAYERS",
-                                  "Stack extra crossbars: list hidden LIF layer "
-                                  "sizes between input and output (empty = single "
-                                  "crossbar; '8' = one hidden of 8; '8,4' = two). "
-                                  "Needed for non-linear tasks like XOR.")
-                    dpg.add_input_text(tag="nt_hidden", width=150,
-                                       hint="e.g.  8   or   8,4")
-                self._nt_num("nt_hidden_gain", "HIDDEN GAIN", 1.7, 78, False,
-                             "Extra drive on hidden layers (they have no teacher "
-                             "and must fire on their own to pass a code to the "
-                             "next crossbar). Raise if hidden layers stay quiet.")
-            with dpg.tooltip("nt_hidden"):
-                dpg.add_text("Stack MULTIPLE crossbars: list the hidden LIF "
-                             "layer sizes between input and output.\n"
-                             "  empty -> single crossbar (input -> output)\n"
-                             "  8     -> input -> [crossbar] -> 8 -> [crossbar] "
-                             "-> output\n"
-                             "  8,4   -> two hidden layers, three crossbars.\n"
-                             "Each layer pair gets its own device array; every "
-                             "crossbar learns LOCALLY (no backprop), so deep "
-                             "classification is experimental - single layer is "
-                             "best for accuracy.", wrap=330)
-            with dpg.group(horizontal=True):
-                with dpg.group():
-                    self._caption("MODE",
-                                  "supervised: a teacher current forces each "
-                                  "pattern's neuron to fire (reliable). "
-                                  "unsupervised: pure winner-take-all - neurons "
-                                  "self-organise to tile the patterns.")
-                    dpg.add_combo(["supervised", "unsupervised"],
-                                  default_value="supervised", tag="nt_mode",
-                                  width=130)
-                with dpg.group():
-                    self._caption("PATTERNS",
-                                  "The training stimulus set: built-in "
-                                  "bars/letters/digits/random, logic gates "
-                                  "(nand/xor), your patterns/ plugins, hand-"
-                                  "painted 'custom', or a loaded 'dataset'.")
-                    dpg.add_combo(self._patset_items(),
-                                  default_value="bars", tag="nt_patset",
-                                  width=110)
-            with dpg.tooltip("nt_mode"):
-                dpg.add_text("supervised: a teacher current forces each "
-                             "pattern's assigned neuron to fire, so its "
-                             "receptive field grows into that pattern.\n"
-                             "unsupervised: pure winner-take-all competition - "
-                             "neurons self-organise to tile the patterns.",
-                             wrap=320)
-            with dpg.group(horizontal=True):
-                with dpg.group():
-                    self._caption("LEARNING RULE",
-                                  "STDP (device-local): local spike-timing "
-                                  "plasticity, best matches real in-situ STDP, "
-                                  "weak on deep nets. Surrogate grad (BPTT): "
-                                  "supervised backprop through the device - "
-                                  "trains deep/multi-layer nets to high accuracy.")
-                    dpg.add_combo(["STDP (device-local)",
-                                   "Surrogate grad (BPTT)"],
-                                  default_value="STDP (device-local)",
-                                  tag="nt_learnrule", width=200,
-                                  callback=lambda *_: self._nt_sync_rule())
-                self._nt_num("nt_sg_lr", "SG rate", 0.1, 64, False,
-                             "Surrogate-gradient learning rate (the BPTT step "
-                             "size). 0.05-0.2 is a useful range.")
-            with dpg.tooltip("nt_learnrule"):
-                dpg.add_text("STDP: local, device-physics plasticity (each "
-                             "crossbar learns on its own pre/post activity). "
-                             "Best matches real in-situ STDP; deep nets are "
-                             "weak.\n"
-                             "Surrogate gradient: supervised backprop-through-"
-                             "time with a smooth spike surrogate. The gradient "
-                             "is applied THROUGH the device (in-situ / hardware-"
-                             "aware), so the device nonlinearity stays in the "
-                             "loop. Trains deep (multi-layer) nets to high "
-                             "accuracy; needs supervised mode.", wrap=330)
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_epochs", "EPOCHS", 40, 60, True,
-                             "Passes over the full pattern set. (A 50 pA gate "
-                             "pulse moves G gently, so it wants more passes.)")
-                self._nt_num("nt_present", "PRESENT ms", 120, 72, False,
-                             "Duration each pattern is shown for.")
-                self._nt_num("nt_seed", "SEED", 1, 56, True,
-                             "Random seed - fixes the spike noise, weight init "
-                             "and pattern sampling so a run repeats. Change it "
-                             "for a different random draw.")
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_rate", "RATE Hz", 180, 70, False,
-                             "Peak Poisson spike rate for a fully-on pixel.")
-                self._nt_num("nt_dt", "STEP ms", 1.0, 60, False,
-                             "Integration time-step.")
-        # (Neuron LIF + PSP parameters moved to the center "Neuron" tab to
-        #  declutter this panel - same widget tags, so Build/Save/Load are
-        #  unchanged. See _nt_neuron_tab.)
+                        dpg.add_input_int(tag="nt_gh", default_value=5, width=54,
+                                          step=0)
+                        self._small("x", color=C_MUTED)
+                        dpg.add_input_int(tag="nt_gw", default_value=5, width=54,
+                                          step=0)
+                    with dpg.tooltip(cap):
+                        dpg.add_text("Input is an H x W pixel grid; each pixel = "
+                                     "one INPUT neuron, so inputs = H x W "
+                                     "(5 x 5 = 25). First box H, second W.",
+                                     wrap=300)
+                self._ctl_row("outputs", "nt_nout", "int", 4,
+                              "OUTPUT (classifier) neurons - crossbar columns, "
+                              "usually one per class.")
+                self._ctl_row("hidden", "nt_hidden", "text", tip=(
+                    "Hidden LIF layer sizes between input and output (empty = "
+                    "single crossbar; '8' = one hidden; '8,4' = two). Needed for "
+                    "non-linear tasks like XOR."), hint="e.g.  8   or   8,4")
+                self._ctl_row("hidden gain", "nt_hidden_gain", "double", 1.7,
+                              "Extra drive on hidden layers (no teacher). Raise "
+                              "if hidden layers stay quiet.")
+                self._ctl_row("mode", "nt_mode", "combo",
+                              items=["supervised", "unsupervised"],
+                              dv="supervised", tip=(
+                    "supervised: a teacher current forces each pattern's neuron "
+                    "to fire. unsupervised: pure winner-take-all self-organising."))
+                self._ctl_row("learning rule", "nt_learnrule", "combo",
+                              items=["STDP (device-local)",
+                                     "Surrogate grad (BPTT)"],
+                              dv="STDP (device-local)",
+                              callback=lambda *_: self._nt_sync_rule(), tip=(
+                    "STDP: local device-physics plasticity (weak on deep nets). "
+                    "Surrogate grad (BPTT): supervised backprop through the "
+                    "device - trains deep nets to high accuracy."))
+                self._ctl_row("SG rate", "nt_sg_lr", "double", 0.1,
+                              "Surrogate-gradient learning rate (BPTT step). "
+                              "0.05-0.2 is useful.")
+                self._ctl_row("epochs", "nt_epochs", "int", 40,
+                              "Passes over the full pattern set.")
+                self._ctl_row("present", "nt_present", "double", 120,
+                              "Duration each pattern is shown for.", unit="time")
+                self._ctl_row("rate", "nt_rate", "double", 180,
+                              "Peak Poisson spike rate for a fully-on pixel.",
+                              unit="freq")
+                self._ctl_row("step", "nt_dt", "double", 1.0,
+                              "Integration time-step.", unit="time")
+                self._ctl_row("seed", "nt_seed", "int", 1,
+                              "Random seed - fixes spike noise, weight init and "
+                              "sampling so a run repeats.")
         with dpg.collapsing_header(label="Synapse learning (STDP)",
                                    default_open=True):
             self._small("the network rule sets the DIRECTION of each write; the "
-                        "device twin sets the ACTUAL dG (its nonlinearity, "
-                        "soft bounds, retention).", color=C_MUTED)
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_potamp", "pot amp", 50, 70, False,
-                             "Amplitude of a full potentiating programming "
-                             "pulse, in the device's drive unit.")
-                self._nt_num("nt_depamp", "dep amp", 50, 70, False,
-                             "Amplitude of a full depressing pulse.")
-                with dpg.group():
-                    self._caption("UNIT")
-                    dpg.add_text("pA", tag="nt_amp_unit", color=C_TEXT2)
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_pwidth", "pulse ms", 10, 64, False,
-                             "Programming pulse width.")
-                self._nt_num("nt_aplus", "A+ rate", 1.0, 60, False,
-                             "Potentiation learning-rate scale.")
-                self._nt_num("nt_aminus", "A- rate", 1.0, 60, False,
-                             "Heterosynaptic depression rate.")
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_offset", "LTP/LTD split", 0.25, 80, False,
-                             "Pre-trace split: inputs above this are "
-                             "potentiated on a post spike, those below are "
-                             "depressed. Carves the receptive field.")
-                self._nt_num("nt_taupre", "tau_pre ms", 20, 70, False,
-                             "Pre-synaptic eligibility-trace decay.")
-        with dpg.collapsing_header(label="Spike encoding + noise",
-                                   default_open=False):
-            self._small("how pixels become spikes, plus front-end / device "
-                        "noise for a practical design. All noise defaults to 0 "
-                        "(off).", color=C_MUTED)
-            with dpg.group(horizontal=True):
-                with dpg.group():
-                    self._caption("ENCODING",
-                                  "How pixels become spikes. rate (Poisson): "
-                                  "intensity -> firing rate. latency (TTFS): "
-                                  "brighter pixels fire EARLIER - the spike "
-                                  "ORDER carries the pattern.")
-                    dpg.add_combo(["rate (Poisson)", "latency (TTFS)"],
-                                  default_value="rate (Poisson)",
-                                  tag="nt_encoding", width=150)
-                self._nt_num("nt_bg_rate", "bg rate Hz", 0.0, 70, False,
-                             "Spontaneous background firing on EVERY input "
-                             "(sensor dark-count / cortical background). Adds "
-                             "noise spikes everywhere, even on 'off' pixels.")
-            with dpg.tooltip("nt_encoding"):
-                dpg.add_text("rate: pixel intensity -> Poisson firing rate "
-                             "(0..max rate); information is in the RATE.\n"
-                             "latency / time-to-first-spike: brighter pixels "
-                             "fire EARLIER - the spike onset ORDER carries the "
-                             "pattern (a temporal/spatiotemporal code).",
-                             wrap=320)
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_signal_frac", "signal afferents", 1.0, 90,
-                             False,
-                             "Fraction of inputs that carry the REAL pattern "
-                             "(0..1). The rest are a FIXED random subset that "
-                             "fires ONLY the background rate - the classic "
-                             "'pattern embedded in noise' paradigm. Set 'bg "
-                             "rate' > 0 so the noise afferents actually fire.")
-                self._nt_num("nt_jitter", "jitter ms", 0.0, 72, False,
-                             "Gaussian temporal jitter (sigma, ms) applied to "
-                             "every spike - blurs spike timing. Most meaningful "
-                             "with latency encoding / tight patterns.")
-                self._nt_num("nt_pat_ms", "pattern ms", 0, 72, False,
-                             "How long the PATTERN is actually shown WITHIN "
-                             "PRESENT ms (centred in the window); the rest of "
-                             "the window is background-noise only - the embedded-"
-                             "pattern paradigm. 0 (or >= PRESENT ms) = pattern "
-                             "for the whole window. Needs 'bg rate' > 0 so the "
-                             "noise-only part actually fires.")
-            with dpg.group(horizontal=True):
-                self._nt_num("nt_input_noise", "input noise", 0.0, 78, False,
-                             "Per-presentation sensor noise on the pixels "
-                             "(Gaussian + salt-and-pepper), 0..1. Different "
-                             "every presentation - trains for robustness.")
-                self._nt_num("nt_vnoise", "membrane noise", 0.0, 84, False,
-                             "Gaussian noise added to each neuron's membrane "
-                             "potential every step (thermal / channel noise). "
-                             "Threshold is 1.0, so 0.02-0.08 is a useful range.")
-                self._nt_num("nt_wnoise", "write noise", 0.0, 76, False,
-                             "Device cycle-to-cycle write noise (relative std "
-                             "dev of each programming step; sets the synapse's "
-                             "sigma_c2c). Needs a model that has it (ECFET v2).")
+                        "device twin sets the ACTUAL dG.", color=C_MUTED, wrap=340)
+            with self._ctl_table():
+                self._ctl_row("pot amp", "nt_potamp", "double", 50,
+                              "Amplitude of a full potentiating pulse, in the "
+                              "device's drive unit (pA ECFET / V FeFET).",
+                              unit="amp")
+                self._ctl_row("dep amp", "nt_depamp", "double", 50,
+                              "Amplitude of a full depressing pulse.", unit="amp")
+                self._ctl_row("pulse", "nt_pwidth", "double", 10,
+                              "Programming pulse width.", unit="time")
+                self._ctl_row("A+ rate", "nt_aplus", "double", 1.0,
+                              "Potentiation learning-rate scale.")
+                self._ctl_row("A- rate", "nt_aminus", "double", 1.0,
+                              "Heterosynaptic depression rate.")
+                self._ctl_row("LTP/LTD split", "nt_offset", "double", 0.25,
+                              "Pre-trace split: inputs above this potentiate on a "
+                              "post spike, below depress. Carves the RF.")
+                self._ctl_row("tau_pre", "nt_taupre", "double", 20,
+                              "Pre-synaptic eligibility-trace decay.", unit="time")
+        with dpg.collapsing_header(label="Neuron (LIF)", default_open=False):
+            self._small("the output/hidden LIF neuron - bench it live in the "
+                        "Neuron tab.", color=C_MUTED, wrap=340)
+            with self._ctl_table():
+                self._ctl_row("tau_m", "nt_tau_m", "double", 20,
+                              "Membrane time constant - how fast the potential "
+                              "leaks back to rest.", unit="time")
+                self._ctl_row("V_th", "nt_vth", "double", 1.0,
+                              "Fire when the membrane crosses this (+ the "
+                              "adaptive homeostatic theta).")
+                self._ctl_row("refrac", "nt_refrac", "double", 5,
+                              "Refractory period - dead time after a spike.",
+                              unit="time")
+                self._ctl_row("EPSP gain", "nt_epsp", "double", 11.0,
+                              "How strongly an excitatory input spike (scaled by "
+                              "the synapse conductance) depolarises the neuron. "
+                              "Activity-normalised, so one value works for 5x5 "
+                              "or 28x28.")
+                self._ctl_row("IPSP gain", "nt_ipsp", "double", 1.0,
+                              "Feed-forward inhibition depth from inhibitory "
+                              "inputs (hyperpolarising).")
+                self._ctl_row("tau_syn", "nt_tausyn", "double", 8,
+                              "Synaptic (PSP) trace decay.", unit="time")
+                self._ctl_row("inhib", "nt_inhib", "double", 0.9,
+                              "Lateral inhibition: winner-take-all competition "
+                              "between output neurons. 0 disables it.")
+                self._ctl_row("theta+", "nt_theta", "double", 0.06,
+                              "Homeostatic threshold bump per output spike "
+                              "(keeps one neuron from hogging every pattern). "
+                              "Set 0 for a fixed threshold.")
+                self._ctl_row("teacher", "nt_teacher", "double", 1.4,
+                              "Supervised teacher drive onto the target neuron.")
+        # NOTE: the pattern selector and the spike-encoding + noise controls now
+        # live in the Data tab's "Encoding & noise" card (all data setup in one
+        # window). Their widget tags are created there.
 
     def _nt_canvas_tab(self):
         # the "main canvas": just the network diagram, sized to fill the tab in
@@ -5904,6 +6098,11 @@ class App:
             val = ("unsupervised" if str(val).lower().startswith("uns")
                    else "supervised")
         cur = dpg.get_value(tag)
+        # tab bars store an int id but are switched by the tab's string alias
+        if (isinstance(cur, int) and isinstance(val, str)
+                and dpg.does_item_exist(val)):
+            dpg.set_value(tag, val)
+            return True
         try:
             if isinstance(cur, bool):
                 val = str(val).lower() in ("1", "true", "yes", "on")
@@ -6221,76 +6420,284 @@ class App:
         self._nt_status(f"input spikes: pattern '{label}'", C_GREEN)
 
     def _nt_patterns_tab(self):
+        _pre = lambda *_: self._nt_encoding_preview()      # noqa: E731
         with self._pad(left=6, top=4, bottom=0):
-            with dpg.group(horizontal=True):
-                # --- custom paint editor ---
-                with dpg.group():
-                    self._small("CUSTOM INPUT PATTERN  (click cells to paint; "
-                                "set PATTERNS = custom to train on these)",
-                                color=(126, 150, 220))
-                    dl = dpg.add_drawlist(width=300, height=300,
-                                          tag="nt_pat_editor")
-                    dpg.add_draw_layer(parent=dl, tag="nt_pat_layer")
-                    with dpg.group(horizontal=True):
-                        dpg.add_button(label=" New grid ",
-                                       callback=self._nt_paint_new)
-                        dpg.add_button(label=" Clear ",
-                                       callback=self._nt_paint_clear)
-                        b = dpg.add_button(label=" Add pattern ",
-                                           callback=self._nt_paint_add)
-                        dpg.bind_item_theme(b, self.themes["primary"])
-                        dpg.add_button(label=" Drop last ",
-                                       callback=self._nt_paint_drop)
-                    self._small("left-click / drag paints ON, right-click / "
-                                "drag erases; 'Add pattern' stores the grid",
-                                color=C_MUTED)
-                    dpg.add_text("custom patterns: 0", tag="nt_custom_txt",
-                                 color=C_TEXT2)
-                # --- dataset loader ---
-                with dpg.group():
-                    self._small("DATASET INPUT  (MNIST / images)  - set "
-                                "PATTERNS = dataset to train on it",
-                                color=(126, 150, 220))
-                    with dpg.group(horizontal=True):
-                        b = dpg.add_button(label=" Download MNIST ",
-                                           callback=self.on_nt_download_mnist)
-                        dpg.bind_item_theme(b, self.themes["primary"])
-                        dpg.add_button(label=" Load file... ",
-                                       callback=lambda: dpg.show_item(
-                                           "nt_ds_file_dialog"))
-                        dpg.add_button(label=" Load folder... ",
-                                       callback=lambda: dpg.show_item(
-                                           "nt_ds_dir_dialog"))
-                    dpg.add_input_text(
-                        tag="nt_ds_url", width=-1,
-                        hint="https://...  raw GitHub / direct URL to "
-                             ".npz / .csv / .idx.gz")
-                    b = dpg.add_button(label=" Fetch URL ", width=-1,
-                                       callback=self.on_nt_fetch_url)
-                    dpg.bind_item_theme(b, self.themes["primary"])
-                    self._small("file/URL: MNIST .idx/.gz, keras .npz, a CSV "
-                                "(label,pixels), or one image.  folder: the 4 "
-                                "MNIST ubyte files, or images in per-class "
-                                "subfolders.  GitHub 'blob' links auto-convert "
-                                "to raw.", color=C_MUTED)
-                    with dpg.group(horizontal=True):
-                        self._nt_num("nt_ds_res", "RESOLUTION", 14, 64, True,
-                                     "Square grid the images are downsampled to "
-                                     "(also sets GRID H/W on build). Smaller = "
-                                     "fewer synapses = faster.")
-                        self._nt_num("nt_ds_perclass", "IMG/CLASS", 12, 64, True,
-                                     "How many images per class to sample for "
-                                     "the training set.")
-                        with dpg.group():
-                            self._caption("INVERT")
-                            dpg.add_checkbox(tag="nt_ds_invert",
-                                             default_value=False)
-                    dpg.add_text("no dataset loaded", tag="nt_ds_txt",
-                                 wrap=520, color=C_TEXT2)
-                    with dpg.child_window(height=210, border=False,
-                                          horizontal_scrollbar=True,
-                                          tag="nt_ds_holder"):
-                        pass
+            # --- live metric tiles -----------------------------------
+            with dpg.table(header_row=False, borders_innerV=False,
+                           policy=dpg.mvTable_SizingStretchSame,
+                           pad_outerX=False):
+                for _ in range(4):
+                    dpg.add_table_column()
+                with dpg.table_row():
+                    self._stat_card("epoch", "nt_stat_epoch", "0")
+                    self._stat_card("train acc", "nt_stat_tracc", "--", C_GREEN)
+                    self._stat_card("test acc", "nt_stat_teacc", "--", C_ACC)
+                    self._stat_card("best", "nt_stat_best", "--", C_AMBER)
+            dpg.add_spacer(height=8)
+            # --- data source selector: 3 clickable radio cards -------
+            self._small("DATA SOURCE  -  pick which set trains the network",
+                        color=(126, 150, 220))
+            dpg.add_spacer(height=3)
+            with dpg.table(header_row=False, borders_innerV=False,
+                           policy=dpg.mvTable_SizingStretchSame,
+                           pad_outerX=False):
+                for _ in range(3):
+                    dpg.add_table_column()
+                with dpg.table_row():
+                    self._nt_source_card("set", "Pattern set")
+                    self._nt_source_card("custom", "Custom painted")
+                    self._nt_source_card("dataset", "Imported")
+            dpg.add_spacer(height=8)
+            # --- side-by-side: paint editor + dataset loader ---------
+            with dpg.table(header_row=False, borders_innerV=False,
+                           policy=dpg.mvTable_SizingStretchSame,
+                           pad_outerX=False):
+                dpg.add_table_column()
+                dpg.add_table_column()
+                with dpg.table_row():
+                    with self._card("custom input pattern", height=262,
+                                    tip="Click cells to paint a pattern, then "
+                                        "'Add pattern' to store it. Pick 'Custom "
+                                        "painted' above to train on them."):
+                        self._small("click cells to paint - stored patterns "
+                                    "become the training set", color=C_MUTED)
+                        with dpg.group(horizontal=True):
+                            dl = dpg.add_drawlist(width=200, height=200,
+                                                  tag="nt_pat_editor")
+                            dpg.add_draw_layer(parent=dl, tag="nt_pat_layer")
+                            dpg.add_spacer(width=6)
+                            with dpg.group():
+                                dpg.add_button(label="New grid", width=150,
+                                               callback=self._nt_paint_new)
+                                dpg.add_button(label="Clear", width=150,
+                                               callback=self._nt_paint_clear)
+                                b = dpg.add_button(label="Add pattern", width=150,
+                                                   callback=self._nt_paint_add)
+                                dpg.bind_item_theme(b, self.themes["primary"])
+                                dpg.add_button(label="Drop last", width=150,
+                                               callback=self._nt_paint_drop)
+                                dpg.add_text("custom patterns: 0",
+                                             tag="nt_custom_txt", color=C_TEXT2)
+                        self._small("left-click / drag paints ON, right-click "
+                                    "erases", color=C_MUTED)
+                    with self._card("dataset input  -  MNIST / images",
+                                    height=262,
+                                    tip="Load MNIST or your own images, then "
+                                        "pick 'Imported' above to train on it."):
+                        self._small("load a real dataset to train the crossbar "
+                                    "on", color=C_MUTED)
+                        with dpg.group(horizontal=True):
+                            b = dpg.add_button(label=" Download MNIST ",
+                                               callback=self.on_nt_download_mnist)
+                            dpg.bind_item_theme(b, self.themes["primary"])
+                            dpg.add_button(label=" Load file... ",
+                                           callback=lambda: dpg.show_item(
+                                               "nt_ds_file_dialog"))
+                            dpg.add_button(label=" Load folder... ",
+                                           callback=lambda: dpg.show_item(
+                                               "nt_ds_dir_dialog"))
+                        with dpg.group(horizontal=True):
+                            dpg.add_input_text(
+                                tag="nt_ds_url", width=-86,
+                                hint="https://... raw GitHub / URL to .npz / "
+                                     ".csv / .idx.gz")
+                            b = dpg.add_button(label="  Fetch  ",
+                                               callback=self.on_nt_fetch_url)
+                            dpg.bind_item_theme(b, self.themes["primary"])
+                        with dpg.group(horizontal=True):
+                            with self._ctl_table(label_w=86):
+                                self._ctl_row("resolution", "nt_ds_res", "int",
+                                              14, "Square grid images are "
+                                              "downsampled to (also sets GRID "
+                                              "H/W on build).")
+                                self._ctl_row("img / class", "nt_ds_perclass",
+                                              "int", 12, "Images per class to "
+                                              "sample for the training set.")
+                            dpg.add_spacer(width=10)
+                            with dpg.group():
+                                self._caption("INVERT")
+                                dpg.add_checkbox(tag="nt_ds_invert",
+                                                 default_value=False)
+                        self._small("MNIST .idx/.gz, keras .npz, CSV (label,"
+                                    "pixels), or one image;  folder: one "
+                                    "subfolder per class.", color=C_MUTED)
+                        dpg.add_text("no dataset loaded", tag="nt_ds_txt",
+                                     wrap=430, color=C_TEXT2)
+                        with dpg.child_window(height=8, border=False,
+                                              show=False, tag="nt_ds_holder"):
+                            pass
+            dpg.add_spacer(height=8)
+            # --- encoding & noise: controls + live before/after rasters
+            with self._card("encoding & noise  -  how the pattern becomes "
+                            "input spikes (tuned here, before training)",
+                            height=348):
+                with dpg.group(horizontal=True):
+                    self._small("pattern", color=C_TEXT2)
+                    dpg.add_combo(self._patset_items(), tag="nt_patset",
+                                  default_value="bars", width=128, callback=(
+                        lambda *_: (self._nt_refresh_source(),
+                                    self._nt_encoding_preview())))
+                    dpg.add_spacer(width=6)
+                    self._small("encoding", color=C_TEXT2)
+                    dpg.add_combo(["rate (Poisson)", "latency (TTFS)"],
+                                  tag="nt_encoding",
+                                  default_value="rate (Poisson)", width=140,
+                                  callback=_pre)
+                    dpg.add_spacer(width=6)
+                    self._small("noise", color=C_TEXT2)
+                    dpg.add_slider_float(tag="nt_input_noise", width=118,
+                                         default_value=0.0, min_value=0.0,
+                                         max_value=1.0, format="%.2f",
+                                         callback=_pre)
+                    dpg.add_spacer(width=6)
+                    self._small("jitter (ms)", color=C_TEXT2)
+                    dpg.add_slider_float(tag="nt_jitter", width=118,
+                                         default_value=0.0, min_value=0.0,
+                                         max_value=20.0, format="%.1f",
+                                         callback=_pre)
+                with dpg.collapsing_header(label="advanced noise",
+                                           default_open=False):
+                    with self._ctl_table(label_w=124):
+                        self._ctl_row("bg rate", "nt_bg_rate", "double",
+                                      0.0, "Spontaneous background firing on "
+                                      "EVERY input.", callback=_pre, unit="freq")
+                        self._ctl_row("signal afferents", "nt_signal_frac",
+                                      "double", 1.0, "Fraction of inputs "
+                                      "carrying the REAL pattern; the rest fire "
+                                      "only bg noise.", callback=_pre)
+                        self._ctl_row("pattern", "nt_pat_ms", "double", 0,
+                                      "How long the pattern shows within "
+                                      "present ms (centred). 0 = whole window.",
+                                      callback=_pre, unit="time")
+                        self._ctl_row("membrane noise", "nt_vnoise", "double",
+                                      0.0, "Gaussian noise on each neuron's "
+                                      "membrane every step (0.02-0.08 useful).")
+                        self._ctl_row("write noise", "nt_wnoise", "double", 0.0,
+                                      "Device cycle-to-cycle write noise "
+                                      "(needs ECFET v2).")
+                dpg.add_spacer(height=2)
+                with dpg.group(horizontal=True):
+                    with dpg.group():
+                        self._small("PATTERN", color=C_MUTED)
+                        th = dpg.add_drawlist(width=80, height=80,
+                                              tag="nt_pat_thumb")
+                        dpg.add_draw_layer(parent=th, tag="nt_pat_thumb_layer")
+                    dpg.add_spacer(width=8)
+                    with dpg.group():
+                        dpg.add_text("Clean encoding", tag="nt_enc_clean_lbl",
+                                     color=C_TEXT2)
+                        with dpg.plot(width=330, height=182, no_menus=True,
+                                      tag="nt_enc_clean"):
+                            dpg.add_plot_axis(dpg.mvXAxis, label="time (ms)",
+                                              tag="nt_enc_clean_x")
+                            dpg.add_plot_axis(dpg.mvYAxis, label="afferent #",
+                                              tag="nt_enc_clean_y")
+                    dpg.add_spacer(width=8)
+                    with dpg.group():
+                        dpg.add_text("After noise + jitter",
+                                     tag="nt_enc_noisy_lbl", color=C_TEXT2)
+                        with dpg.plot(width=330, height=182, no_menus=True,
+                                      tag="nt_enc_noisy"):
+                            dpg.add_plot_axis(dpg.mvXAxis, label="time (ms)",
+                                              tag="nt_enc_noisy_x")
+                            dpg.add_plot_axis(dpg.mvYAxis, label="afferent #",
+                                              tag="nt_enc_noisy_y")
+            dpg.add_spacer(height=6)
+            with self._card(height=38):
+                dpg.add_text("building preview...", tag="nt_enc_status",
+                             color=C_GREEN)
+        self._nt_refresh_source()
+
+    # ---- encoding preview (clean vs noisy rasters) ------------------
+
+    def _nt_preview_vec(self, cfg):
+        """A representative input pattern (flat, gh*gw) for the raster preview."""
+        n = cfg.grid_h * cfg.grid_w
+        src = cfg.pattern_set
+        try:
+            if src == "custom" and self._nt_custom:
+                v = np.asarray(self._nt_custom[0][1], float).reshape(-1)
+                if v.size == n:
+                    return v
+            elif src == "dataset" and getattr(self, "_nt_ds_sample", None) \
+                    is not None:
+                v = np.asarray(self._nt_ds_sample, float).reshape(-1)
+                if v.size == n:
+                    return v
+            elif src in ("bars", "letters", "digits", "random"):
+                pats = neuro.make_patterns(src, cfg.grid_h, cfg.grid_w)
+                if pats:
+                    return pats[min(1, len(pats) - 1)][1]
+            elif src in PATTERN_PLUGINS:
+                pats, _t = PATTERN_PLUGINS[src]["make"](cfg)
+                if pats:
+                    v = np.asarray(pats[0], float).reshape(-1)
+                    if v.size == n:
+                        return v
+        except Exception:                                   # noqa: BLE001
+            pass
+        g = np.zeros((cfg.grid_h, cfg.grid_w))              # fallback: a plus
+        g[cfg.grid_h // 2, :] = 1.0
+        g[:, cfg.grid_w // 2] = 1.0
+        return g.reshape(-1)
+
+    def _nt_encoding_preview(self, *_):
+        """Encode one pattern clean + noisy and draw the two rasters + status."""
+        if not dpg.does_item_exist("nt_enc_clean_y"):
+            return
+        try:
+            N, S, cfg = self._nt_read_params()
+            cfg.n_out, cfg.hidden_layers = 1, ()      # cheap: encoding only
+            dev = self._nt_dev or self._nt_device_factory()
+            vec = self._nt_preview_vec(cfg)
+            tr = neuro.Trainer(dev["make"], dev["kind"], N, S, cfg)
+            clean, noisy = tr.compare_spikes(vec)
+        except Exception as e:                              # noqa: BLE001
+            self.log(f"[neuro] encoding preview failed: {e}")
+            return
+        dt = cfg.dt_ms
+        n_in = cfg.grid_h * cfg.grid_w
+        for mat, yax, attr, theme in (
+                (clean, "nt_enc_clean_y", "_nt_enc_clean_ser", "dot_clean"),
+                (noisy, "nt_enc_noisy_y", "_nt_enc_noisy_ser", "dot_noise")):
+            ti, ii = np.nonzero(mat)
+            old = getattr(self, attr, None)
+            if old and dpg.does_item_exist(old):
+                dpg.delete_item(old)
+            ser = dpg.add_scatter_series((ti * dt).tolist(), ii.tolist(),
+                                         parent=yax)
+            dpg.bind_item_theme(ser, self.themes[theme])
+            setattr(self, attr, ser)
+        for xax, yax in (("nt_enc_clean_x", "nt_enc_clean_y"),
+                         ("nt_enc_noisy_x", "nt_enc_noisy_y")):
+            dpg.set_axis_limits(xax, 0.0, cfg.present_ms)
+            dpg.set_axis_limits(yax, -0.5, n_in - 0.5)
+        dpg.set_value("nt_enc_clean_lbl",
+                      f"Clean encoding  -  {int(clean.sum())} spikes")
+        dpg.set_value("nt_enc_noisy_lbl",
+                      f"After noise + jitter  -  {int(noisy.sum())} spikes")
+        enc = "rate-encoded" if cfg.encoding == "rate" else "latency-encoded"
+        dpg.set_value("nt_enc_status",
+                      f"Active: {cfg.pattern_set} pattern set  -  {enc}  -  "
+                      f"noise {int(round(cfg.input_noise * 100))}%  -  jitter "
+                      f"{cfg.jitter_ms:.0f} ms  -  {cfg.present_ms:.0f} ms window")
+        self._nt_draw_pat_thumb(vec, cfg.grid_h, cfg.grid_w)
+
+    def _nt_draw_pat_thumb(self, vec, gh, gw):
+        layer = "nt_pat_thumb_layer"
+        if not dpg.does_item_exist(layer):
+            return
+        dpg.delete_item(layer, children_only=True)
+        v = np.asarray(vec, float).reshape(gh, gw)
+        W = H = 80
+        cw, ch = W / gw, H / gh
+        for r in range(gh):
+            for c in range(gw):
+                val = float(v[r, c])
+                col = self._cmap_color(val) if val > 0 else (26, 30, 40, 255)
+                dpg.draw_rectangle((c * cw, r * ch),
+                                   ((c + 1) * cw, (r + 1) * ch), fill=col,
+                                   color=(50, 56, 70, 255), parent=layer)
 
     # ---- training output-spike stream -------------------------------
 
@@ -6363,6 +6770,7 @@ class App:
             dpg.set_value("nt_custom_txt",
                           f"custom patterns: {len(self._nt_custom)}")
         self._nt_paint_clear()
+        self._nt_refresh_source()
         self._nt_status(f"added custom pattern ({len(self._nt_custom)} total)",
                         C_GREEN)
 
@@ -6371,6 +6779,7 @@ class App:
             self._nt_custom.pop()
             dpg.set_value("nt_custom_txt",
                           f"custom patterns: {len(self._nt_custom)}")
+            self._nt_refresh_source()
 
     def _nt_paint_redraw(self):
         layer = "nt_pat_layer"
@@ -6378,7 +6787,7 @@ class App:
             return
         dpg.delete_item(layer, children_only=True)
         gh, gw = self._nt_paint_gh, self._nt_paint_gw
-        W = H = 300
+        W = H = 200                              # matches the nt_pat_editor size
         cw, ch = W / gw, H / gh
         for r in range(gh):
             for c in range(gw):
@@ -6402,8 +6811,8 @@ class App:
         rmin = dpg.get_item_rect_min("nt_pat_editor")
         lx, ly = gx - rmin[0], gy - rmin[1]
         gh, gw = self._nt_paint_gh, self._nt_paint_gw
-        c = int(lx / (300.0 / gw))
-        r = int(ly / (300.0 / gh))
+        c = int(lx / (200.0 / gw))
+        r = int(ly / (200.0 / gh))
         if 0 <= r < gh and 0 <= c < gw:
             nv = 1.0 if left else 0.0
             if self._nt_paint[r, c] != nv:
@@ -6507,7 +6916,22 @@ class App:
         dpg.set_value("nt_patset", "dataset")
         if nclass > 1:
             dpg.set_value("nt_nout", nclass)            # one neuron per class
+        # remember a sample + label for the source card + encoding preview
+        try:
+            from . import datasets as nds
+            res = min(max(int(self._nt_get("nt_ds_res", 14)), 2), 32)
+            dpg.set_value("nt_gh", res)
+            dpg.set_value("nt_gw", res)
+            g = nds._resize(ds["images"][0], res, res).astype(float)
+            g = g - g.min()
+            self._nt_ds_sample = g / (g.max() or 1.0)
+            self._nt_ds_label = (f"{os.path.basename(ds['path'])}  -  "
+                                 f"{ds['n']} imgs / {nclass} cls")
+        except Exception:                                   # noqa: BLE001
+            self._nt_ds_sample, self._nt_ds_label = None, None
         self._nt_dataset_preview(ds)
+        self._nt_refresh_source()
+        self._nt_encoding_preview()
         self._nt_status(f"dataset ready: {ds['n']} imgs / {nclass} classes",
                         C_GREEN)
         self.log(f"[neuro] dataset loaded: {ds['n']} images, {nclass} classes")
@@ -6746,6 +7170,62 @@ class App:
     def _nt_get(self, tag, default):
         return dpg.get_value(tag) if dpg.does_item_exist(tag) else default
 
+    def _nt_getu(self, tag, default):
+        """Read a unit-bearing field in its CANONICAL unit (pA / V / ms / Hz).
+        For a field with no unit combo this is identical to _nt_get()."""
+        v = self._nt_get(tag, default)
+        u = self._nt_units.get(tag)
+        try:
+            return v * UNIT_FACTOR[u] if u else v
+        except (KeyError, TypeError):
+            return v
+
+    def _nt_unit_combo(self, tag, dim):
+        """A small unit dropdown bound to `tag`.  The canonical unit (what the
+        engine expects: pA / V / ms / Hz) is the default selection."""
+        if dim == "amp":                         # canonical depends on device kind
+            kind = (self._nt_dev or {}).get("kind", "current")
+            d = "voltage" if kind == "voltage" else "current"
+        else:
+            d = dim
+        items, canon = UNIT_SETS[d], CANON_UNIT[d]
+        self._nt_units[tag] = canon
+        return dpg.add_combo(items, default_value=canon, tag=f"{tag}__u",
+                             width=58, callback=lambda s, a, tg=tag:
+                             self._on_unit_change(tg, a))
+
+    def _on_unit_change(self, tag, new_unit):
+        """Rescale the field so the physical value is unchanged when the unit
+        changes (50 pA -> 0.05 nA)."""
+        old = self._nt_units.get(tag)
+        self._nt_units[tag] = new_unit
+        if old and old != new_unit and old in UNIT_FACTOR \
+                and new_unit in UNIT_FACTOR:
+            canonical = self._nt_get(tag, 0.0) * UNIT_FACTOR[old]
+            dpg.set_value(tag, canonical / UNIT_FACTOR[new_unit])
+        self._nt_encoding_preview()              # keep the Data-tab rasters live
+
+    def _nt_set_amp_units(self, kind):
+        """Point the pot/dep-amp unit combos at current (pA) or voltage (V)."""
+        items = UNIT_SETS["voltage" if kind == "voltage" else "current"]
+        canon = "V" if kind == "voltage" else "pA"
+        for tag in ("nt_potamp", "nt_depamp"):
+            cb = f"{tag}__u"
+            if dpg.does_item_exist(cb):
+                dpg.configure_item(cb, items=items, default_value=canon)
+                dpg.set_value(cb, canon)
+            self._nt_units[tag] = canon
+
+    def _nt_reset_units(self):
+        """Reset every unit combo to its canonical unit WITHOUT rescaling (used
+        by Defaults, which already writes canonical-unit values)."""
+        for tag, cur in list(self._nt_units.items()):
+            canon = CANON_UNIT.get(UNIT_DIM.get(cur, ""), cur)
+            cb = f"{tag}__u"
+            if dpg.does_item_exist(cb):
+                dpg.set_value(cb, canon)
+            self._nt_units[tag] = canon
+
     def _on_nt_device_change(self, *_):
         """When the synapse device's DRIVE KIND changes (current<->voltage),
         switch the programming-pulse amplitude/unit/EPSP to suit it."""
@@ -6761,8 +7241,7 @@ class App:
         for tag, val in fields.items():
             if dpg.does_item_exist(tag):
                 dpg.set_value(tag, val)
-        if dpg.does_item_exist("nt_amp_unit"):
-            dpg.set_value("nt_amp_unit", "V" if kind == "voltage" else "pA")
+        self._nt_set_amp_units(kind)
 
     def _nt_device_factory(self):
         # the SYNAPSE DEVICE selector in the trainer's left-panel controls picks
@@ -6808,10 +7287,10 @@ class App:
 
     def _nt_read_params(self):
         N = neuro.NeuronParams(
-            tau_m=self._nt_get("nt_tau_m", 20.0),
+            tau_m=self._nt_getu("nt_tau_m", 20.0),
             v_threshold=self._nt_get("nt_vth", 1.0),
-            t_refractory=self._nt_get("nt_refrac", 5.0),
-            tau_syn=self._nt_get("nt_tausyn", 8.0),
+            t_refractory=self._nt_getu("nt_refrac", 5.0),
+            tau_syn=self._nt_getu("nt_tausyn", 8.0),
             epsp_gain=self._nt_get("nt_epsp", 11.0),
             ipsp_gain=self._nt_get("nt_ipsp", 1.0),
             inhibition=self._nt_get("nt_inhib", 0.9),
@@ -6825,10 +7304,10 @@ class App:
             a_plus=self._nt_get("nt_aplus", 1.0),
             a_minus=self._nt_get("nt_aminus", 1.0),
             offset=self._nt_get("nt_offset", 0.25),
-            tau_pre=self._nt_get("nt_taupre", 20.0),
-            pot_amp=self._nt_get("nt_potamp", 50.0) * ascale,
-            dep_amp=self._nt_get("nt_depamp", 50.0) * ascale,
-            pulse_width=max(self._nt_get("nt_pwidth", 10.0), 0.01) * 1e-3,
+            tau_pre=self._nt_getu("nt_taupre", 20.0),
+            pot_amp=self._nt_getu("nt_potamp", 50.0) * ascale,
+            dep_amp=self._nt_getu("nt_depamp", 50.0) * ascale,
+            pulse_width=max(self._nt_getu("nt_pwidth", 10.0), 0.01) * 1e-3,
             sg_lr=max(self._nt_get("nt_sg_lr", 0.1), 1e-4))
         mode = self._nt_get("nt_mode", "supervised")
         hidden = tuple(min(max(int(x), 1), 64) for x in
@@ -6839,20 +7318,20 @@ class App:
             n_out=min(max(int(self._nt_get("nt_nout", 4)), 1), 16),
             hidden_layers=hidden,
             mode="supervised" if mode.startswith("super") else "unsupervised",
-            present_ms=max(self._nt_get("nt_present", 120.0), 10.0),
-            dt_ms=max(self._nt_get("nt_dt", 1.0), 0.1),
-            max_rate_hz=max(self._nt_get("nt_rate", 180.0), 1.0),
+            present_ms=max(self._nt_getu("nt_present", 120.0), 10.0),
+            dt_ms=max(self._nt_getu("nt_dt", 1.0), 0.1),
+            max_rate_hz=max(self._nt_getu("nt_rate", 180.0), 1.0),
             seed=int(self._nt_get("nt_seed", 1)),
             pattern_set=self._nt_get("nt_patset", "bars"),
             learn_rule=("surrogate" if self._nt_get(
                 "nt_learnrule", "STDP").startswith("Surrogate") else "stdp"),
             encoding=("latency" if self._nt_get("nt_encoding", "rate")
                       .startswith("lat") else "rate"),
-            bg_rate_hz=max(self._nt_get("nt_bg_rate", 0.0), 0.0),
+            bg_rate_hz=max(self._nt_getu("nt_bg_rate", 0.0), 0.0),
             input_noise=min(max(self._nt_get("nt_input_noise", 0.0), 0.0), 1.0),
             signal_frac=min(max(self._nt_get("nt_signal_frac", 1.0), 0.0), 1.0),
             jitter_ms=max(self._nt_get("nt_jitter", 0.0), 0.0),
-            pattern_ms=max(self._nt_get("nt_pat_ms", 0.0), 0.0))
+            pattern_ms=max(self._nt_getu("nt_pat_ms", 0.0), 0.0))
         return N, S, cfg
 
     def on_nt_defaults(self, *_):
@@ -6868,13 +7347,13 @@ class App:
         if kind == "voltage":          # FeFET: gate-voltage programming
             common.update(nt_epsp=6.0, nt_potamp=2.0, nt_depamp=2.0,
                           nt_pwidth=1.0)
-            dpg.set_value("nt_amp_unit", "V")
         else:                          # ECFET: gate-current programming (pA)
             common.update(nt_epsp=11.0, nt_potamp=50, nt_depamp=50)
-            dpg.set_value("nt_amp_unit", "pA")
         for tag, val in common.items():
             if dpg.does_item_exist(tag):
                 dpg.set_value(tag, val)
+        self._nt_reset_units()          # values above are in canonical units
+        self._nt_set_amp_units(kind)
         self._nt_status(f"defaults loaded for {kind}-driven synapse", C_GREEN)
 
     # ---- save / load a trained model --------------------------------
@@ -6910,6 +7389,7 @@ class App:
             "stdp": dataclasses.asdict(tr.S),
             "controls": {t: dpg.get_value(t) for t, _ in NT_CONTROLS
                          if dpg.does_item_exist(t)},
+            "units": dict(self._nt_units),
             "weights_S": [tr.weights_S(c).tolist() for c in range(tr.n_layers)],
             "patterns": [[lbl, np.asarray(v, float).tolist()]
                          for lbl, v in tr.patterns],
@@ -6965,6 +7445,13 @@ class App:
                 except Exception:                       # noqa: BLE001
                     pass
         self._on_nt_device_change()                     # sync amp unit if needed
+        # 1b. restore the saved display units (after the device sync, which resets
+        #     the amp unit) so the restored numbers read back to the same value
+        for tag, u in (model.get("units") or {}).items():
+            if u in UNIT_FACTOR:
+                self._nt_units[tag] = u
+                if dpg.does_item_exist(f"{tag}__u"):
+                    dpg.set_value(f"{tag}__u", u)
         # 2. inject the saved patterns so the rebuild is self-contained (no need
         #    for the original dataset / custom paint), then rebuild the network
         pats = [(lbl, np.asarray(v, np.float32))
@@ -7018,8 +7505,6 @@ class App:
             self._nt_status("check a model (.va) in the main window first", C_RED)
             self.log("[neuro] no device selected - enable a model first")
             return
-        dpg.set_value("nt_amp_unit",
-                      "V" if self._nt_dev["kind"] == "voltage" else "pA")
         N, S, cfg = self._nt_read_params()
         try:
             # custom / dataset sources supply explicit patterns (and may resize
@@ -7049,6 +7534,10 @@ class App:
         self._nt_acc_hist = {"epoch": [], "train": [], "test": []}
         self._nt_whist = {"epoch": [], "W": []}    # per-synapse weight trajectory
         self._last_present = None
+        self._nt_best_seen = 0.0
+        for tg, v in (("nt_stat_epoch", "0"), ("nt_stat_tracc", "--"),
+                      ("nt_stat_teacc", "--"), ("nt_stat_best", "--")):
+            self._nt_stat(tg, v)
         self._nt_reset_output()
         # the receptive-field montage shows crossbar 0's post-layer (first
         # hidden layer, or the output for a single crossbar)
@@ -8147,6 +8636,14 @@ class App:
         h["epoch"].append(epoch)
         h["train"].append(100.0 * train_acc)
         h["test"].append(100.0 * test_acc if test_acc is not None else None)
+        # live metric tiles on the Data tab
+        cur = test_acc if test_acc is not None else train_acc
+        self._nt_best_seen = max(self._nt_best_seen, cur)
+        self._nt_stat("nt_stat_epoch", str(epoch))
+        self._nt_stat("nt_stat_tracc", f"{100*train_acc:.0f}%")
+        self._nt_stat("nt_stat_teacc",
+                      f"{100*test_acc:.0f}%" if test_acc is not None else "--")
+        self._nt_stat("nt_stat_best", f"{100*self._nt_best_seen:.0f}%")
         if not dpg.does_item_exist("nt_acc_y"):
             return
         self._nt_clear("acc")
@@ -8182,6 +8679,13 @@ class App:
                   max(len(tr_yt), 1))
         te_acc = (sum(1 for a, b in zip(te_yt, te_yp) if a == b) /
                   max(len(te_yt), 1)) if has_test else None
+        # live metric tiles on the Data tab
+        best = te_acc if has_test else tr_acc
+        self._nt_best_seen = max(self._nt_best_seen, best)
+        self._nt_stat("nt_stat_tracc", f"{100*tr_acc:.0f}%")
+        self._nt_stat("nt_stat_teacc",
+                      f"{100*te_acc:.0f}%" if has_test else "--")
+        self._nt_stat("nt_stat_best", f"{100*self._nt_best_seen:.0f}%")
         # remember for the agent's context + the auto-analyze loop
         self._nt_last_metrics = {
             "tr_acc": tr_acc, "te_acc": te_acc, "macro_f1": m["macro_f1"],
@@ -8467,6 +8971,43 @@ class App:
         self._goto_log()
         self.openvaf_compile_va()
 
+    # ---- Web GUI (NeuroVAT Studio, studio/) --------------------------------
+    _STUDIO_PORT = 8000
+
+    def on_open_studio(self, *_):
+        """Tools menu: open the browser front-end (studio/), starting its
+        localhost server if one isn't already running. The server process is
+        independent of the render loop; we only probe/spawn here (fast)."""
+        import subprocess
+        import urllib.request
+        import webbrowser
+        url = "http://127.0.0.1:%d/" % self._STUDIO_PORT
+        try:    # already running (this app or a manual `run_gui.py --web`)?
+            r = urllib.request.urlopen(url + "api/health", data=b"{}",
+                                       timeout=0.5)
+            if json.loads(r.read()).get("ok"):
+                self.log(f"[studio] already running - opening {url}")
+                webbrowser.open(url)
+                return
+        except Exception:
+            pass
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        run_py = os.path.join(root, "run_gui.py")
+        if not os.path.isfile(os.path.join(root, "studio", "server.py")):
+            self.log("[studio] studio/ folder not found next to the app")
+            return
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:    # server auto-opens the browser once it's listening
+            self._studio_proc = subprocess.Popen(
+                [sys.executable, run_py, "--web",
+                 "--port", str(self._STUDIO_PORT)],
+                cwd=root, creationflags=flags)
+        except OSError as e:
+            self.log(f"[studio] failed to launch: {e}")
+            return
+        self.log(f"[studio] web GUI starting at {url} (localhost only) - "
+                 "browser opens shortly; it stops when this app exits")
+
     def fit_curve_csv(self, path):
         """Tools: fit the LTP/LTD nonlinearity of a measured G-per-pulse CSV."""
         from vatester import tools_ext as T
@@ -8541,6 +9082,8 @@ class App:
             if smoke_frames and frame >= smoke_frames:
                 break
         self.virtuoso.disconnect()
+        if self._studio_proc is not None and self._studio_proc.poll() is None:
+            self._studio_proc.terminate()   # stop the web GUI we launched
         dpg.destroy_context()
         if self._restart:               # relaunch to apply GUI-code edits
             os.execv(sys.executable, [sys.executable] + sys.argv)

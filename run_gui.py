@@ -3,6 +3,8 @@
 
   python run_gui.py                 # workspace = this folder
   python run_gui.py --workspace D:\\my_models
+  python run_gui.py --web           # browser UI on http://127.0.0.1:8000
+                                    # (NeuroVAT Studio, same physics engine)
 
 Features: auto-detected .va files, ECFET v1/v2 + FeFET behavioral twins,
 neuromorphic stimulus designer (spikes, trains, LTP/LTD, PPF, Poisson,
@@ -20,8 +22,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from vatester.app import main  # noqa: E402
-
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--workspace",
@@ -34,6 +34,21 @@ if __name__ == "__main__":
     ap.add_argument("--no-bridge", dest="bridge", action="store_false",
                     help="start with the control bridge disabled "
                          "(it is enabled by default; toggle it in Tools menu)")
-    ap.set_defaults(bridge=True)
+    ap.add_argument("--web", action="store_true",
+                    help="serve the NeuroVAT Studio web GUI on localhost "
+                         "instead of the Dear PyGui window (same engine)")
+    ap.add_argument("--port", type=int, default=8000,
+                    help="port for --web (default 8000)")
+    ap.add_argument("--no-open", dest="open_browser", action="store_false",
+                    help="with --web: don't auto-open the browser")
+    ap.set_defaults(bridge=True, open_browser=True)
     args = ap.parse_args()
-    main(args.workspace, smoke_frames=args.smoke, bridge=args.bridge)
+    if args.web:
+        studio_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "studio")
+        sys.path.insert(0, studio_dir)
+        os.chdir(studio_dir)   # server/bridge resolve their files relative to studio/
+        import server          # noqa: E402  (studio/server.py)
+        server.serve(port=args.port, open_browser=args.open_browser)
+    else:
+        from vatester.app import main
+        main(args.workspace, smoke_frames=args.smoke, bridge=args.bridge)

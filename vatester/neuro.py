@@ -292,6 +292,41 @@ def probe_lif(N, drive, present_ms, dt):
     return t, V, TH, spikes
 
 
+def probe_lif_wave(N, drive, dt):
+    """LIF output neuron driven by a PER-STEP `drive` array - lets the bench show
+    a constant step, a rectangular pulse or a ramp with the same dynamics as
+    probe_lif().  Returns (t_ms, V, threshold_trace, spike_times_ms)."""
+    drive = np.asarray(drive, float)
+    n = len(drive)
+    leak = dt / max(N.tau_m, 1e-6)
+    d_theta = math.exp(-dt / N.tau_theta) if N.tau_theta > 0 else 0.0
+    v, theta, refr = N.v_rest, 0.0, 0.0
+    t = np.arange(n) * dt
+    V = np.empty(n)
+    TH = np.empty(n)
+    spikes = []
+    rng = np.random.default_rng(12345)
+    for k in range(n):
+        active = refr <= 0
+        if active:
+            v += leak * (N.v_rest - v + drive[k])
+            if N.v_noise > 0:
+                v += rng.normal(0.0, N.v_noise)
+        else:
+            v = N.v_reset
+            refr -= dt
+        if N.tau_theta > 0:
+            theta *= d_theta
+        V[k] = v
+        TH[k] = N.v_threshold + theta
+        if active and v >= N.v_threshold + theta:
+            spikes.append(k * dt)
+            v = N.v_reset
+            refr = N.t_refractory
+            theta += N.theta_plus
+    return t, V, TH, spikes
+
+
 def fi_curve(N, present_ms, dt, drive_max, n_pts=26):
     """Firing rate (Hz) vs constant drive - the neuron's f-I transfer curve."""
     drives = np.linspace(0.0, drive_max, n_pts)

@@ -13,8 +13,10 @@ can read and **edit** the `.va`/twin sources and run shell commands, a
 crossbar+LIF **Trainer** studio, and an SSH **skillbridge to a live Cadence
 Virtuoso** on a shared university host.
 
-- Entry points: `run_gui.py` (GUI), `run_ecfet.py` (CLI scenarios),
-  `selftest.py` (35 sanity checks — **run this after any physics/model change**).
+- Entry points: `run_gui.py` (GUI), `run_gui.py --web` (browser UI on
+  localhost — NeuroVAT Studio in `studio/`, same `ecfet` engine),
+  `run_ecfet.py` (CLI scenarios), `selftest.py` (35 sanity checks — **run this
+  after any physics/model change**).
 - Core engine: `ecfet/` (models v1/v2/v3 + FeFET, `simulator.py`, `signals.py`).
 - GUI: `vatester/app.py` (single large App class; ~8k lines).
 - Agent: `vatester/agent.py`. Virtuoso: `vatester/virtuoso.py`.
@@ -133,6 +135,13 @@ injection** → arbitrary code execution. The following defenses are in place �
 6. Don't commit secrets. Credentials come from env vars / the Account dialog
    only. The committed host/username/IP in `virtuoso.py` / `connect_test.py` are
    infrastructure config, not secrets, but avoid adding more.
+
+7. **Studio web server** (`studio/server.py`, `run_gui.py --web`) binds
+   **127.0.0.1 only** — keep it that way (never `0.0.0.0`; it has no auth and
+   its write-back can edit the repo's `.va` files). Cell names from the browser
+   are validated in `studio/bridge.py::_check_cell` and
+   `studio/core/virtuoso.py::_safe_cell` (plain file stems, no path
+   separators) — keep both checks; they block path traversal from the web UI.
 
 ## GUI threading discipline (don't break it)
 

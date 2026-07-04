@@ -91,9 +91,12 @@ def scan(workdir, max_depth=2):
     for root, dirs, files in os.walk(workdir):
         if root.rstrip(os.sep).count(os.sep) - base_depth >= max_depth:
             dirs[:] = []
+        # "studio" = the web front-end; its va/ holds a bundled sample copy of
+        # ecfet_v2.va that would collide with the workspace's real one.
         dirs[:] = [d for d in dirs
                    if not d.startswith(".") and d not in
-                   ("results", "__pycache__", "node_modules", "venv", ".git")]
+                   ("results", "__pycache__", "node_modules", "venv", ".git",
+                    "studio")]
         for fn in sorted(files):
             if fn.lower().endswith(".va"):
                 found.append(parse_va(os.path.join(root, fn)))

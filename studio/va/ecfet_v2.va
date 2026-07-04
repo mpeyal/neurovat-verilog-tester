@@ -1,0 +1,41 @@
+// ecfet_v2.va  —  charge-controlled ECRAM / graphene synapse (Sharbati 2018)
+`include "constants.vams"
+`include "disciplines.vams"
+
+module ecfet_v2 (gate, chan_p, chan_n);
+  inout gate, chan_p, chan_n;
+  electrical gate, chan_p, chan_n;
+
+  // --- range (Fig. 3c: 100..1150 uS) ---
+  parameter real Rmin   = 870.0;      // -> Gmax ~ 1150 uS
+  parameter real Rmax   = 10e3;       // -> Gmin = 100 uS
+  parameter real Rinit  = 4400.0;     // Fig. 3a/b bias
+
+  // --- charge-controlled update ---
+  parameter real Q_ref    = 0.5e-12;  // 50 pA x 10 ms unit pulse
+  parameter real n_states = 650.0;    // distinguishable G levels
+  parameter real nu_p     = 0.02;     // LTP soft-bound curvature
+  parameter real nu_d     = 0.02;     // LTD soft-bound curvature
+  parameter integer polarity = -1;    // +gate potentiates
+
+  // --- volatile pools (write-then-relax) ---
+  parameter real kappa_v  = 0.68;     // volatile fraction of each write
+  parameter real tao3     = 19.0;     // slow pool time constant (s)
+  parameter real sigma_c2c = 0.000;   // cycle-to-cycle write noise
+
+  real Gnv, pool, dGu, Qin, x, win, dG;
+
+  analog begin
+    @(initial_step) begin
+      Gnv = 1.0/Rinit; pool = 0.0;
+      dGu = (1.0/Rmin - 1.0/Rmax)/n_states;
+    end
+    Qin = I(gate)*$abstime;               // charge delivered this step
+    x   = (Gnv - 1.0/Rmax)/(1.0/Rmin - 1.0/Rmax);
+    win = exp(-nu_p*(polarity*Qin > 0 ? x : 1.0 - x));
+    dG  = polarity*sign(Qin)*dGu*(abs(Qin)/Q_ref)*win;
+    Gnv = max(1.0/Rmax, min(1.0/Rmin, Gnv + (1.0-kappa_v)*dG));
+    pool = pool*exp(-$abstime/tao3) + kappa_v*0.5*dG;
+    I(chan_p, chan_n) <+ (Gnv + pool)*V(chan_p, chan_n);
+  end
+endmodule

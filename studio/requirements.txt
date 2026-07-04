@@ -1,0 +1,10 @@
+# --- NeuroVAT Studio ---
+# The web-server path (python run.py) uses ONLY the Python 3 standard library.
+# Nothing here is required for it to run.
+#
+# Optional upgrades:
+pywebview>=4.0        # only for:  python run.py --desktop   (native window)
+# skillbridge>=1.5    # only if you connect a live Cadence Virtuoso session
+#
+# OpenVAF is a standalone binary, not a pip package. Put `openvaf` on your PATH
+# and compile_va() will use it automatically:  https://openvaf.semimod.de/
