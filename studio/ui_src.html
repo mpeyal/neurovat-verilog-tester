@@ -761,7 +761,7 @@
             <div style="flex:1; min-height:300px; background:var(--surf); border:1px solid var(--border); border-radius:12px; padding:10px 12px; display:flex; flex-direction:column;">
               <div style="flex:none; display:flex; align-items:center; gap:14px; margin-bottom:6px; flex-wrap:wrap;">
                 <span style="color:var(--text2); font-size:12px;">{{ stdpCaption2 }}</span>
-                <button onclick="{{ onPlotStdp }}" style="display:flex; align-items:center; gap:6px; background:var(--acc); color:#fff; border:none; border-radius:8px; padding:5px 13px; font-size:11.5px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="filter:brightness(1.1);">▸ Plot STDP</button>
+                <button onclick="{{ onPlotStdp }}" style="display:flex; align-items:center; gap:6px; background:var(--acc); color:#fff; border:none; border-radius:8px; padding:5px 13px; font-size:11.5px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="filter:brightness(1.1);">{{ stdpBtnLabel }}</button>
                 <span style="margin-left:auto; display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--text2);">dt range
                   <input type="range" min="100" max="1800" step="50" value="{{ stdpRange }}" onchange="{{ onStdpRange }}" oninput="{{ onStdpRange }}" style="width:120px;">
                   <span style="font-family:'IBM Plex Mono',monospace; color:var(--acc);">±{{ stdpRange }} ms</span>
@@ -1230,7 +1230,7 @@ class Component extends DCLogic {
     simReal: null, simKey: null, backendMode: "twin",   // simReal: last real backend run; falls back to twin when null
     sweepData: null,                                     // backend-computed parametric sweep (device-correct)
     probeData: null,                                     // backend LIF probe (vatester.neuro) result
-    stdpData: null, polarData: null,                     // device-measured STDP window / FeFET P-V loop
+    stdpData: null, polarData: null, stdpBusy: false,    // device-measured STDP window / FeFET P-V loop
     armedProbe: null,
     menu: null,
     virt: { connected: false, busy: false, libs: [], expanded: null },
@@ -1257,19 +1257,13 @@ class Component extends DCLogic {
     this._maybeAutoPreview();
   }
   componentDidUpdate() { this._applyChrome(); this._maybeAutoPreview(); this._maybeSweep(); this._maybeProbe(); this._maybeAnalysis(); }
-  // Device-measured STDP window (all devices) and P-V hysteresis (FeFET only),
-  // fetched from the backend when the matching Results view is open. Real device
-  // twin measurement (vatester.analysis), not analytic placeholders.
+  // P-V hysteresis (FeFET only) is measured automatically when its view opens
+  // (it's fast, ~50 ms). The STDP window is NOT auto — it is measured only on the
+  // "Plot STDP" button (see _plotStdp), matching the desktop app.
   _maybeAnalysis() {
     if (!this._beAvailable() || this.state.ws !== "results") return;
-    const rv = this.state.resView, dev = this.state.device, va = this._vaCode();
-    if (rv === "stdp") {
-      const key = JSON.stringify(["stdp", dev, va, this.state.stdpRange]);
-      if ((this.state.stdpData && this.state.stdpData.key === key) || this._stdpPendingKey === key) return;
-      this._stdpPendingKey = key;
-      clearTimeout(this._stdpTimer);
-      this._stdpTimer = setTimeout(() => this._runAnalysis("stdp_window", key, { device: dev, va, dt_max_ms: this.state.stdpRange }, "stdpData"), 180);
-    } else if (rv === "polar" && dev === "fefet") {
+    const dev = this.state.device, va = this._vaCode();
+    if (this.state.resView === "polar" && dev === "fefet") {
       const key = JSON.stringify(["polar", dev, va]);
       if ((this.state.polarData && this.state.polarData.key === key) || this._polarPendingKey === key) return;
       this._polarPendingKey = key;
@@ -1285,6 +1279,30 @@ class Component extends DCLogic {
     const patch = {}; patch[slot] = data;
     if (this.state.backendMode !== "live") patch.backendMode = "live";
     this.setState(patch);
+  }
+  // Measure the STDP window on demand for EVERY selected device/model and overlay
+  // them in one plot (like the desktop). Button-triggered — never automatic.
+  async _plotStdp() {
+    const sel = this.state.devSel;
+    const devKeys = ["v2", "v3", "fefet"].filter(k => sel[k]);
+    if (!this._beAvailable()) { this.setState({ stdpData: null }); this._log("[stdp] offline — analytic reference shown", "muted"); return; }
+    const meta = { v2: { name: "ECFET v2", color: "var(--green)" }, v3: { name: "ECFET v3", color: "var(--amber)" }, fefet: { name: "FeFET v1", color: "#8b6cf5" } };
+    this.setState({ stdpBusy: true });
+    this._log("[stdp] measuring " + devKeys.map(k => meta[k].name).join(", ") + " (device twin, ±" + this.state.stdpRange + " ms)…");
+    try {
+      const curves = await Promise.all(devKeys.map(async k => {
+        const va = (k === this.state.device) ? this._vaCode() : null;   // edited params for the active device; defaults for the rest
+        const d = await this._beRaw("stdp_window", { device: k, va, dt_max_ms: this.state.stdpRange });
+        return { name: meta[k].name, device: k, color: meta[k].color, points: d.points || [], label: d.label, unit: d.unit };
+      }));
+      if (this.state.backendMode !== "live") this.setState({ backendMode: "live" });
+      this.setState({ stdpData: { curves }, stdpBusy: false });
+      const peak = c => c.points.reduce((m, p) => Math.max(m, Math.abs(p[1])), 0);
+      this._log("[stdp] done — " + curves.map(c => c.name + " peak " + peak(c).toFixed(2) + " " + c.unit).join(" · "), "ok");
+    } catch (e) {
+      this.setState({ stdpBusy: false });
+      this._log("[stdp] measure failed — " + e.message, "err");
+    }
   }
   // Live LIF probe via the backend probe_lif endpoint (real vatester.neuro
   // probe_lif_wave + fi_curve). Only fires on the Neuron tab; falls back to the
@@ -2645,7 +2663,8 @@ class Component extends DCLogic {
     }));
     const menuOpen = !!openMenu;
     const closeMenu = () => this.setState({ menu: null });
-    const onPlotStdp = () => { this.forceUpdate(); this._log("[stdp] STDP window plotted \u00b7 3-exp fit (22 ms / 315 ms / 19 s) \u00b7 \u00b1" + st.stdpRange + " ms", "ok"); };
+    const onPlotStdp = () => this._plotStdp();
+    const stdpBtnLabel = st.stdpBusy ? "measuring\u2026" : "\u25b8 Plot STDP";
     const onPlotHyst = () => { this.forceUpdate(); this._log("[hysteresis] P\u2013V loop plotted \u00b7 ferroelectric gate sweep \u00b7 \u00b1V_c write/erase threshold", "ok"); };
     // ----- Cadence library browser -----
     const virtConnected = st.virt.connected;
@@ -2849,17 +2868,21 @@ class Component extends DCLogic {
       stdpPts.push([dt, dt > 0 ? mag : -mag]);
     }
     const stdpMk = (Amp) => { const p = []; for (let i = -70; i <= 70; i++) { if (!i) continue; const dt = Math.sign(i) * Math.pow(10, 1 + (Math.abs(i) / 70) * (Math.log10(stdpRange) - 1)); const mag = Amp * (cs[0] * Math.exp(-Math.abs(dt) / taus[0]) + cs[1] * Math.exp(-Math.abs(dt) / taus[1]) + cs[2] * Math.exp(-Math.abs(dt) / taus[2])); p.push([dt, dt > 0 ? mag : -mag]); } return p; };
-    // real device-measured STDP window (backend) when available, else analytic placeholder
-    const stdpReal = (st.stdpData && st.stdpData.points && st.stdpData.points.length) ? st.stdpData : null;
-    const stdpCaption2 = stdpReal
-      ? "Measured STDP window \u2014 the " + st.device + " device twin run at each \u0394t (pre/post pair, correlation-isolated). \u0394t > 0 potentiates, \u0394t < 0 depresses."
-      : "STDP window (measuring from the device\u2026 or analytic reference offline). \u0394t > 0 potentiates, \u0394t < 0 depresses.";
-    const stdpYlab = stdpReal ? (stdpReal.label + " " + stdpReal.unit) : "\u0394G \u00b5S";
-    const stdpMeasuredPts = stdpReal ? stdpReal.points : stdpPts;
-    const stdpCaption = stdpReal ? "measured (" + st.device + " device)" : "\u0394G";
+    // measured STDP window(s) from "Plot STDP" \u2014 one overlaid curve per selected
+    // device/model (like the desktop). No auto-measure; analytic shown until clicked.
+    const stdpReal = (st.stdpData && st.stdpData.curves && st.stdpData.curves.length) ? st.stdpData : null;
+    const stdpCaption2 = st.stdpBusy
+      ? "Measuring STDP window from the device twin(s) \u2014 one run per \u0394t, per selected model\u2026"
+      : (stdpReal
+        ? "Measured STDP window \u2014 " + stdpReal.curves.map(c => c.name).join(" + ") + " device twin(s), run at each \u0394t (pre/post pair, correlation-isolated). \u0394t > 0 potentiates, \u0394t < 0 depresses."
+        : "Analytic reference STDP window. Press \u25b8 Plot STDP to MEASURE the selected device(s) \u2014 select multiple to overlay their windows. \u0394t > 0 potentiates, \u0394t < 0 depresses.");
+    const stdpYlab = stdpReal ? (stdpReal.curves[0].label + " " + stdpReal.curves[0].unit) : "\u0394G \u00b5S";
+    const stdpMeasuredSeries = stdpReal
+      ? stdpReal.curves.map(c => ({ pts: c.points, color: c.color, label: c.name }))
+      : [{ pts: stdpPts, color: "var(--acc)", label: "\u0394G (analytic)" }];
     const stdpPlot = sweepOn
       ? this._plot({ id: "stdp", dots: true, series: Array.from({ length: sweepSteps }, (_, i) => { const Amp = 1.5 + (7.5 - 1.5) * (sweepSteps === 1 ? 0 : i / (sweepSteps - 1)); return { pts: stdpMk(Amp), color: sweepColor(i), label: "A " + Amp.toFixed(1) }; }), xlab: "\u0394t ms", ylab: "\u0394G \u00b5S", xunit: "ms", yunit: "\u00b5S" })
-      : this._plot({ id: "stdp", dots: true, onPoint: n => { this._log("[stdp] \u0394t " + (+n.x).toFixed(1) + " ms \u2192 " + (+n.y).toFixed(3) + " " + (stdpReal ? stdpReal.unit : "\u00b5S") + " \u2014 opening source transient", "ok"); this.setState({ resView: "transient" }); }, series: [{ pts: stdpMeasuredPts, color: "var(--acc)", label: stdpCaption }], xlab: "\u0394t ms", ylab: stdpYlab, xunit: "ms", yunit: stdpReal ? stdpReal.unit : "\u00b5S" });
+      : this._plot({ id: "stdp", dots: true, onPoint: n => { this._log("[stdp] \u0394t " + (+n.x).toFixed(1) + " ms \u2192 " + (+n.y).toFixed(3) + " " + (stdpReal ? stdpReal.curves[0].unit : "\u00b5S") + " \u2014 opening source transient", "ok"); this.setState({ resView: "transient" }); }, series: stdpMeasuredSeries, xlab: "\u0394t ms", ylab: stdpYlab, xunit: "ms", yunit: stdpReal ? stdpReal.curves[0].unit : "\u00b5S" });
     // FeFET P-V hysteresis loop \u2014 real device measurement (backend) else analytic
     const polUp = [], polDn = [], Ps = 22, Vc = 1.1, kk = 0.62, Vm = 3;
     for (let v = -Vm; v <= Vm + 1e-9; v += 0.08) polUp.push([v, Ps * Math.tanh((v - Vc) / kk)]);
@@ -3258,7 +3281,7 @@ class Component extends DCLogic {
 
     return {
       workspaces, statusText, statusBg, statusBorder, statusDot, statusAnim,
-      menus, menuOpen, closeMenu, onPlotStdp, onPlotHyst,
+      menus, menuOpen, closeMenu, onPlotStdp, onPlotHyst, stdpBtnLabel,
       virtConnected, virtBusy, virtBrowserOpen, virtLibCount, onCloseBrowser, onVirtConnectBtn, virtLibs, loadedVaLabel, hasLoadedVa: !!loadedVa,
       armedProbe: !!st.armedProbe, armedHint: st.armedProbe ? ("Probe " + st.armedProbe + " armed \u2014 click a plot point to place it  ·  Esc to cancel") : "",
       onRun, toggleTheme, themeIcon, toggleAgent, agentBtnBg, agentBtnBorder, agentOpen,
