@@ -17,7 +17,7 @@ import os
 import re
 import tempfile
 
-from core import twin, openvaf, virtuoso, engine
+from core import twin, openvaf, virtuoso, engine, trainer
 
 _CELL_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*$")   # plain file stems only
 
@@ -47,13 +47,15 @@ class Bridge:
     def run_sim(self, args=None):
         a = args or {}
         kw = dict(pulses=a.get("pulses", []), essentials=a.get("essentials"),
-                  gen=a.get("gen", "train"), device=a.get("device", "v2"))
+                  gen=a.get("gen", "train"), device=a.get("device", "v2"),
+                  va=a.get("va"), unit=a.get("unit"))
         if engine.available():
             try:
                 return engine.run_sim(**kw)
             except Exception:
                 pass  # fall back to the analytic twin below
-        return twin.simulate(**kw)
+        # the analytic twin ignores the .va text + unit; drop them to match its sig
+        return twin.simulate(**{k: v for k, v in kw.items() if k not in ("va", "unit")})
 
     def compile_va(self, args=None):
         a = args or {}
@@ -110,6 +112,16 @@ class Bridge:
         return virtuoso.write_to_virtuoso(
             a.get("lib", ""), cell, a.get("view", "veriloga"), a.get("source", ""))
 
+    # --- neuromorphic trainer + LIF probe (reuse the desktop's vatester.neuro) --
+    def train_net(self, args=None):
+        """Real crossbar+LIF training via vatester.neuro. Raises if neuro isn't
+        importable so the front-end keeps its in-page JS demo (offline)."""
+        return trainer.train_net(args or {})
+
+    def probe_lif(self, args=None):
+        """Real LIF neuron probe (membrane trace + f-I curve) via vatester.neuro."""
+        return trainer.probe_lif(args or {})
+
     # --- health -----------------------------------------------------------
     def health(self, args=None):
         try:
@@ -119,4 +131,5 @@ class Bridge:
             has_openvaf = openvaf.openvaf_available()
         return {"ok": True, "openvaf": has_openvaf,
                 "engine": "ecfet" if engine.available() else "twin",
+                "neuro": trainer.available(),
                 "workspace": engine.repo_root() if engine.available() else None}

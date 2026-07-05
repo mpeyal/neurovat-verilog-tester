@@ -1229,12 +1229,13 @@ class Component extends DCLogic {
     plots: {},
     simReal: null, simKey: null, backendMode: "twin",   // simReal: last real backend run; falls back to twin when null
     sweepData: null,                                     // backend-computed parametric sweep (device-correct)
+    probeData: null,                                     // backend LIF probe (vatester.neuro) result
     armedProbe: null,
     menu: null,
     virt: { connected: false, busy: false, libs: [], expanded: null },
     virtBrowser: false, loadedVa: null,
     trainCfg: { encoding: "rate", paradigm: "supervised", patterns: "bars", rule: "STDP (device-local)", noise: 0.05, jitter: 4, present: 120, rate: 180,
-      outputs: 4, hidden: 0, seed: 1, vth: 1.0, epsp: 1.0, wta: 1.0, theta: 0.05, teacher: 1.4, split: 0.5, potAmp: 170, depAmp: 170, pulseW: 10, tauPre: 20, tauM: 20, gridR: 5, gridC: 5, presentMs: 40 },
+      outputs: 4, hidden: 0, seed: 1, vth: 1.0, epsp: 11.0, wta: 0.9, theta: 0.06, teacher: 1.4, split: 0.25, potAmp: 50, depAmp: 50, pulseW: 10, tauPre: 20, tauM: 20, gridR: 5, gridC: 5, presentMs: 120 },
     agentAuto: true, liveReplot: true, provider: "anthropic", modelIdx: 0,
     devSel: { v2: true, v3: false, fefet: false },
     nt: { running: false, epoch: 0, acc: [], test: [], seed: 1, rfView: "crossbar", epochsTarget: 30, sel: null, hist: [], tab: "network" },
@@ -1248,7 +1249,31 @@ class Component extends DCLogic {
   }
 
   componentDidMount() { this._applyChrome(); this._keyH = e => this._onProbeKey(e); window.addEventListener("keydown", this._keyH); this._maybeAutoPreview(); }
-  componentDidUpdate() { this._applyChrome(); this._maybeAutoPreview(); this._maybeSweep(); }
+  componentDidUpdate() { this._applyChrome(); this._maybeAutoPreview(); this._maybeSweep(); this._maybeProbe(); }
+  // Live LIF probe via the backend probe_lif endpoint (real vatester.neuro
+  // probe_lif_wave + fi_curve). Only fires on the Neuron tab; falls back to the
+  // in-page JS _lifSim when offline.
+  _maybeProbe() {
+    if (!this._beAvailable() || this.state.nt.tab !== "neuron") return;
+    const p = this.state.probe;
+    const key = JSON.stringify([p.iInj, p.mode, this.state.device]);
+    if ((this.state.probeData && this.state.probeData.key === key) || this._probePendingKey === key) return;
+    this._probePendingKey = key;
+    clearTimeout(this._probeTimer);
+    this._probeTimer = setTimeout(() => this._runProbe(key), 150);
+  }
+  async _runProbe(key) {
+    const p = this.state.probe;
+    let data;
+    try {
+      data = await this._beRaw("probe_lif", { iInj: p.iInj, mode: p.mode, tau_m: 20, vth: 1.0, theta: 0.06 });
+    } catch (e) { return; }
+    if (!data || !data.t) return;
+    data.key = key;
+    const patch = { probeData: data };
+    if (this.state.backendMode !== "live") patch.backendMode = "live";
+    this.setState(patch);
+  }
   // Live preview: whenever the stimulus/device/essentials change, run the REAL
   // backend (debounced) so the Design + Results plots reflect the SELECTED device
   // physics instead of the v2-only in-page twin. The twin stays only as the
@@ -1268,7 +1293,7 @@ class Component extends DCLogic {
     try {
       data = await this._beRaw("run_sim", {
         pulses, essentials: this.state.essentials, gen: this.state.gen,
-        device: this.state.device, va: this._vaCode(),
+        device: this.state.device, va: this._vaCode(), unit: this._stimUnit(),
       });
     } catch (e) { return; }                        // stay on the twin; explicit Run surfaces errors
     if (!data || this._simKey() !== key) return;   // stale reply
@@ -1328,9 +1353,17 @@ class Component extends DCLogic {
     }
   }
   // identity of the current inputs; a real run is reused only until any input changes, then twin resumes
+  // Drive unit sent to the backend (shared UNIT_SCALE convention): current units
+  // for ECFET (dropdown-selectable), volts for the voltage-driven FeFET.
+  _stimUnit() {
+    return this.state.device === "fefet" ? "V"
+      : (["pA", "nA", "uA", "mA"].includes(this.state.unit) ? this.state.unit : "pA");
+  }
   _simKey() {
     const p = this._pulses();
-    return JSON.stringify([this.state.gen, this.state.device, this.state.essentials, p.length, p[p.length - 1] || 0]);
+    // include the .va buffer so ALL-parameters edits (non-essential params like
+    // Rmin/tao3/STDP…) re-trigger the backend sim, not just the essentials.
+    return JSON.stringify([this.state.gen, this.state.device, this.state.essentials, p.length, p[p.length - 1] || 0, this._vaCode(), this._stimUnit()]);
   }
 
   // ---------------- Verilog-A: source, parse, essentials, highlight ----------------
@@ -1535,7 +1568,10 @@ class Component extends DCLogic {
   _pulses() {
     const gen = this.state.gen;
     const v = this._curVals();
-    const scale = this.state.essentials.amp_scale;
+    // amp_scale is the UI gain; for FeFET the ×0.01 converts the generator's
+    // amplitude number to honest gate VOLTS (so the stimulus is plotted and
+    // sent in V, and the backend applies unit=V ×1.0 — one shared convention).
+    const scale = this.state.essentials.amp_scale * (this.state.device === "fefet" ? 0.01 : 1);
     const ms = x => x / 1000;
     const t0 = 0.01;
     const P = [];
@@ -1900,7 +1936,7 @@ class Component extends DCLogic {
     // CONTRACT: run_sim({pulses, essentials, gen, device, va}) -> { stim:[[t,v]], gts:[[t,G]], ana:[{i,g,branch}], Gfinal }
     const { data, live } = await this._be("run_sim", {
       pulses, essentials: this.state.essentials, gen: this.state.gen,
-      device: this.state.device, va: this._vaCode(),
+      device: this.state.device, va: this._vaCode(), unit: this._stimUnit(),
     }, () => this._simulate(pulses));
     if (!data) { this.setState({ status: { text: "ready", kind: "ok" } }); return; }
     data.key = key;
@@ -2061,6 +2097,41 @@ class Component extends DCLogic {
 
   _startTrain() {
     if (this.state.nt.running) { clearInterval(this._trainTimer); this.setState(s => ({ nt: { ...s.nt, running: false }, status: { text: "ready", kind: "ok" } })); this._log("[trainer] stopped by user", "err"); return; }
+    if (this._beAvailable()) { this._startTrainReal(); return; }   // REAL vatester.neuro crossbar
+    this._startTrainDemo();
+  }
+  // Real training via the backend train_net endpoint \u2014 the SAME vatester.neuro
+  // crossbar+LIF the desktop app runs. Renders the real accuracy curve + device
+  // conductances; falls back to the in-page JS demo on any error.
+  async _startTrainReal() {
+    const cfg = this.state.trainCfg;
+    const target = Math.max(5, Math.min(80, parseInt(this.state.nt.epochsTarget, 10) || 30));
+    this.setState(s => ({ nt: { ...s.nt, running: true, epoch: 0, acc: [], weights: this._initWeights(), cur: null, hist: [], testBatch: null }, status: { text: "training\u2026", kind: "run" } }));
+    this._log("[trainer] neuro crossbar training \u2014 5\u00d75\u2192" + this._nOut() + " \u00b7 " + target + " epochs \u00b7 " + cfg.rule + " \u00b7 real " + this.state.device + " device array\u2026");
+    let data;
+    try {
+      data = await this._beRaw("train_net", {
+        device: this.state.device, outputs: this._nOut(), epochs: target,
+        seed: Math.round(cfg.seed) || 1, pot_amp: cfg.potAmp, dep_amp: cfg.depAmp,
+        split: cfg.split, teacher: cfg.teacher, theta: cfg.theta, vth: cfg.vth,
+        tau_m: cfg.tauM, present_ms: cfg.presentMs, noise: cfg.noise, rule: cfg.rule,
+      });
+    } catch (e) {
+      this.setState(s => ({ nt: { ...s.nt, running: false }, status: { text: "ready", kind: "ok" } }));
+      this._log("[trainer] backend train failed \u2014 " + e.message + " \u00b7 using demo", "err");
+      this._startTrainDemo();
+      return;
+    }
+    const acc = (data.epochs || []).map(e => [e.epoch, e.train_acc, e.test_acc]);
+    const flat = [];
+    for (const row of (data.weights_uS || [])) for (const g of row) flat.push(g);
+    const lo = flat.length ? Math.min(...flat) : 0, hi = flat.length ? Math.max(...flat) : 1;
+    const wnorm = flat.map(g => hi > lo ? (g - lo) / (hi - lo) : 0.5);
+    if (this.state.backendMode !== "live") this.setState({ backendMode: "live" });
+    this.setState(s => ({ nt: { ...s.nt, running: false, epoch: acc.length ? acc[acc.length - 1][0] : 0, acc, weights: wnorm.length ? wnorm : s.nt.weights, weightsUS: data.weights_uS, testBatch: acc.length ? acc[acc.length - 1][2] : null, hist: wnorm.length ? [wnorm] : s.nt.hist, built: true }, status: { text: "ready", kind: "ok" } }));
+    this._log("[trainer] neuro done \u2014 train " + (data.final_train_acc || 0) + "% (" + (data.rule || "stdp") + ", real crossbar of " + this.state.device + " devices)", "ok");
+  }
+  _startTrainDemo() {
     this.setState(s => ({ nt: { ...s.nt, running: true, epoch: 0, acc: [], weights: this._initWeights(), cur: null, hist: [] }, status: { text: "training\u2026", kind: "run" } }));
     const cfg = this.state.trainCfg;
     const target = Math.max(5, Math.min(80, parseInt(this.state.nt.epochsTarget, 10) || 30));
@@ -2360,7 +2431,7 @@ class Component extends DCLogic {
   }
   _sweepKey() {
     const s = this.state;
-    return JSON.stringify(["sweep", s.sweep.param, s.sweep.steps, s.device, s.essentials, s.gen, this._pulses().length]);
+    return JSON.stringify(["sweep", s.sweep.param, s.sweep.steps, s.device, s.essentials, s.gen, this._pulses().length, this._vaCode()]);
   }
   _maybeSweep() {
     if (!this._beAvailable() || this.state.sweep.param === "off") return;
@@ -2386,7 +2457,7 @@ class Component extends DCLogic {
         const ess = { ...this.state.essentials, [p]: v };
         const data = await this._beRaw("run_sim", {
           pulses: this._sweepPulses(pulses, p, v), essentials: ess,
-          gen: this.state.gen, device: this.state.device, va: this._vaCode(),
+          gen: this.state.gen, device: this.state.device, va: this._vaCode(), unit: this._stimUnit(),
         });
         let gmax = -Infinity, gmin = Infinity;
         for (const pt of data.gts) { if (pt[1] > gmax) gmax = pt[1]; if (pt[1] < gmin) gmin = pt[1]; }
@@ -2617,10 +2688,10 @@ class Component extends DCLogic {
       set: ev => this._setGen(key, parseFloat(ev.target.value)),
     }));
     const onUnit = ev => this.setState({ unit: ev.target.value });
-    // The drive unit follows the device family: ECFET is current-driven (pA),
-    // FeFET is voltage-driven (gate V). The backend converts UI amplitude ->
-    // A (x1e-12) for ECFET and -> V (x0.01) for FeFET, so the axis must match.
-    const stimUnit = st.device === "fefet" ? "V" : "pA";
+    // Drive unit follows the device family via the shared UNIT_SCALE convention:
+    // ECFET is current-driven (pA/nA/uA/mA, dropdown-selectable), FeFET voltage-
+    // driven (V). _stimUnit() is what the backend receives; axis label matches.
+    const stimUnit = this._stimUnit();
     const unit = stimUnit;
     const designSummary = pulses.length + " pulse" + (pulses.length === 1 ? "" : "s") + " \u00b7 " + dur.toFixed(1) + " s";
     const designStimPlot = this._plot({ id: "dsg_stim", series: [{ pts: sim.stim, color: "var(--acc)", label: "stim" }], fill: true, xlab: "s", ylab: stimUnit, xunit: "s", yunit: stimUnit });
@@ -2725,8 +2796,8 @@ class Component extends DCLogic {
     const trainBtnBg = st.nt.running ? "var(--red)" : "var(--acc)";
     const trainBtnLabel = st.nt.running ? "Stop" : "Train";
     const last = st.nt.acc[st.nt.acc.length - 1];
-    const trainStatus = st.nt.running ? "epoch " + st.nt.epoch + "/" + target + " \u2014 STDP weight updates streaming\u2026"
-      : (st.nt.acc.length ? "done \u00b7 " + st.nt.epoch + " epochs \u00b7 test " + last[2].toFixed(1) + "%"
+    const trainStatus = st.nt.running ? (st.backendMode === "live" ? "training on the real " + st.device + " crossbar (vatester.neuro)\u2026" : "epoch " + st.nt.epoch + "/" + target + " \u2014 STDP weight updates streaming\u2026")
+      : (st.nt.acc.length ? "done \u00b7 " + st.nt.epoch + " epochs \u00b7 test " + last[2].toFixed(1) + "%" + (st.nt.weightsUS ? " \u00b7 real crossbar" : "")
         : (st.nt.built ? "built \u00b7 5\u00d75 \u2192 " + this._nOut() + " outputs \u00b7 " + (25 * this._nOut()) + " cells \u2014 press Train to run " + target + " epochs"
           : "idle \u2014 Build, then Train to run " + target + " epochs"));
     const trainCards = [
@@ -2925,8 +2996,16 @@ class Component extends DCLogic {
     // ----- LIF neuron probe -----
     const probeTau = 20, probeVth = 1.0;
     const iInj = st.probe.iInj, probeMode = st.probe.mode;
-    const lif = this._lifSim(iInj, probeTau, probeVth, probeMode);
-    const fi = this._fiCurve(probeTau, probeVth);
+    // prefer the real backend LIF probe (vatester.neuro) when its result matches
+    // the current controls; else the in-page JS LIF (offline / pre-reply).
+    const _pk = JSON.stringify([iInj, probeMode, st.device]);
+    const _pd = (st.probeData && st.probeData.key === _pk) ? st.probeData : null;
+    const lif = _pd
+      ? { trace: _pd.t.map((tt, i) => [tt, _pd.V[i]]), spikes: _pd.spikes, T: _pd.t[_pd.t.length - 1] || 240, vth: probeVth, rate: _pd.rate_hz }
+      : this._lifSim(iInj, probeTau, probeVth, probeMode);
+    const fi = _pd
+      ? _pd.fI.drive.map((d, i) => [d, _pd.fI.rate[i]])
+      : this._fiCurve(probeTau, probeVth);
     const onProbeI = ev => this.setState(s => ({ probe: { ...s.probe, iInj: parseFloat(ev.target.value) } }));
     const probeModes = [["step", "Step"], ["pulse", "Pulse"], ["ramp", "Ramp"]].map(([key, label]) => ({
       label, bg: probeMode === key ? "var(--surf3)" : "transparent", fg: probeMode === key ? "var(--text)" : "var(--text2)",
