@@ -72,6 +72,13 @@ def train_net(args=None):
     n_out = int(_clamp(a.get("outputs", 4), 2, 6, 4))
     epochs = int(_clamp(a.get("epochs", 20), 2, 40, 20))
     seed = int(_clamp(a.get("seed", 1), 1, 1e6, 1))
+    grid_h = int(_clamp(a.get("grid_h", 5), 3, 12, 5))
+    grid_w = int(_clamp(a.get("grid_w", 5), 3, 12, 5))
+    hidden = int(_clamp(a.get("hidden", 0), 0, 16, 0))
+    hidden_layers = (hidden,) if hidden >= 1 else ()
+    pattern_set = a.get("patterns", "bars") or "bars"
+    encoding = a.get("encoding", "rate") or "rate"
+    mode = "unsupervised" if str(a.get("mode", "supervised")).lower().startswith("unsup") else "supervised"
     amp_si = 1.0 if device == "fefet" else 1e-12   # pA -> A for ECFET, V for FeFET
     pot = _clamp(a.get("pot_amp", 170), 1, 1e6, 170) * amp_si
     dep = _clamp(a.get("dep_amp", 170), 1, 1e6, 170) * amp_si
@@ -91,10 +98,9 @@ def train_net(args=None):
         pot_amp=pot, dep_amp=dep,
         pulse_width=_clamp(a.get("pulse_w", 10), 1, 100, 10) * 1e-3)
     cfg = neuro.NetConfig(
-        grid_h=5, grid_w=5, n_out=n_out, mode="supervised", learn_rule=learn_rule,
-        present_ms=_clamp(a.get("present_ms", 120), 20, 240, 120),
-        dt_ms=1.0, seed=seed,
-        pattern_set=a.get("patterns", "bars") or "bars",
+        grid_h=grid_h, grid_w=grid_w, n_out=n_out, mode=mode, learn_rule=learn_rule,
+        hidden_layers=hidden_layers, present_ms=_clamp(a.get("present_ms", 120), 20, 240, 120),
+        dt_ms=1.0, seed=seed, pattern_set=pattern_set, encoding=encoding,
         input_noise=_clamp(a.get("noise", 0.05), 0.0, 0.5, 0.05))
 
     tr = neuro.Trainer(make, kind, N, S, cfg)

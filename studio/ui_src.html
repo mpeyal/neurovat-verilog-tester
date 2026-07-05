@@ -773,7 +773,7 @@
           <sc-if value="{{ isPolar }}" hint-placeholder-val="{{ false }}">
             <div style="flex:1; min-height:300px; background:var(--surf); border:1px solid var(--border); border-radius:12px; padding:10px 12px; display:flex; flex-direction:column;">
               <div style="flex:none; display:flex; align-items:center; gap:12px; margin-bottom:4px;">
-                <span style="color:var(--text2); font-size:12px;">Polarization hysteresis — ferroelectric gate sweep (P vs V). Remanent polarization sets the retained conductance state; coercive voltage ±V_c is the write / erase threshold.</span>
+                <span style="color:var(--text2); font-size:12px;">Reference polarization hysteresis (analytic tanh P–V loop) — remanent polarization sets the retained state; ±V_c is the write/erase threshold. To measure the device's own loop, drive the FeFET with a voltage sweep and Run.</span>
                 <button onclick="{{ onPlotHyst }}" style="margin-left:auto; flex:none; display:flex; align-items:center; gap:6px; background:var(--acc); color:#fff; border:none; border-radius:8px; padding:5px 13px; font-size:11.5px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="filter:brightness(1.1);">▸ Plot hysteresis</button>
               </div>
               <div style="flex:1; min-height:0;">{{ polarPlot }}</div>
@@ -1815,7 +1815,7 @@ class Component extends DCLogic {
     }
     return P;
   }
-  _nOut() { return Math.max(2, Math.min(4, Math.round(this.state.trainCfg.outputs) || 4)); }
+  _nOut() { return Math.max(2, Math.min(6, Math.round(this.state.trainCfg.outputs) || 4)); }
   _initWeights() {
     let s = 12345; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
     return Array.from({ length: 100 }, () => 0.06 + rnd() * 0.08);
@@ -2115,6 +2115,8 @@ class Component extends DCLogic {
         seed: Math.round(cfg.seed) || 1, pot_amp: cfg.potAmp, dep_amp: cfg.depAmp,
         split: cfg.split, teacher: cfg.teacher, theta: cfg.theta, vth: cfg.vth,
         tau_m: cfg.tauM, present_ms: cfg.presentMs, noise: cfg.noise, rule: cfg.rule,
+        patterns: cfg.patterns, encoding: cfg.encoding, mode: cfg.paradigm,
+        grid_h: Math.round(cfg.gridR) || 5, grid_w: Math.round(cfg.gridC) || 5, hidden: Math.round(cfg.hidden) || 0,
       });
     } catch (e) {
       this.setState(s => ({ nt: { ...s.nt, running: false }, status: { text: "ready", kind: "ok" } }));
@@ -2632,11 +2634,11 @@ class Component extends DCLogic {
     const vaCode = this._vaCode();
     const vaParams = this._parseVa(vaCode);
     const essKeys = this._essKeys(vaParams);
-    // Which essential knobs the SELECTED device's engine model actually honors.
-    // (engine._make_model only applies a knob when the device dataclass has that
-    // field: V2 has all; V3 only kappa_v/sigma; FeFET none.) Sliders the engine
-    // ignores are shown dimmed with an "n/a for this device" note so they never
-    // silently mislead.
+    // Every parsed .va parameter now flows to the engine (engine._apply_va_params),
+    // so a slider only fails to apply when the SELECTED device's model lacks that
+    // mapped-essential field (V3 has no n_states/nu; FeFET maps none of the four).
+    // Non-essential params (Rmin, tao3, STDP…) apply for their native device, so
+    // they are NOT dimmed. Only the genuine mapped-mismatch case is greyed.
     const activeKnobs = { v2: ["n_states", "kappa_v", "nu", "sigma"], v3: ["kappa_v", "sigma"], fefet: [] }[st.device] || [];
     const ampMeta = { label: "Amplitude \u00d7", tip: "global scale applied to the stimulus amplitude (UI gain \u2014 not a .va parameter)", min: 0.2, max: 3, step: 0.05, val: st.essentials.amp_scale, disp: st.essentials.amp_scale.toFixed(2) + "\u00d7", global: true,
       active: true, rowOpacity: "1", note: "",
@@ -2645,10 +2647,12 @@ class Component extends DCLogic {
       const [min, max, step, prec] = this._essRange(p.name, p.value);
       const unit = /_scale$|amp/i.test(p.name) ? "" : "";
       const knob = this._knobFor(p.name);
-      const active = knob ? activeKnobs.includes(knob) : false;
-      const note = active ? "" : (knob ? "n/a for " + st.device : "display only");
+      // mapped essentials must be honored by the device; non-mapped .va params
+      // flow through full-param passing, so they are active.
+      const active = knob ? activeKnobs.includes(knob) : true;
+      const note = active ? "" : "n/a for " + st.device;
       return {
-        key: p.name, label: this._essLabel(p.name), tip: (active ? (p.comment || p.name) : (knob ? "the " + st.device + " model does not use this parameter \u2014 it has no effect on the simulation" : "edits the .va text but is not applied by the behavioural engine")), min, max, step,
+        key: p.name, label: this._essLabel(p.name), tip: (active ? (p.comment || p.name) : "the " + st.device + " model does not define this parameter \u2014 it has no effect"), min, max, step,
         val: p.value, disp: this._fmtNum(p.value, prec) + unit, code: p.name, mapped: !!knob,
         active, rowOpacity: active ? "1" : "0.45", note,
         set: ev => this._setParam(p.name, parseFloat(ev.target.value), prec),
@@ -2861,7 +2865,7 @@ class Component extends DCLogic {
       { title: "NETWORK", fields: [
         cfgSelect("mode", "paradigm", ["supervised", "unsupervised", "surrogate-grad", "reward-mod"]),
         cfgSelect("learning rule", "rule", ["STDP (device-local)", "STDP (surrogate)", "R-STDP", "backprop (STE)", "Hebbian"]),
-        cfgPairEdit("input grid", "gridR", "gridC"), cfgNum("hidden", "hidden", "units", { int: true, min: 0 }), cfgNum("outputs", "outputs", "", { int: true, min: 2, max: 4 }),
+        cfgPairEdit("input grid", "gridR", "gridC"), cfgNum("hidden", "hidden", "units", { int: true, min: 0 }), cfgNum("outputs", "outputs", "", { int: true, min: 2, max: 6 }),
         cfgNum("epochs", "epochsTarget", "", { int: true, min: 5, max: 80, set: setEpochs, valNum: target }), cfgNum("present", "presentMs", "ms", { min: 1 }), cfgNum("rate", "rate", "Hz", { min: 1 }), cfgNum("seed", "seed", "", { int: true, min: 1 }),
       ] },
       { title: "NEURON — LIF + PSP", fields: [
@@ -2975,7 +2979,7 @@ class Component extends DCLogic {
 
     // ----- confusion matrix + F1 -----
     const conf = this._confusion(trainWeights);
-    const clsNames = ["V", "H", "\u2198", "\u2199"];
+    const clsNames = ["V", "H", "\u2198", "\u2199", "N4", "N5"].slice(0, this._nOut());
     const confMatrix = (() => {
       const e = React.createElement;
       const cell = (v, isDiag, max) => e("div", { style: { display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12.5px", fontWeight: 600, fontFamily: "'IBM Plex Mono',monospace", borderRadius: "5px", aspectRatio: "1", color: v ? (isDiag ? "#fff" : "var(--text2)") : "var(--muted)", background: v ? (isDiag ? "color-mix(in srgb, var(--green) " + (30 + v / max * 60).toFixed(0) + "%, var(--surf))" : "color-mix(in srgb, var(--red) " + (18 + v / max * 55).toFixed(0) + "%, var(--surf))") : "var(--surf2)" } }, v || "");
@@ -2987,7 +2991,7 @@ class Component extends DCLogic {
         grid.push(e("div", { key: "rh" + i, style: { display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: "5px", fontSize: "10.5px", color: "var(--muted)", fontFamily: "'IBM Plex Mono',monospace" } }, clsNames[i]));
         row.forEach((v, j) => grid.push(cell(v, i === j, max)));
       });
-      return e("div", { style: { display: "grid", gridTemplateColumns: "18px repeat(4,1fr)", gap: "3px", width: "100%", maxWidth: "230px" } }, grid);
+      return e("div", { style: { display: "grid", gridTemplateColumns: "18px repeat(" + this._nOut() + ",1fr)", gap: "3px", width: "100%", maxWidth: "230px" } }, grid);
     })();
     const f1Rows = conf.rows.map((r, i) => ({ name: clsNames[i], prec: (r.prec * 100).toFixed(0) + "%", rec: (r.rec * 100).toFixed(0) + "%", f1: r.f1.toFixed(2), f1color: r.f1 > 0.8 ? "var(--green)" : r.f1 > 0.5 ? "var(--amber)" : "var(--red)" }));
     const macroF1 = conf.macroF1.toFixed(3);
