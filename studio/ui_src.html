@@ -859,8 +859,8 @@
             <!-- dataset input -->
             <div style="flex:1; min-width:0; background:var(--surf); border:1px solid var(--border); border-radius:12px; padding:10px 12px; display:flex; flex-direction:column; gap:8px;">
               <div>
-                <div style="font-weight:600; font-size:12.5px;">Dataset input <span style="color:var(--muted); font-weight:400; font-size:11px;">— encoding preview</span></div>
-                <div style="color:var(--muted); font-size:10.5px; margin-top:1px;">preview spike-encoding of a dataset — the demo trainer runs the built-in 5×5 bar-orientation task</div>
+                <div style="font-weight:600; font-size:12.5px;">Dataset input <span style="color:var(--muted); font-weight:400; font-size:11px;">— real training set</span></div>
+                <div style="color:var(--muted); font-size:10.5px; margin-top:1px;">download/import a dataset — Build+Train then run it through the crossbar+LIF network (Metrics shows the measured confusion/F1)</div>
               </div>
               <div style="display:flex; gap:6px;">
                 <button onclick="{{ onDsMnist }}" style="flex:1; background:var(--acc); color:#fff; border:none; border-radius:7px; padding:7px 8px; font-size:11.5px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="filter:brightness(1.1);">Download MNIST</button>
@@ -1229,11 +1229,13 @@ class Component extends DCLogic {
     plots: {},
     simReal: null, simKey: null, backendMode: "twin",   // simReal: last real backend run; falls back to twin when null
     sweepData: null,                                     // backend-computed parametric sweep (device-correct)
+    devCompareData: null,                                // backend G(t) per selected device (real device-compare overlay)
     probeData: null,                                     // backend LIF probe (vatester.neuro) result
     stdpData: null, polarData: null, stdpBusy: false, polarBusy: false,   // device-measured STDP window / FeFET P-V loop (button-triggered)
     armedProbe: null,
     menu: null,
     virt: { connected: false, busy: false, libs: [], expanded: null },
+    vaFiles: null,                                       // real workspace .va files (from rescan_va) for the offline FROM-VIRTUOSO dropdowns
     virtBrowser: false, loadedVa: null,
     trainCfg: { encoding: "rate", paradigm: "supervised", patterns: "bars", rule: "STDP (device-local)", noise: 0.05, jitter: 4, present: 120, rate: 180,
       outputs: 4, hidden: 0, seed: 1, vth: 1.0, epsp: 11.0, wta: 0.9, theta: 0.06, teacher: 1.4, split: 0.25, potAmp: 50, depAmp: 50, pulseW: 10, tauPre: 20, tauM: 20, gridR: 5, gridC: 5, presentMs: 120 },
@@ -1254,9 +1256,10 @@ class Component extends DCLogic {
     // Load the REAL device .va (full ~27-param source) into the editor so every
     // parameter is surfaced by default, not the synthetic 11-param stub.
     if (this._beAvailable()) this._openEditorFile("ecfet_v2.va");
+    this._bootLog();
     this._maybeAutoPreview();
   }
-  componentDidUpdate() { this._applyChrome(); this._maybeAutoPreview(); this._maybeSweep(); this._maybeProbe(); }
+  componentDidUpdate() { this._applyChrome(); this._maybeAutoPreview(); this._maybeSweep(); this._maybeDevCompare(); this._maybeProbe(); }
   // BOTH the STDP window and the P-V hysteresis loop are measured ONLY on their
   // "Plot" button (they're device sweeps) and overlay every selected model. The
   // canvas is blank until the user clicks — nothing auto-measures.
@@ -1298,7 +1301,7 @@ class Component extends DCLogic {
   async _plotStdp() {
     const sel = this.state.devSel;
     const devKeys = ["v2", "v3", "fefet"].filter(k => sel[k]);
-    if (!this._beAvailable()) { this.setState({ stdpData: null }); this._log("[stdp] offline — analytic reference shown", "muted"); return; }
+    if (!this._beAvailable()) { this.setState({ stdpData: null }); this._log("[stdp] offline — the STDP window is a measured device sweep; start the backend to plot it", "muted"); return; }
     const meta = { v2: { name: "ECFET v2", color: "var(--green)" }, v3: { name: "ECFET v3", color: "var(--amber)" }, fefet: { name: "FeFET v1", color: "#8b6cf5" } };
     this.setState({ stdpBusy: true });
     this._log("[stdp] measuring " + devKeys.map(k => meta[k].name).join(", ") + " (device twin, ±" + this.state.stdpRange + " ms)…");
@@ -1619,14 +1622,20 @@ class Component extends DCLogic {
   }
 
   _defaultLogs() {
-    return [
-      { text: "workspace: ~/work/neurovat-verilog-tester", color: "var(--muted)" },
-      { text: "engine: Python ecfet twin (v2/v3/FeFET) \u00b7 assistant: offline demo (web mode)", color: "var(--muted)" },
-      { text: "[va] auto-detected 4 Verilog-A files: ECFET_Synapse.va, ecfet_v2.va, ecfet_v3.va, fefet_v1.va", color: "var(--text2)" },
-      { text: "[params] ecfet_v2 loaded (29 parameters, paper preset \u00b7 Sharbati 2018 Fig.3/4)", color: "var(--text2)" },
-      { text: "[va] ecfet_v2.va compiled \u2014 twin ready", color: "var(--green)" },
-      { text: "[plot] stimulus / R_mem / G ready", color: "var(--muted)" },
-    ];
+    return [{ text: "NeuroVAT Studio \u2014 connecting to backend\u2026", color: "var(--muted)" }];
+  }
+  // Populate the startup log with REAL info from the backend (health + rescan).
+  async _bootLog() {
+    if (!this._beAvailable()) { this._log("standalone (no backend) \u2014 in-page twin only", "muted"); return; }
+    try {
+      const h = await this._beRaw("health", {});
+      this._log("engine: " + (h.engine || "?") + " \u00b7 openvaf " + (h.openvaf ? "on" : "off") + " \u00b7 neuro " + (h.neuro ? "on" : "off") + " \u00b7 agent " + (h.agent ? "on (read-only)" : "off"), "ok");
+      if (h.workspace) this._log("workspace: " + h.workspace, "muted");
+    } catch (e) {}
+    try {
+      const r = await this._beRaw("rescan_va", {});
+      if (r && r.files) { this.setState({ vaFiles: r.files }); this._log("[va] " + r.count + " Verilog-A files: " + r.files.join(", "), "text2"); }
+    } catch (e) {}
   }
   _log(text, kind) {
     const color = kind === "ok" ? "var(--green)" : kind === "err" ? "var(--red)" : "var(--text2)";
@@ -1828,14 +1837,15 @@ class Component extends DCLogic {
 
   // ---------------- agent ----------------
   _say(txt) {
-    const hasAtt = (this.state.chatAttach || []).length > 0;
+    const attFull = this.state.chatAttach || [];
+    const hasAtt = attFull.length > 0;
     if ((!txt || !txt.trim()) && !hasAtt) return;
     txt = txt || "";
-    const atts = (this.state.chatAttach || []).map(a => ({ name: a.name, url: a.url, isImg: a.isImg }));
+    const atts = attFull.map(a => ({ name: a.name, url: a.url, isImg: a.isImg }));
     const el = this.chatRef.current; if (el) el.value = "";
     this.setState(s => ({ messages: [...s.messages, { who: "you", text: txt, atts }], agentOpen: true, chatAttach: [] }));
     clearTimeout(this._sayT);
-    this._sayT = setTimeout(() => this._respond(txt), 120);
+    this._sayT = setTimeout(() => this._respond(txt, attFull), 120);
   }
   // Selectable agent models (name shown in the picker + CLI/SDK model id sent to
   // the backend). Opus 4.8 is the default (index 0).
@@ -1859,7 +1869,7 @@ class Component extends DCLogic {
     const list = this._models()[this.state.provider] || this._models().anthropic;
     return list[this.state.modelIdx] || list[0];
   }
-  _respond(txt) {
+  _respond(txt, atts) {
     const lower = txt.toLowerCase();
     // param-management commands stay LOCAL (they act on the UI): "pin A_stdp", "drop nu_d"
     const pm = lower.match(/(pin|promote|essential|add)\s+([a-z_]\w*)|(drop|remove|unpin|hide)\s+([a-z_]\w*)|([a-z_]\w*)\s+essential/);
@@ -1884,12 +1894,18 @@ class Component extends DCLogic {
       return;
     }
     // real Claude agent (READ-ONLY backend) when available; canned demo otherwise
-    if (this._beAvailable()) { this._agentReply(txt); return; }
+    if (this._beAvailable()) { this._agentReply(txt, atts); return; }
     this.setState(s => ({ messages: [...s.messages, { who: "agent", text: this._cannedReply(lower) }] }));
   }
-  async _agentReply(txt) {
+  async _agentReply(txt, atts) {
     this.setState(s => ({ messages: [...s.messages, { who: "agent", text: "\u2026", pending: true }] }));
-    const ctx = "Selected device: " + this.state.device + "\nEditor .va buffer:\n" + this._vaCode().slice(0, 6000);
+    const parts = ["Selected device: " + this.state.device, "Editor .va buffer:\n" + this._vaCode().slice(0, 6000)];
+    (atts || []).forEach(a => {
+      if (a.isImg) parts.push("[attached image: " + a.name + " \u2014 the read-only assistant cannot view images]");
+      else if (a.text) parts.push("Attached file " + a.name + ":\n" + a.text);
+      else parts.push("[attached file: " + a.name + " \u2014 not read (too large or binary)]");
+    });
+    const ctx = parts.join("\n\n");
     let data;
     try { data = await this._beRaw("agent_chat", { message: txt, context: ctx, model: this._curModel().id }); } catch (e) { data = null; }
     const ok = data && data.ok && data.text;
@@ -1930,7 +1946,8 @@ class Component extends DCLogic {
   _makeSample(n, seed) {
     let s = seed % 2147483647 || 1; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
     const pn = Math.max(0, Math.min(0.5, this.state.trainCfg.noise));   // pixel-flip noise (Encoding ▸ noise)
-    return this._protos()[n].map(v => {
+    const P = this._protos();
+    return P[n % P.length].map(v => {   // only 4 built-in prototypes; alias extra classes so offline callers can't index past them
       const base = rnd() < pn ? 1 - v : v;
       return Math.max(0, Math.min(1, base * (0.7 + rnd() * 0.3)));
     });
@@ -2023,16 +2040,21 @@ class Component extends DCLogic {
     inp.click();
   }
   _exportCsv() {
-    const w = this.state.nt.weights || this._initWeights();
-    const nm = ["N00", "N01", "N02", "N03"];
+    // export the REAL per-synapse conductances (\u00b5S) from the trained net when
+    // present (weightsUS), honouring the real output count + grid.
+    const nOut = this._nOut();
+    const grid = (this.state.nt.weightsUS && this.state.nt.weightsUS[0]) ? this.state.nt.weightsUS[0].length : 25;
+    const gw = Math.round(Math.sqrt(grid)) || 5;
     let csv = "output,input_x,input_y,G_uS,R_kohm\n";
-    for (let n = 0; n < 4; n++) for (let k = 0; k < 25; k++) {
-      const g = this._gOf(w[n * 25 + k]);
-      csv += nm[n] + "," + (k % 5) + "," + Math.floor(k / 5) + "," + g.toFixed(1) + "," + (1000 / g).toFixed(3) + "\n";
+    let rows = 0;
+    for (let n = 0; n < nOut; n++) for (let k = 0; k < grid; k++) {
+      const g = (this.state.nt.weightsUS && this.state.nt.weightsUS[n]) ? this.state.nt.weightsUS[n][k] : this._gOf((this.state.nt.weights || this._initWeights())[n * grid + k] || 0.5);
+      csv += "N" + String(n).padStart(2, "0") + "," + (k % gw) + "," + Math.floor(k / gw) + "," + g.toFixed(1) + "," + (1000 / Math.max(g, 1)).toFixed(3) + "\n";
+      rows++;
     }
     if (this.state.nt.acc.length) { csv += "\nepoch,train_acc,test_acc\n"; this.state.nt.acc.forEach(a => csv += a[0] + "," + a[1].toFixed(2) + "," + a[2].toFixed(2) + "\n"); }
     this._download("synapse_conductances.csv", csv, "text/csv");
-    this._log("[export] synapse_conductances.csv \u2014 100 rows + " + this.state.nt.acc.length + " epochs", "ok");
+    this._log("[export] synapse_conductances.csv \u2014 " + rows + " synapses + " + this.state.nt.acc.length + " epochs", "ok");
   }
   // ---------------- app chrome: menus, plots export, virtuoso ----------------
   async _runSim() {
@@ -2085,7 +2107,30 @@ class Component extends DCLogic {
     this._log("[openvaf] compiling " + cell + ".va \u2026");
     await this._compileAndReport(cell);
   }
-  _rescanVa() { this._log("[va] rescanned workspace \u2014 4 modules: ecfet_v2.va, ecfet_v3.va, fefet_v1.va, ecfet_synapse.va", "ok"); }
+  async _rescanVa() {
+    if (!this._beAvailable()) { this._log("[va] rescan needs the backend", "err"); return; }
+    try { const r = await this._beRaw("rescan_va", {}); this.setState({ vaFiles: r.files }); this._log("[va] rescanned " + r.workspace + " \u2014 " + r.count + " files: " + r.files.join(", "), "ok"); }
+    catch (e) { this._log("[va] rescan failed \u2014 " + e.message, "err"); }
+  }
+  async _checkVa() {   // real twin<->.va compile check via OpenVAF (closest available real check)
+    if (!this._beAvailable()) { this._log("[va] check needs the backend", "err"); return; }
+    const cell = this._currentCell();
+    this._log("[va] checking " + cell + ".va against the engine (OpenVAF compile)\u2026");
+    await this._compileAndReport(cell);
+  }
+  async _backendInfo() {
+    if (!this._beAvailable()) { this._log("[backend] standalone — in-page twin, no server", "muted"); return; }
+    try { const h = await this._beRaw("health", {}); this._log("[backend] engine " + h.engine + " · openvaf " + (h.openvaf ? "on" : "off") + " · neuro " + (h.neuro ? "on" : "off") + " · agent " + (h.agent ? "on (read-only, " + this._curModel().name + ")" : "off") + " · " + (h.workspace || ""), "ok"); }
+    catch (e) { this._log("[backend] health failed — " + e.message, "err"); }
+  }
+  async _fitCsvDialog() {
+    if (!this._beAvailable()) { this._log("[fit] needs the backend", "err"); return; }
+    const inp = document.createElement("input"); inp.type = "file"; inp.accept = ".csv,.txt";
+    inp.onchange = e => { const f = e.target.files && e.target.files[0]; if (!f) return; const r = new FileReader();
+      r.onload = async () => { try { const d = await this._beRaw("fit_csv", { csv: r.result }); if (d.ok) { this._log("[fit] " + f.name + " \u2014 " + d.n + " points", "ok"); (d.report || []).forEach(l => this._log(l, "muted")); } else this._log("[fit] " + d.error, "err"); } catch (er) { this._log("[fit] failed \u2014 " + er.message, "err"); } };
+      r.readAsText(f); };
+    inp.click();
+  }
   _fitAllPlots() { this.setState({ plots: {} }); this._log("[view] all plot axes fit", "ok"); }
   _exportPng() {
     const svg = document.querySelector('#center_scroll svg[viewBox="0 0 1000 1000"]') || document.querySelector('svg[viewBox="0 0 1000 1000"]');
@@ -2219,19 +2264,33 @@ class Component extends DCLogic {
   }
 
   _dsPickFile(kind) {
+    if (kind === "folder") { this._log("[dataset] folder import needs the desktop app; on the web use MNIST, a URL, or a single .npz/.csv file", "muted"); return; }
     const inp = document.createElement("input");
     inp.type = "file";
-    if (kind === "folder") { inp.webkitdirectory = true; inp.multiple = true; }
-    else inp.accept = ".idx,.gz,.npz,.csv,.png,.jpg,.jpeg";
+    inp.accept = ".npz,.csv,.idx,.gz";
     inp.onchange = e => {
-      const files = e.target.files; if (!files || !files.length) return;
-      const status = kind === "folder"
-        ? files.length + " images from /" + (files[0].webkitRelativePath || "").split("/")[0] + " \u2014 " + this.state.ds.imgClass + " img/class"
-        : files[0].name + " \u2014 loaded @ " + this.state.ds.res + "\u00d7" + this.state.ds.res;
-      this.setState(s => ({ ds: { ...s.ds, status, source: kind } }));
-      this._log("[dataset] " + status, "ok");
+      const f = e.target.files && e.target.files[0]; if (!f) return;
+      this._log("[dataset] reading " + f.name + " \u2026");
+      const r = new FileReader();
+      r.onload = () => {
+        // upload the real bytes (base64) to the backend for decode + encode
+        const b64 = (r.result || "").toString().split(",").pop();
+        this._loadDatasetFile(f.name, b64);
+      };
+      r.readAsDataURL(f);
     };
     inp.click();
+  }
+  async _loadDatasetFile(name, b64) {
+    if (!this._beAvailable()) { this._log("[dataset] no backend \u2014 cannot decode file", "err"); return; }
+    let d;
+    try { d = await this._beRaw("load_dataset", { kind: "file", name, data: b64, res: Math.min(10, Math.max(5, this.state.ds.res || 8)), invert: this.state.ds.invert }); }
+    catch (e) { this._log("[dataset] decode failed \u2014 " + e.message, "err"); return; }
+    if (d && d.ok) {
+      const status = name + " \u2014 " + d.n_classes + " classes \u00b7 " + d.n_train + " train / " + d.n_test + " test @ " + d.res + "\u00d7" + d.res;
+      this.setState(s => ({ ds: { ...s.ds, status, source: "dataset", res: d.res }, trainCfg: { ...s.trainCfg, outputs: d.n_classes, gridR: d.res, gridC: d.res } }));
+      this._log("[dataset] loaded \u2014 " + status, "ok");
+    } else { this._log("[dataset] decode failed \u2014 " + ((d && d.error) || "unknown"), "err"); }
   }
 
   _startTrain() {
@@ -2256,6 +2315,7 @@ class Component extends DCLogic {
         tau_m: cfg.tauM, present_ms: cfg.presentMs, noise: cfg.noise, rule: cfg.rule,
         patterns: cfg.patterns, encoding: cfg.encoding, mode: cfg.paradigm,
         grid_h: Math.round(cfg.gridR) || 5, grid_w: Math.round(cfg.gridC) || 5, hidden: Math.round(cfg.hidden) || 0,
+        use_dataset: this.state.ds.source === "dataset",
       });
     } catch (e) {
       this.setState(s => ({ nt: { ...s.nt, running: false }, status: { text: "ready", kind: "ok" } }));
@@ -2269,8 +2329,53 @@ class Component extends DCLogic {
     const lo = flat.length ? Math.min(...flat) : 0, hi = flat.length ? Math.max(...flat) : 1;
     const wnorm = flat.map(g => hi > lo ? (g - lo) / (hi - lo) : 0.5);
     if (this.state.backendMode !== "live") this.setState({ backendMode: "live" });
-    this.setState(s => ({ nt: { ...s.nt, running: false, epoch: acc.length ? acc[acc.length - 1][0] : 0, acc, weights: wnorm.length ? wnorm : s.nt.weights, weightsUS: data.weights_uS, weightsHist: data.weights_hist || null, testBatch: acc.length ? acc[acc.length - 1][2] : null, hist: wnorm.length ? [wnorm] : s.nt.hist, built: true }, status: { text: "ready", kind: "ok" } }));
+    this.setState(s => ({ nt: { ...s.nt, running: false, epoch: acc.length ? acc[acc.length - 1][0] : 0, acc, weights: wnorm.length ? wnorm : s.nt.weights, weightsUS: data.weights_uS, weightsHist: data.weights_hist || null, conf: data.confusion || null, dataset: data.dataset || null, testBatch: (data.confusion ? data.confusion.acc : (acc.length ? acc[acc.length - 1][2] : null)), hist: wnorm.length ? [wnorm] : s.nt.hist, built: true }, status: { text: "ready", kind: "ok" } }));
     this._log("[trainer] neuro done \u2014 train " + (data.final_train_acc || 0) + "% (" + (data.rule || "stdp") + ", real crossbar of " + this.state.device + " devices)", "ok");
+  }
+  // Really download/decode a dataset via the backend and mark it active so
+  // training uses it (use_dataset). Offline -> honest "no backend" message.
+  async _loadDataset(kind, url) {
+    if (!this._beAvailable()) { this._log("[dataset] no backend — start the server to load real data", "err"); return; }
+    this.setState(s => ({ ds: { ...s.ds, status: "loading " + kind + "…" } }));
+    this._log("[dataset] fetching + encoding " + (kind === "url" ? url : "MNIST") + " …");
+    let d;
+    try {
+      d = await this._beRaw("load_dataset", { kind, url, res: Math.min(10, Math.max(5, this.state.ds.res || 8)), invert: this.state.ds.invert });
+    } catch (e) { this.setState(s => ({ ds: { ...s.ds, status: "load failed" } })); this._log("[dataset] load failed — " + e.message, "err"); return; }
+    if (d && d.ok) {
+      const status = (d.kind === "mnist" ? "MNIST" : (url.split("/").pop() || url)) + " — " + d.n_classes + " classes · " + d.n_train + " train / " + d.n_test + " test @ " + d.res + "×" + d.res;
+      this.setState(s => ({ ds: { ...s.ds, status, source: "dataset", res: d.res }, trainCfg: { ...s.trainCfg, outputs: d.n_classes, gridR: d.res, gridC: d.res } }));
+      this._log("[dataset] loaded — " + status + " · classes " + (d.class_names || []).join(","), "ok");
+    } else {
+      this.setState(s => ({ ds: { ...s.ds, status: "load failed" } }));
+      this._log("[dataset] load failed — " + ((d && d.error) || "unknown"), "err");
+    }
+  }
+  // Test button: real held-out evaluation via the backend neuro net (not a
+  // client toy classifier). Offline -> the JS demo estimate.
+  async _testNet() {
+    const cfg = this.state.trainCfg;
+    if (!this._beAvailable()) {
+      const w = this.state.nt.weights || this._initWeights(); const nOut = this._nOut();
+      let sd = 555, correct = 0;
+      for (let t = 0; t < 40; t++) { sd = (sd * 16807) % 2147483647; const cls = t % nOut; if (this._predict(w, this._makeSample(cls, sd)) === cls) correct++; }
+      this.setState(s => ({ nt: { ...s.nt, testBatch: correct / 40 * 100 } }));
+      this._log("[trainer] test (demo) \u2014 " + (correct / 40 * 100).toFixed(1) + "%", "muted");
+      return;
+    }
+    this._log("[trainer] evaluating on held-out set (real neuro net)\u2026");
+    let data;
+    try {
+      data = await this._beRaw("eval_net", {
+        device: this.state.device, outputs: this._nOut(), seed: Math.round(cfg.seed) || 1,
+        rule: cfg.rule, patterns: cfg.patterns, encoding: cfg.encoding, mode: cfg.paradigm,
+        pot_amp: cfg.potAmp, dep_amp: cfg.depAmp, split: cfg.split, present_ms: cfg.presentMs,
+        noise: cfg.noise, use_dataset: this.state.ds.source === "dataset",
+      });
+    } catch (e) { this._log("[trainer] test failed \u2014 " + e.message, "err"); return; }
+    const c = data && data.confusion;
+    this.setState(s => ({ nt: { ...s.nt, testBatch: c ? c.acc : (data && data.test_acc), conf: c || s.nt.conf } }));
+    this._log("[trainer] held-out test \u2014 " + (c ? c.acc.toFixed(1) : (data.test_acc || 0)) + "% \u00b7 macro-F1 " + (c ? c.macro_f1 : "?"), "ok");
   }
   _startTrainDemo() {
     this.setState(s => ({ nt: { ...s.nt, running: true, epoch: 0, acc: [], weights: this._initWeights(), cur: null, hist: [] }, status: { text: "training\u2026", kind: "run" } }));
@@ -2609,6 +2714,41 @@ class Component extends DCLogic {
     this.setState({ sweepData: { key, def, values, runs } });
   }
 
+  _devCompareKey() {
+    const s = this.state;
+    const keys = ["v2", "v3", "fefet"].filter(k => s.devSel[k]);
+    return JSON.stringify(["devcmp", keys, s.essentials, s.gen, this._pulses().length, s.device, this._vaCode()]);
+  }
+  _maybeDevCompare() {
+    const keys = ["v2", "v3", "fefet"].filter(k => this.state.devSel[k]);
+    if (!this._beAvailable() || keys.length < 2) return;
+    const key = this._devCompareKey();
+    if ((this.state.devCompareData && this.state.devCompareData.key === key) || this._devCmpPendingKey === key) return;
+    this._devCmpPendingKey = key;
+    clearTimeout(this._devCmpTimer);
+    this._devCmpTimer = setTimeout(() => this._computeDevCompare(key), 220);
+  }
+  // Device-correct compare: one REAL backend run per selected device (in parallel),
+  // so overlaid G(t) reflects each actual model, not a hardcoded-param JS twin.
+  async _computeDevCompare(key) {
+    if (this._devCompareKey() !== key) return;
+    const keys = ["v2", "v3", "fefet"].filter(k => this.state.devSel[k]);
+    const pulses = this._pulses();
+    let runs;
+    try {
+      runs = await Promise.all(keys.map(async k => {
+        const va = (k === this.state.device) ? this._vaCode() : null;   // edited params for the active device; defaults for the rest
+        const data = await this._beRaw("run_sim", {
+          pulses, essentials: this.state.essentials, gen: this.state.gen,
+          device: k, va, unit: this._stimUnit(),
+        });
+        return { device: k, gts: data.gts };
+      }));
+    } catch (e) { return; }                          // keep the twin placeholder on error
+    if (this._devCompareKey() !== key) return;        // inputs changed while computing
+    this.setState({ devCompareData: { key, runs } });
+  }
+
   // ---------------- render ----------------
   renderVals() {
     const st = this.state;
@@ -2674,10 +2814,9 @@ class Component extends DCLogic {
         mi("R_mem (ohm)", () => this.setState({ ws: "results", resView: "synaptic", anaObs: "R" }), { check: st.anaObs === "R" }),
       ] },
       { key: "tools", label: "Tools", items: [
-        mi("Control bridge \u25b8", () => this._toggleVirtuoso()),
-        mi("Check twin \u2194 .va params", () => this._rescanVa()),
+        mi("Check twin \u2194 .va (compile)", () => this._checkVa()),
         mi("Compile .va (OpenVAF)", () => this._compileVa()),
-        mi("Fit LTP/LTD from CSV\u2026", () => this._exportCsv()),
+        mi("Fit LTP/LTD from CSV\u2026", () => this._fitCsvDialog()),
       ] },
       { key: "virt", label: "Virtuoso", items: [
         mi("Connect (tunnel + skillbridge)", () => { if (!st.virt.connected) this._toggleVirtuoso(); }),
@@ -2688,11 +2827,10 @@ class Component extends DCLogic {
         mi("Autonomous: edit + run + fix (auto-approve)", () => this.setState(s => ({ agentAuto: !s.agentAuto })), { check: st.agentAuto }),
         mi("Live re-plot on code change", () => this.setState(s => ({ liveReplot: !s.liveReplot })), { check: st.liveReplot }),
         mi("", null, { sep: true }),
-        mi("Revert agent edits", () => this._log("[agent] reverted uncommitted edits", "ok")),
+        mi("Revert agent edits", () => this._log("[agent] the web agent is READ-ONLY (no file edits) — nothing to revert. Use the desktop app for the autonomous editing agent.", "muted")),
         mi("Restart app (apply GUI-code edits)", () => this._log("[app] restarting to apply GUI-code edits\u2026", "muted")),
         mi("Reset conversation", () => this.setState({ messages: [{ who: "agent", text: "Conversation reset. How can I help?" }] })),
-        mi("Account / sign-in\u2026", () => this._log("[account] signed in as ecfet-lab \u00b7 Anthropic API", "muted")),
-        mi("Backend info", () => this._log("[backend] Python ecfet engine (" + this.state.device + ") \u00b7 assistant: offline demo (web mode)", "muted")),
+        mi("Backend info", () => this._backendInfo()),
       ] },
       { key: "help", label: "Help", items: [
         mi("About NeuroVAT", () => this._log("[about] NeuroVAT \u2014 synaptic device studio \u00b7 ECFET/ECRAM Verilog-A tester", "ok")),
@@ -2885,7 +3023,9 @@ class Component extends DCLogic {
     const resGPlot = sweepOn
       ? this._plot({ id: "res_g", series: sweep.runs.map((r, i) => ({ pts: downsample(r.gts, 120), color: sweepColor(i), label: sweep.def.fmt(r.v) })), xlab: "s", ylab: "\u00b5S", xunit: "s", yunit: "\u00b5S" })
       : this._plot({ id: "res_g", series: (devCompare
-          ? selectedDevs.map(d => ({ pts: this._simulate(pulses, Object.assign({}, st.essentials, devParams[d[0]])).gts, color: d[4], label: d[1] }))
+          ? ((st.devCompareData && st.devCompareData.key === this._devCompareKey())
+              ? st.devCompareData.runs.map(r => { const d = devDefs.find(x => x[0] === r.device) || []; return { pts: r.gts, color: d[4] || "var(--acc)", label: d[1] || r.device }; })
+              : selectedDevs.map(d => ({ pts: this._simulate(pulses, Object.assign({}, st.essentials, devParams[d[0]])).gts, color: d[4], label: d[1] })))
           : [{ pts: sim.gts, color: "var(--green)", label: "G(t)" }]), xlab: "s", ylab: "\u00b5S", xunit: "s", yunit: "\u00b5S" });
     const resRPlot = this._plot({ id: "res_r", series: [{ pts: sim.gts.map(([t, g]) => [t, 1e6 / Math.max(g, 1)]), color: "var(--amber)", label: "R(t)" }], xlab: "s", ylab: "\u03a9", xunit: "s", yunit: "\u03a9" });
 
@@ -2906,15 +3046,6 @@ class Component extends DCLogic {
 
     const onStdpRange = ev => this.setState({ stdpRange: parseFloat(ev.target.value) });
     const stdpRange = st.stdpRange;
-    const stdpPts = [];
-    const cs = [0.39, 0.44, 0.17], taus = [22, 315, 19000], A = 4.5;
-    for (let i = -70; i <= 70; i++) {
-      if (!i) continue;
-      const dt = Math.sign(i) * Math.pow(10, 1 + (Math.abs(i) / 70) * (Math.log10(stdpRange) - 1));
-      const mag = A * (cs[0] * Math.exp(-Math.abs(dt) / taus[0]) + cs[1] * Math.exp(-Math.abs(dt) / taus[1]) + cs[2] * Math.exp(-Math.abs(dt) / taus[2]));
-      stdpPts.push([dt, dt > 0 ? mag : -mag]);
-    }
-    const stdpMk = (Amp) => { const p = []; for (let i = -70; i <= 70; i++) { if (!i) continue; const dt = Math.sign(i) * Math.pow(10, 1 + (Math.abs(i) / 70) * (Math.log10(stdpRange) - 1)); const mag = Amp * (cs[0] * Math.exp(-Math.abs(dt) / taus[0]) + cs[1] * Math.exp(-Math.abs(dt) / taus[1]) + cs[2] * Math.exp(-Math.abs(dt) / taus[2])); p.push([dt, dt > 0 ? mag : -mag]); } return p; };
     // measured STDP window(s) from "Plot STDP" \u2014 one overlaid curve per selected
     // device/model (like the desktop). No auto-measure; analytic shown until clicked.
     const stdpReal = (st.stdpData && st.stdpData.curves && st.stdpData.curves.length) ? st.stdpData : null;
@@ -2926,9 +3057,9 @@ class Component extends DCLogic {
     const stdpYlab = stdpReal ? (stdpReal.curves[0].label + " " + stdpReal.curves[0].unit) : "\u0394G \u00b5S";
     // blank canvas until "Plot STDP" is pressed (no analytic placeholder)
     const stdpMeasuredSeries = stdpReal ? stdpReal.curves.map(c => ({ pts: c.points, color: c.color, label: c.name })) : [];
-    const stdpPlot = sweepOn
-      ? this._plot({ id: "stdp", dots: true, series: Array.from({ length: sweepSteps }, (_, i) => { const Amp = 1.5 + (7.5 - 1.5) * (sweepSteps === 1 ? 0 : i / (sweepSteps - 1)); return { pts: stdpMk(Amp), color: sweepColor(i), label: "A " + Amp.toFixed(1) }; }), xlab: "\u0394t ms", ylab: "\u0394G \u00b5S", xunit: "ms", yunit: "\u00b5S" })
-      : this._plot({ id: "stdp", dots: true, onPoint: n => this._openStdpPair(+n.x), series: stdpMeasuredSeries, xlab: "\u0394t ms", ylab: stdpYlab, xunit: "ms", yunit: stdpReal ? stdpReal.curves[0].unit : "\u00b5S" });
+    // STDP is always the measured device window (button-triggered); the parametric
+    // Sweep overlay applies to the transient/retention plots, not to STDP.
+    const stdpPlot = this._plot({ id: "stdp", dots: true, onPoint: n => this._openStdpPair(+n.x), series: stdpMeasuredSeries, xlab: "\u0394t ms", ylab: stdpYlab, xunit: "ms", yunit: stdpReal ? stdpReal.curves[0].unit : "\u00b5S" });
     // FeFET P-V hysteresis \u2014 measured on the "Plot hysteresis" button, overlays
     // every selected model that has polarization. Blank canvas until pressed.
     const polarReal = (st.polarData && st.polarData.curves && st.polarData.curves.length) ? st.polarData : null;
@@ -2951,15 +3082,7 @@ class Component extends DCLogic {
       this.setState(s => ({ nt: { ...s.nt, weights: this._initWeights(), acc: [], epoch: 0, cur: null, sel: null, hist: [], rfView: "crossbar", built: true, testBatch: null } }));
       this._log("[trainer] crossbar built \u2014 " + gr + "\u00d7" + gc + " afferents \u2192 " + nOut + " outputs, " + cells + " " + st.device + " cells \u00b7 press Train", "ok");
     };
-    const onTest = () => {
-      const w = st.nt.weights || this._initWeights();
-      const nOut = this._nOut();
-      let sd = 555, correct = 0;
-      for (let t = 0; t < 40; t++) { sd = (sd * 16807) % 2147483647; const cls = t % nOut; if (this._predict(w, this._makeSample(cls, sd)) === cls) correct++; }
-      const acc = correct / 40 * 100;
-      this.setState(s => ({ nt: { ...s.nt, testBatch: acc } }));   // surface it on the TEST ACC card, not just the log
-      this._log("[trainer] test batch (40 samples) \u2014 accuracy " + acc.toFixed(1) + "%", "ok");
-    };
+    const onTest = () => this._testNet();
     const trainBtnBg = st.nt.running ? "var(--red)" : "var(--acc)";
     const trainBtnLabel = st.nt.running ? "Stop" : "Train";
     const last = st.nt.acc[st.nt.acc.length - 1];
@@ -3079,11 +3202,11 @@ class Component extends DCLogic {
     const onDsDrop = () => this.setState(s => ({ ds: { ...s.ds, patterns: s.ds.patterns.slice(0, -1) } }));
     const dsPatternCount = ds.patterns.length;
     const dsThumbs = ds.patterns.map((p, i) => ({ idx: i + 1, thumb: this._grid5(p, "var(--acc)", 34) }));
-    const onDsMnist = () => { this.setState(s => ({ ds: { ...s.ds, status: "MNIST \u2014 60,000 train / 10,000 test @ " + s.ds.res + "\u00d7" + s.ds.res + (s.ds.invert ? " (inverted)" : ""), source: "mnist" } })); this._log("[dataset] MNIST downloaded \u2014 70k images, " + st.ds.res + "\u00d7" + st.ds.res, "ok"); };
+    const onDsMnist = () => this._loadDataset("mnist", "");
     const onDsFile = () => this._dsPickFile("file");
     const onDsFolder = () => this._dsPickFile("folder");
     const onDsUrl = ev => this.setState(s => ({ ds: { ...s.ds, url: ev.target.value } }));
-    const onDsFetch = () => { const u = st.ds.url; if (!u) { this._log("[dataset] enter a URL first", "err"); return; } const short = u.split("/").pop() || u; this.setState(s => ({ ds: { ...s.ds, status: "fetched " + short + " @ " + s.ds.res + "\u00d7" + s.ds.res, source: "url" } })); this._log("[dataset] fetch " + short, "ok"); };
+    const onDsFetch = () => { const u = st.ds.url; if (!u) { this._log("[dataset] enter a URL first", "err"); return; } this._loadDataset("url", u); };
     const onDsRes = ev => { const v = parseInt(ev.target.value, 10); this.setState(s => ({ ds: { ...s.ds, res: isNaN(v) ? 14 : v } })); };
     const onDsImgClass = ev => { const v = parseInt(ev.target.value, 10); this.setState(s => ({ ds: { ...s.ds, imgClass: isNaN(v) ? 12 : v } })); };
     const onDsInvert = () => this.setState(s => ({ ds: { ...s.ds, invert: !s.ds.invert } }));
@@ -3151,9 +3274,16 @@ class Component extends DCLogic {
     const outputRaster = this._raster(outSpikes, rEnc.present, 4, "var(--green)", 128, "neuron #");
     const rasterWinLabel = ["V", "H", "\u2198", "\u2199"][winN] + " (N0" + winN + ")";
 
-    // ----- confusion matrix + F1 -----
-    const conf = this._confusion(trainWeights);
-    const clsNames = ["V", "H", "\u2198", "\u2199", "N4", "N5"].slice(0, this._nOut());
+    // ----- confusion matrix + F1 (REAL from the trained neuro net when present) -----
+    const realConf = st.nt.conf;
+    // the client toy classifier only handles the built-in 5\u00d75\u2192\u22644 bar task; for a
+    // dataset or >4 outputs it can't run \u2014 show empty until real training fills nt.conf.
+    const canClientConf = !realConf && this._nOut() <= 4 && st.ds.source !== "dataset" && !st.nt.weightsUS;
+    const conf = realConf
+      ? { M: realConf.matrix, rows: realConf.rows, acc: realConf.acc / 100, macroF1: realConf.macro_f1,
+          per: Math.max(1, ...realConf.matrix.map(r => r.reduce((a, b) => a + b, 0))) }
+      : (canClientConf ? this._confusion(trainWeights) : { M: [], rows: [], acc: 0, macroF1: 0, per: 1 });
+    const clsNames = realConf ? realConf.class_names : (conf.M.length ? ["V", "H", "\u2198", "\u2199", "N4", "N5"].slice(0, conf.M.length) : []);
     const confMatrix = (() => {
       const e = React.createElement;
       const cell = (v, isDiag, max) => e("div", { style: { display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12.5px", fontWeight: 600, fontFamily: "'IBM Plex Mono',monospace", borderRadius: "5px", aspectRatio: "1", color: v ? (isDiag ? "#fff" : "var(--text2)") : "var(--muted)", background: v ? (isDiag ? "color-mix(in srgb, var(--green) " + (30 + v / max * 60).toFixed(0) + "%, var(--surf))" : "color-mix(in srgb, var(--red) " + (18 + v / max * 55).toFixed(0) + "%, var(--surf))") : "var(--surf2)" } }, v || "");
@@ -3165,7 +3295,7 @@ class Component extends DCLogic {
         grid.push(e("div", { key: "rh" + i, style: { display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: "5px", fontSize: "10.5px", color: "var(--muted)", fontFamily: "'IBM Plex Mono',monospace" } }, clsNames[i]));
         row.forEach((v, j) => grid.push(cell(v, i === j, max)));
       });
-      return e("div", { style: { display: "grid", gridTemplateColumns: "18px repeat(" + this._nOut() + ",1fr)", gap: "3px", width: "100%", maxWidth: "230px" } }, grid);
+      return e("div", { style: { display: "grid", gridTemplateColumns: "18px repeat(" + clsNames.length + ",1fr)", gap: "3px", width: "100%", maxWidth: "230px" } }, grid);
     })();
     const f1Rows = conf.rows.map((r, i) => ({ name: clsNames[i], prec: (r.prec * 100).toFixed(0) + "%", rec: (r.rec * 100).toFixed(0) + "%", f1: r.f1.toFixed(2), f1color: r.f1 > 0.8 ? "var(--green)" : r.f1 > 0.5 ? "var(--amber)" : "var(--red)" }));
     const macroF1 = conf.macroF1.toFixed(3);
@@ -3247,8 +3377,19 @@ class Component extends DCLogic {
     const onAttach = () => { if (this.fileRef.current) this.fileRef.current.click(); };
     const onAttachChange = ev => {
       const files = Array.from(ev.target.files || []);
-      const mapped = files.map(f => { const isImg = (f.type || "").startsWith("image/"); return { name: f.name, isImg, url: isImg ? URL.createObjectURL(f) : null }; });
-      if (mapped.length) { this.setState(s => ({ chatAttach: [...(s.chatAttach || []), ...mapped] })); this._log("[chat] attached " + mapped.length + " file" + (mapped.length > 1 ? "s" : ""), "muted"); }
+      files.forEach(f => {
+        const isImg = (f.type || "").startsWith("image/");
+        const entry = { name: f.name, isImg, url: isImg ? URL.createObjectURL(f) : null, text: null, size: f.size };
+        this.setState(s => ({ chatAttach: [...(s.chatAttach || []), entry] }));
+        // read text-like files so their contents reach the assistant (fenced as
+        // untrusted context by the backend); images can't be viewed by the read-only CLI.
+        if (!isImg && f.size <= 200000) {
+          const r = new FileReader();
+          r.onload = () => this.setState(s => ({ chatAttach: (s.chatAttach || []).map(a => a === entry ? { ...a, text: String(r.result).slice(0, 8000) } : a) }));
+          r.readAsText(f);
+        }
+      });
+      if (files.length) this._log("[chat] attached " + files.length + " file" + (files.length > 1 ? "s" : "") + " — contents sent to the assistant as fenced context", "muted");
       ev.target.value = "";
     };
     const promptChips = [
@@ -3260,11 +3401,17 @@ class Component extends DCLogic {
     const onChatKey = ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); this._say(ev.target.value); } };
 
     // ----- code tab file actions -----
-    const onVaSave = () => {
-      const src = st.loadedVa ? (st.loadedVa.cell + ".va") : (vf.cell + ".va");
-      this._log("[va] saved editor buffer \u2192 local disk ~/work/" + src + (st.loadedVa ? "  (local copy \u2014 Virtuoso cell unchanged; use Write back to push)" : ""), "ok");
+    const onVaSave = async () => {
+      const cell = this._currentCell();
+      const { data, live } = await this._be("write_to_virtuoso", { cell: cell, lib: "", view: "veriloga", source: this._vaCode() }, () => ({ ok: true }));
+      this._log(live && data && data.ok ? "[va] saved " + cell + ".va \u2192 " + (data.engine || "workspace") : "[va] save staged (no backend)", live ? "ok" : "muted");
     };
-    const onVaReload = () => this._log("[va] reloaded ecfet_v2.va from disk", "ok");
+    const onVaReload = async () => {
+      const cell = this._currentCell();
+      const { data, live } = await this._be("load_from_virtuoso", { cell: cell, lib: "", view: "veriloga" }, () => ({ source: null }));
+      if (data && data.source) { this.setState({ vaCode: data.source }); this._log("[va] reloaded " + cell + ".va from " + (data.engine || "disk") + " \u00b7 " + this._parseVa(data.source).length + " params", live ? "ok" : "muted"); }
+      else this._log("[va] reload failed", "err");
+    };
     const onVaBuild = async () => {
       this.setState({ status: { text: "compiling\u2026", kind: "run" } });
       const cell = this._currentCell();
@@ -3274,14 +3421,22 @@ class Component extends DCLogic {
     };
 
     // ----- code tab: FROM VIRTUOSO source fetch -----
-    const vf = st.vf || { verilogOnly: true, lib: "ecfet_pdk", cell: "ecfet_v2", view: "veriloga" };
-    const vLibOpts = st.virt.libs.length ? st.virt.libs.map(l => l.name) : ["ecfet_pdk", "ecram_lib", "synapse_ip"];
+    // Connected: real skillbridge libs/cells. Offline: the real workspace .va files
+    // (from rescan_va) under a "workspace" lib — no fictional PDKs.
+    const wsCells = (st.vaFiles || []).map(f => f.replace(/\.va$/i, ""));
+    const vf = st.vf || { verilogOnly: true, lib: st.virt.connected ? "ecfet_pdk" : "workspace", cell: wsCells[0] || "ecfet_v2", view: "veriloga" };
+    const vLibOpts = st.virt.libs.length ? st.virt.libs.map(l => l.name) : ["workspace"];
     const vCurLib = st.virt.libs.find(l => l.name === vf.lib);
-    const vCellOpts = vCurLib ? vCurLib.cells.map(c => (typeof c === "string" ? c : c.cell)) : ["ecfet_v2", "ecfet_v3", "fefet_v1"];
-    const vViewOpts = ["veriloga", "schematic", "symbol"];
+    // "Verilog views only" actually filters: connected libs drop non-veriloga cells;
+    // the offline workspace is all Verilog-A so it's unaffected.
+    const vCurCells = vCurLib
+      ? vCurLib.cells.filter(c => !vf.verilogOnly || (typeof c === "string" ? true : c.va))
+      : wsCells.length ? wsCells.map(c => ({ cell: c, view: "veriloga", va: true })) : [{ cell: "ecfet_v2", view: "veriloga", va: true }];
+    const vCellOpts = vCurCells.map(c => (typeof c === "string" ? c : c.cell));
+    const vViewOpts = vf.verilogOnly ? ["veriloga"] : ["veriloga", "schematic", "symbol"];
     const verilogOnlyBg = vf.verilogOnly ? "var(--acc)" : "var(--surf3)";
     const verilogOnlyMark = vf.verilogOnly ? "\u2713" : "";
-    const onToggleVerilogOnly = () => this.setState(s => ({ vf: { ...vf, verilogOnly: !vf.verilogOnly } }));
+    const onToggleVerilogOnly = () => this.setState(s => { const on = !vf.verilogOnly; return { vf: { ...vf, verilogOnly: on, view: on ? "veriloga" : vf.view } }; });
     const onVLib = e => this.setState({ vf: { ...vf, lib: e.target.value } });
     const onVCell = e => this.setState({ vf: { ...vf, cell: e.target.value } });
     const onVView = e => this.setState({ vf: { ...vf, view: e.target.value } });
@@ -3312,17 +3467,25 @@ class Component extends DCLogic {
     };
 
     // ----- agent header controls -----
+    // The live web assistant runs the Claude CLI READ-ONLY (Read/Grep/Glob only) —
+    // no OpenAI backend and no autonomous edit/run. Reflect that honestly on the web;
+    // the OpenAI/auto toggles remain only in the offline demo.
+    const beLive = this._beAvailable();
     const agentProvider = st.provider;
     const agentModelName = curModelName;
-    const agentAuto = st.agentAuto;
+    const agentAuto = beLive ? false : st.agentAuto;
     const providerLabel = st.provider === "anthropic" ? "Claude" : "OpenAI";
-    const onToggleProvider = () => this.setState(s => ({ provider: s.provider === "anthropic" ? "openai" : "anthropic", modelIdx: 0 }));
+    const onToggleProvider = beLive
+      ? () => this._log("[agent] the web assistant is Claude, read-only — provider switching is desktop-only", "muted")
+      : () => this.setState(s => ({ provider: s.provider === "anthropic" ? "openai" : "anthropic", modelIdx: 0 }));
     const agentModelOpts = (providerModels[st.provider] || []).map((m, i) => ({ name: m.name, idx: String(i) }));
     const onPickModel = ev => this.setState({ modelIdx: parseInt(ev.target.value, 10) || 0 });
-    const onToggleAuto = () => this.setState(s => ({ agentAuto: !s.agentAuto }));
-    const autoBg = st.agentAuto ? "var(--green-soft)" : "var(--surf2)";
-    const autoFg = st.agentAuto ? "var(--green)" : "var(--muted)";
-    const autoLabel = st.agentAuto ? "auto" : "manual";
+    const onToggleAuto = beLive
+      ? () => this._log("[agent] the web assistant is read-only (no file edits or shell) — autonomous mode is desktop-only", "muted")
+      : () => this.setState(s => ({ agentAuto: !s.agentAuto }));
+    const autoBg = beLive ? "var(--surf2)" : (st.agentAuto ? "var(--green-soft)" : "var(--surf2)");
+    const autoFg = beLive ? "var(--amber)" : (st.agentAuto ? "var(--green)" : "var(--muted)");
+    const autoLabel = beLive ? "read-only" : (st.agentAuto ? "auto" : "manual");
 
     return {
       workspaces, statusText, statusBg, statusBorder, statusDot, statusAnim,

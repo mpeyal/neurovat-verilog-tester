@@ -49,6 +49,73 @@ def _device_factory(ecfet, device):
     return make, kind
 
 
+# Loaded external dataset (MNIST / URL / uploaded), encoded to Trainer patterns.
+# Bounded (small grid + few classes) so device-crossbar training stays fast.
+_DATASET = {"loaded": False}
+
+
+def load_dataset(kind="mnist", url="", res=8, invert=False, per_class=10, n_classes=6, **_):
+    """Really download/decode a dataset (vatester.datasets) and encode it to
+    input-pattern banks the trainer uses. Contract: {ok, kind, res, n_classes,
+    n_train, n_test, class_names}."""
+    import os as _os
+    from vatester import datasets as nds
+    if _engine._load() is None:
+        raise RuntimeError("engine unavailable")
+    cache = _os.path.join(_engine.repo_root(), "datasets", "_studio_cache")
+    res = int(_clamp(res, 5, 10, 8))
+    n_classes = int(_clamp(n_classes, 2, 6, 6))
+    per_class = int(_clamp(per_class, 4, 24, 10))
+    if kind == "file" and _.get("data"):
+        import base64
+        _os.makedirs(cache, exist_ok=True)
+        name = _os.path.basename(str(_.get("name", "upload.dat"))) or "upload.dat"
+        path = _os.path.join(cache, "_upload_" + name)
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(_["data"]))
+        images, labels = nds.load_any(path)
+    elif kind == "url" and url:
+        path = nds.download_url(str(url), cache)
+        images, labels = nds.load_any(path)
+    else:
+        kind = "mnist"
+        images, labels = nds.load_npz(nds.download_mnist(cache))
+    tr_p, tr_t, te_p, te_t, names = nds.to_patterns_split(
+        images, labels, res, res, train_per_class=per_class, test_per_class=8,
+        n_classes=n_classes, invert=bool(invert))
+    _DATASET.clear()
+    _DATASET.update(loaded=True, kind=kind, res=res, names=names,
+                    train=(tr_p, tr_t), test=(te_p, te_t))
+    return {"ok": True, "kind": kind, "res": res, "n_classes": len(names),
+            "n_train": len(tr_p), "n_test": len(te_p), "class_names": names}
+
+
+def clear_dataset(**_):
+    _DATASET.clear(); _DATASET["loaded"] = False
+    return {"ok": True}
+
+
+def _confusion_payload(tr, neuro, n_out):
+    """Real confusion matrix + per-class P/R/F1 from the trained network."""
+    import numpy as np
+    yt, yp = tr.evaluate(use_test=bool(tr.test_patterns), max_n=None)
+    if not yt:
+        yt, yp = tr.evaluate(use_test=False, max_n=None)
+    cm = neuro.confusion(yt, yp, n_out)
+    m = neuro.prf1(cm)
+    rows = []
+    for k in range(n_out):
+        rows.append({"name": (tr.class_names[k] if k < len(tr.class_names) else str(k)),
+                     "prec": round(float(m["prec"][k]), 3),
+                     "rec": round(float(m["rec"][k]), 3),
+                     "f1": round(float(m["f1"][k]), 3),
+                     "support": int(m["support"][k])})
+    return {"matrix": cm.tolist(), "rows": rows,
+            "acc": round(float(m["acc"]) * 100, 2),
+            "macro_f1": round(float(m["macro_f1"]), 3),
+            "class_names": [r["name"] for r in rows]}
+
+
 def train_net(args=None):
     """Contract: -> {engine, epochs:[{epoch,train_acc,test_acc}], weights_uS,
     n_out, grid, final_train_acc, device}. Raises if neuro is unavailable so the
@@ -88,6 +155,11 @@ def train_net(args=None):
     pattern_set = a.get("patterns", "bars") or "bars"
     encoding = a.get("encoding", "rate") or "rate"
     mode = forced_mode or ("unsupervised" if str(a.get("mode", "supervised")).lower().startswith("unsup") else "supervised")
+    # a loaded external dataset overrides the built-in pattern set + grid/outputs
+    use_ds = bool(a.get("use_dataset")) and _DATASET.get("loaded")
+    if use_ds:
+        grid_h = grid_w = _DATASET["res"]
+        n_out = len(_DATASET["names"])
     amp_si = 1.0 if device == "fefet" else 1e-12   # pA -> A for ECFET, V for FeFET
     pot = _clamp(a.get("pot_amp", 170), 1, 1e6, 170) * amp_si
     dep = _clamp(a.get("dep_amp", 170), 1, 1e6, 170) * amp_si
@@ -112,7 +184,14 @@ def train_net(args=None):
         dt_ms=1.0, seed=seed, pattern_set=pattern_set, encoding=encoding,
         input_noise=_clamp(a.get("noise", 0.05), 0.0, 0.5, 0.05))
 
-    tr = neuro.Trainer(make, kind, N, S, cfg)
+    if use_ds:
+        tr_p, tr_t = _DATASET["train"]
+        tr = neuro.Trainer(make, kind, N, S, cfg, patterns=tr_p, targets=tr_t)
+        te_p, te_t = _DATASET["test"]
+        tr.test_patterns, tr.test_targets = te_p, te_t
+        tr.class_names = list(_DATASET["names"])
+    else:
+        tr = neuro.Trainer(make, kind, N, S, cfg)
     rng = np.random.default_rng(seed + 777)
     curve = []
     hist = []                     # per-epoch device conductances (weight transients)
@@ -125,7 +204,7 @@ def train_net(args=None):
             k = int(k)
             tr.train_step(tr.patterns[k][1], tr.target_of[k])
         tr_acc = tr.eval_accuracy(use_test=False, max_n=40)
-        te_acc = tr.eval_accuracy(use_test=False, max_n=40)   # 2nd noisy draw ~ held-out
+        te_acc = tr.eval_accuracy(use_test=True, max_n=40) if tr.test_patterns else tr.eval_accuracy(use_test=False, max_n=40)
         curve.append({"epoch": e + 1, "train_acc": round(tr_acc * 100, 2),
                       "test_acc": round(te_acc * 100, 2)})
         Wc = tr.weights_uS(0)
@@ -137,12 +216,25 @@ def train_net(args=None):
         tr.restore_weights(best_w)
 
     W = tr.weights_uS(0)          # (n_out x n_in) real device conductances (uS)
+    conf = _confusion_payload(tr, neuro, n_out)   # REAL confusion matrix + P/R/F1
     return {"engine": "neuro", "device": device, "n_out": n_out, "rule": learn_rule,
             "mode": mode, "grid": [cfg.grid_h, cfg.grid_w],
+            "dataset": (_DATASET.get("kind") if use_ds else pattern_set),
             "epochs": curve,
             "weights_uS": [[round(float(x), 2) for x in row] for row in W],
             "weights_hist": hist,           # [epoch][synapse] real G(uS) trajectory
+            "confusion": conf,              # real matrix, per-class P/R/F1, macro-F1
             "final_train_acc": round(max(best_acc * 100, curve[-1]["train_acc"]) if surrogate else curve[-1]["train_acc"], 2) if curve else 0.0}
+
+
+def eval_net(args=None):
+    """Real held-out evaluation of a freshly-built+trained net (Test button).
+    Bounded re-run so the number reflects the actual neuro network, not a client
+    toy classifier. Returns the confusion payload."""
+    r = train_net(dict(args or {}, epochs=int(_clamp((args or {}).get("epochs", 12), 2, 30, 12))))
+    return {"ok": True, "engine": "neuro", "confusion": r.get("confusion"),
+            "test_acc": r.get("epochs", [{}])[-1].get("test_acc") if r.get("epochs") else None,
+            "final_train_acc": r.get("final_train_acc")}
 
 
 def probe_lif(args=None):

@@ -166,6 +166,14 @@ class Bridge:
     def write_to_virtuoso(self, args=None):
         a = args or {}
         cell = _check_cell(a.get("cell", ""))
+        # a live Virtuoso session + a lib -> push into the real cell (hiWriteback)
+        link = self._get_vlink()
+        if link is not None and link.connected and a.get("lib"):
+            try:
+                link.write_source(a.get("lib", ""), cell, a.get("view", "veriloga"), a.get("source", ""))
+                return {"ok": True, "engine": "skillbridge"}
+            except Exception as e:
+                return {"ok": False, "engine": "skillbridge", "error": str(e)}
         path = _workspace_va(cell)
         if path:
             with open(path, "w", encoding="utf-8", newline="") as f:
@@ -183,6 +191,51 @@ class Bridge:
     def probe_lif(self, args=None):
         """Real LIF neuron probe (membrane trace + f-I curve) via vatester.neuro."""
         return trainer.probe_lif(args or {})
+
+    def eval_net(self, args=None):
+        """Real held-out evaluation (Test button) via vatester.neuro."""
+        return trainer.eval_net(args or {})
+
+    def load_dataset(self, args=None):
+        """Really download/decode a dataset (MNIST / URL) and encode it to the
+        trainer's input patterns (vatester.datasets). Raises on failure."""
+        return trainer.load_dataset(**(args or {}))
+
+    def clear_dataset(self, args=None):
+        return trainer.clear_dataset()
+
+    # --- real workspace scan + twin/.va consistency + CSV fit -----------------
+    def rescan_va(self, args=None):
+        """Actually list the .va files in the workspace (not a canned string)."""
+        root = engine.repo_root()
+        try:
+            files = sorted(f for f in os.listdir(root) if f.lower().endswith(".va"))
+        except OSError:
+            files = []
+        return {"ok": True, "files": files, "count": len(files), "workspace": root}
+
+    def fit_csv(self, args=None):
+        """Fit the LTP/LTD nonlinearity of a measured G-per-pulse CSV (text)."""
+        a = args or {}
+        text = a.get("csv", "") or ""
+        g = []
+        for line in text.splitlines():
+            parts = re.split(r"[,\s;]+", line.strip())
+            for tok in reversed(parts):          # last numeric field = G
+                try:
+                    g.append(float(tok)); break
+                except ValueError:
+                    continue
+        if len(g) < 4:
+            return {"ok": False, "error": "need >= 4 numeric G values (got %d)" % len(g)}
+        try:
+            from vatester import tools_ext
+            res = tools_ext.fit_ltp_ltd(g)
+            return {"ok": True, "n": len(g), "report": tools_ext.format_fit(res),
+                    "result": {k: v for k, v in res.items()
+                               if isinstance(v, (int, float, str, bool))}}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     # --- device-measured analyses (real STDP window + FeFET P-V loop) ---------
     def stdp_window(self, args=None):
