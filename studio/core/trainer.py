@@ -64,9 +64,18 @@ def train_net(args=None):
     device = a.get("device", "v2")
     make, kind = _device_factory(ecfet, device)
 
-    # map the UI 'learning rule' label onto neuro's learn_rule
+    # map the UI 'learning rule' label onto what neuro actually implements
+    # (learn_rule in {stdp, surrogate} x mode in {supervised, unsupervised}):
+    #   STDP (device-local)/STDP(surrogate-trace) -> stdp, supervised
+    #   surrogate/backprop(STE)/R-STDP(reward~grad) -> surrogate, supervised
+    #   Hebbian                                      -> stdp, unsupervised
     rule_lbl = (a.get("rule") or "").lower()
-    learn_rule = "surrogate" if ("surrogate" in rule_lbl or "backprop" in rule_lbl or "ste" in rule_lbl) else "stdp"
+    if "hebб".replace("б", "b") in rule_lbl:      # 'hebbian'
+        learn_rule, forced_mode = "stdp", "unsupervised"
+    elif "surrogate" in rule_lbl or "backprop" in rule_lbl or "ste" in rule_lbl or "r-stdp" in rule_lbl or "reward" in rule_lbl:
+        learn_rule, forced_mode = "surrogate", None
+    else:
+        learn_rule, forced_mode = "stdp", None
     surrogate = learn_rule == "surrogate"
 
     n_out = int(_clamp(a.get("outputs", 4), 2, 6, 4))
@@ -78,7 +87,7 @@ def train_net(args=None):
     hidden_layers = (hidden,) if hidden >= 1 else ()
     pattern_set = a.get("patterns", "bars") or "bars"
     encoding = a.get("encoding", "rate") or "rate"
-    mode = "unsupervised" if str(a.get("mode", "supervised")).lower().startswith("unsup") else "supervised"
+    mode = forced_mode or ("unsupervised" if str(a.get("mode", "supervised")).lower().startswith("unsup") else "supervised")
     amp_si = 1.0 if device == "fefet" else 1e-12   # pA -> A for ECFET, V for FeFET
     pot = _clamp(a.get("pot_amp", 170), 1, 1e6, 170) * amp_si
     dep = _clamp(a.get("dep_amp", 170), 1, 1e6, 170) * amp_si
@@ -106,6 +115,7 @@ def train_net(args=None):
     tr = neuro.Trainer(make, kind, N, S, cfg)
     rng = np.random.default_rng(seed + 777)
     curve = []
+    hist = []                     # per-epoch device conductances (weight transients)
     best_acc, best_w = -1.0, None
     for e in range(epochs):
         if surrogate:                          # anneal LR 1.0 -> 0.15 (matches desktop)
@@ -118,6 +128,8 @@ def train_net(args=None):
         te_acc = tr.eval_accuracy(use_test=False, max_n=40)   # 2nd noisy draw ~ held-out
         curve.append({"epoch": e + 1, "train_acc": round(tr_acc * 100, 2),
                       "test_acc": round(te_acc * 100, 2)})
+        Wc = tr.weights_uS(0)
+        hist.append([round(float(x), 1) for row in Wc for x in row])   # flat per epoch
         if surrogate and tr_acc > best_acc + 1e-9:
             best_acc, best_w = tr_acc, tr.capture_weights()
     # surrogate oscillates around the solution — restore the best checkpoint
@@ -126,14 +138,19 @@ def train_net(args=None):
 
     W = tr.weights_uS(0)          # (n_out x n_in) real device conductances (uS)
     return {"engine": "neuro", "device": device, "n_out": n_out, "rule": learn_rule,
-            "grid": [cfg.grid_h, cfg.grid_w],
+            "mode": mode, "grid": [cfg.grid_h, cfg.grid_w],
             "epochs": curve,
             "weights_uS": [[round(float(x), 2) for x in row] for row in W],
+            "weights_hist": hist,           # [epoch][synapse] real G(uS) trajectory
             "final_train_acc": round(max(best_acc * 100, curve[-1]["train_acc"]) if surrogate else curve[-1]["train_acc"], 2) if curve else 0.0}
 
 
 def probe_lif(args=None):
-    """Contract: -> {engine, t, V, th, spikes, rate_hz, n_spikes, fI:{drive,rate}}."""
+    """Real LIF probe. mode step/pulse/ramp drive the membrane with a current;
+    mode 'epsp' drives it with an EXCITATORY SPIKE TRAIN (probe_lif_psp) so you
+    see EPSP summation, and the f-I curve becomes rate-vs-input-rate.
+    Contract: {engine, t, V, th, spikes, in_spikes?, rate_hz, n_spikes,
+               fI:{drive,rate,xlabel}, mode}."""
     import numpy as np
     from vatester import neuro
     a = args or {}
@@ -141,10 +158,25 @@ def probe_lif(args=None):
         tau_m=_clamp(a.get("tau_m", 20), 1, 200, 20),
         v_threshold=_clamp(a.get("vth", 1.0), 0.1, 5, 1.0),
         t_refractory=_clamp(a.get("refrac", 5), 0, 50, 5),
-        theta_plus=_clamp(a.get("theta", 0.06), 0.0, 0.5, 0.06))
+        tau_syn=_clamp(a.get("tau_syn", 8), 1, 100, 8),
+        theta_plus=_clamp(a.get("theta", 0.06), 0.0, 0.5, 0.06),
+        epsp_gain=_clamp(a.get("epsp", 11.0), 0.5, 40, 11.0))
     inj = _clamp(a.get("iInj", 1.6), 0.0, 10, 1.6)   # x rheobase (v_threshold units)
     mode = a.get("mode", "step")
     present_ms, dt = 240.0, 0.5
+
+    if mode == "epsp":
+        in_hz = max(1.0, inj * 40.0)             # slider -> input spike rate
+        epsp_w = N.epsp_gain / 11.0 * 2.0        # PSP height per input spike (tuned to fire)
+        t, V, TH, outs, ins, psp = neuro.probe_lif_psp(N, in_hz, epsp_w, present_ms, dt)
+        hz, rates = neuro.fi_curve_psp(N, epsp_w, present_ms, dt, max(40.0, inj * 50.0))
+        rate = len(outs) / (present_ms * 1e-3)
+        return {"engine": "neuro", "mode": "epsp", "t": t.tolist(), "V": V.tolist(),
+                "th": TH.tolist(), "spikes": [round(float(s), 2) for s in outs],
+                "in_spikes": [round(float(s), 2) for s in ins],
+                "rate_hz": round(rate, 1), "n_spikes": len(outs),
+                "fI": {"drive": hz.tolist(), "rate": rates.tolist(), "xlabel": "input rate (Hz)"}}
+
     n = int(present_ms / dt)
     drive = inj * N.v_threshold
     if mode == "pulse":
@@ -156,8 +188,8 @@ def probe_lif(args=None):
     t, V, TH, spikes = neuro.probe_lif_wave(N, arr, dt)
     dr, rates = neuro.fi_curve(N, present_ms, dt, max(3.0, inj * 1.3) * N.v_threshold)
     rate = len(spikes) / (present_ms * 1e-3)
-    return {"engine": "neuro", "t": t.tolist(), "V": V.tolist(), "th": TH.tolist(),
+    return {"engine": "neuro", "mode": mode, "t": t.tolist(), "V": V.tolist(), "th": TH.tolist(),
             "spikes": [round(float(s), 2) for s in spikes],
             "rate_hz": round(rate, 1), "n_spikes": len(spikes),
             "fI": {"drive": (dr / max(N.v_threshold, 1e-9)).tolist(),
-                   "rate": rates.tolist()}}
+                   "rate": rates.tolist(), "xlabel": "I_inj (× rheobase)"}}

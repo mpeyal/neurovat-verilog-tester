@@ -18,6 +18,7 @@ import re
 import tempfile
 
 from core import twin, openvaf, virtuoso, engine, trainer
+from core import analysis as _analysis
 
 _CELL_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*$")   # plain file stems only
 
@@ -122,6 +123,52 @@ class Bridge:
         """Real LIF neuron probe (membrane trace + f-I curve) via vatester.neuro."""
         return trainer.probe_lif(args or {})
 
+    # --- device-measured analyses (real STDP window + FeFET P-V loop) ---------
+    def stdp_window(self, args=None):
+        """Real anti-symmetric STDP window measured from the device model."""
+        a = args or {}
+        return _analysis.stdp_window(device=a.get("device", "v2"), va=a.get("va"),
+                                     dt_max_ms=a.get("dt_max_ms", 1800), n=a.get("n", 28))
+
+    def polarization(self, args=None):
+        """Real FeFET P-V hysteresis loop (empty/available:False for ECFET)."""
+        a = args or {}
+        return _analysis.polarization(device=a.get("device", "fefet"), va=a.get("va"),
+                                      v_amp=a.get("v_amp", 3.0))
+
+    # --- embedded agent (real Claude, READ-ONLY on the web path) -------------
+    _agent = None
+
+    def _get_agent(self):
+        """Lazily build the desktop ClaudeAgent (same CLI backend). None if the
+        agent module / CLI isn't available (UI then keeps its canned demo)."""
+        if Bridge._agent is None:
+            try:
+                from vatester.agent import ClaudeAgent
+                a = ClaudeAgent(engine.repo_root())
+                # only usable if a real backend was found
+                Bridge._agent = a if (getattr(a, "cli", None) or getattr(a, "sdk_ok", False)) else False
+            except Exception:
+                Bridge._agent = False
+        return Bridge._agent or None
+
+    def agent_chat(self, args=None):
+        """One real agent turn. READ-ONLY (Read/Grep/Glob only — no Edit/Write/
+        Bash, no bypassPermissions) so the localhost web agent can explain the
+        .va/sources without the file-edit/shell RCE surface. Contract:
+        {ok, text, backend} or {ok:False} to let the UI fall back to its demo."""
+        a = args or {}
+        agent = self._get_agent()
+        if agent is None:
+            return {"ok": False, "text": "", "backend": None}
+        try:
+            r = agent.send(str(a.get("message", "")), context=str(a.get("context", "")),
+                           allow_edits=False, allow_bash=False, timeout=180)
+            return {"ok": bool(r.get("ok")), "text": r.get("text", "") or r.get("error", ""),
+                    "backend": agent.backend_label()}
+        except Exception as e:
+            return {"ok": False, "text": str(e), "backend": None}
+
     # --- health -----------------------------------------------------------
     def health(self, args=None):
         try:
@@ -132,4 +179,5 @@ class Bridge:
         return {"ok": True, "openvaf": has_openvaf,
                 "engine": "ecfet" if engine.available() else "twin",
                 "neuro": trainer.available(),
+                "agent": self._get_agent() is not None,
                 "workspace": engine.repo_root() if engine.available() else None}

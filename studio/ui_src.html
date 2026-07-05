@@ -760,7 +760,7 @@
           <sc-if value="{{ isStdpView }}" hint-placeholder-val="{{ false }}">
             <div style="flex:1; min-height:300px; background:var(--surf); border:1px solid var(--border); border-radius:12px; padding:10px 12px; display:flex; flex-direction:column;">
               <div style="flex:none; display:flex; align-items:center; gap:14px; margin-bottom:6px; flex-wrap:wrap;">
-                <span style="color:var(--text2); font-size:12px;">Reference STDP window (analytic 3-exp: 22 ms / 315 ms / 19 s) — dt &gt; 0 potentiates, dt &lt; 0 depresses. To measure a device's own window, use the Design ▸ STDP-pair generator and Run.</span>
+                <span style="color:var(--text2); font-size:12px;">{{ stdpCaption2 }}</span>
                 <button onclick="{{ onPlotStdp }}" style="display:flex; align-items:center; gap:6px; background:var(--acc); color:#fff; border:none; border-radius:8px; padding:5px 13px; font-size:11.5px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="filter:brightness(1.1);">▸ Plot STDP</button>
                 <span style="margin-left:auto; display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--text2);">dt range
                   <input type="range" min="100" max="1800" step="50" value="{{ stdpRange }}" onchange="{{ onStdpRange }}" oninput="{{ onStdpRange }}" style="width:120px;">
@@ -773,7 +773,7 @@
           <sc-if value="{{ isPolar }}" hint-placeholder-val="{{ false }}">
             <div style="flex:1; min-height:300px; background:var(--surf); border:1px solid var(--border); border-radius:12px; padding:10px 12px; display:flex; flex-direction:column;">
               <div style="flex:none; display:flex; align-items:center; gap:12px; margin-bottom:4px;">
-                <span style="color:var(--text2); font-size:12px;">Reference polarization hysteresis (analytic tanh P–V loop) — remanent polarization sets the retained state; ±V_c is the write/erase threshold. To measure the device's own loop, drive the FeFET with a voltage sweep and Run.</span>
+                <span style="color:var(--text2); font-size:12px;">{{ polarCaption }}</span>
                 <button onclick="{{ onPlotHyst }}" style="margin-left:auto; flex:none; display:flex; align-items:center; gap:6px; background:var(--acc); color:#fff; border:none; border-radius:8px; padding:5px 13px; font-size:11.5px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="filter:brightness(1.1);">▸ Plot hysteresis</button>
               </div>
               <div style="flex:1; min-height:0;">{{ polarPlot }}</div>
@@ -1230,6 +1230,7 @@ class Component extends DCLogic {
     simReal: null, simKey: null, backendMode: "twin",   // simReal: last real backend run; falls back to twin when null
     sweepData: null,                                     // backend-computed parametric sweep (device-correct)
     probeData: null,                                     // backend LIF probe (vatester.neuro) result
+    stdpData: null, polarData: null,                     // device-measured STDP window / FeFET P-V loop
     armedProbe: null,
     menu: null,
     virt: { connected: false, busy: false, libs: [], expanded: null },
@@ -1239,7 +1240,7 @@ class Component extends DCLogic {
     agentAuto: true, liveReplot: true, provider: "anthropic", modelIdx: 0,
     devSel: { v2: true, v3: false, fefet: false },
     nt: { running: false, epoch: 0, acc: [], test: [], seed: 1, rfView: "crossbar", epochsTarget: 30, sel: null, hist: [], tab: "network" },
-    messages: [{ who: "agent", text: "Hi! This is the offline demo assistant (web mode) \u2014 I explain the .va sources, \u03ba_v, and the STDP window, and can pin parameters. The full agent that edits files and re-runs the sim lives in the desktop app. Try a chip below \u2193" }],
+    messages: [{ who: "agent", text: "Hi! I'm the NeuroVAT assistant \u2014 connected to the real Claude backend, I read the actual .va / ecfet sources to answer questions about the device models, parameters, and the STDP window, and I can pin parameters into Essentials. (Read-only on the web: no file edits or shell.) Try a chip below \u2193" }],
   };
 
   constructor(props) {
@@ -1248,25 +1249,62 @@ class Component extends DCLogic {
     this.fileRef = React.createRef();
   }
 
-  componentDidMount() { this._applyChrome(); this._keyH = e => this._onProbeKey(e); window.addEventListener("keydown", this._keyH); this._maybeAutoPreview(); }
-  componentDidUpdate() { this._applyChrome(); this._maybeAutoPreview(); this._maybeSweep(); this._maybeProbe(); }
+  componentDidMount() {
+    this._applyChrome(); this._keyH = e => this._onProbeKey(e); window.addEventListener("keydown", this._keyH);
+    // Load the REAL device .va (full ~27-param source) into the editor so every
+    // parameter is surfaced by default, not the synthetic 11-param stub.
+    if (this._beAvailable()) this._openEditorFile("ecfet_v2.va");
+    this._maybeAutoPreview();
+  }
+  componentDidUpdate() { this._applyChrome(); this._maybeAutoPreview(); this._maybeSweep(); this._maybeProbe(); this._maybeAnalysis(); }
+  // Device-measured STDP window (all devices) and P-V hysteresis (FeFET only),
+  // fetched from the backend when the matching Results view is open. Real device
+  // twin measurement (vatester.analysis), not analytic placeholders.
+  _maybeAnalysis() {
+    if (!this._beAvailable() || this.state.ws !== "results") return;
+    const rv = this.state.resView, dev = this.state.device, va = this._vaCode();
+    if (rv === "stdp") {
+      const key = JSON.stringify(["stdp", dev, va, this.state.stdpRange]);
+      if ((this.state.stdpData && this.state.stdpData.key === key) || this._stdpPendingKey === key) return;
+      this._stdpPendingKey = key;
+      clearTimeout(this._stdpTimer);
+      this._stdpTimer = setTimeout(() => this._runAnalysis("stdp_window", key, { device: dev, va, dt_max_ms: this.state.stdpRange }, "stdpData"), 180);
+    } else if (rv === "polar" && dev === "fefet") {
+      const key = JSON.stringify(["polar", dev, va]);
+      if ((this.state.polarData && this.state.polarData.key === key) || this._polarPendingKey === key) return;
+      this._polarPendingKey = key;
+      clearTimeout(this._polarTimer);
+      this._polarTimer = setTimeout(() => this._runAnalysis("polarization", key, { device: dev, va }, "polarData"), 180);
+    }
+  }
+  async _runAnalysis(name, key, args, slot) {
+    let data;
+    try { data = await this._beRaw(name, args); } catch (e) { return; }
+    if (!data) return;
+    data.key = key;
+    const patch = {}; patch[slot] = data;
+    if (this.state.backendMode !== "live") patch.backendMode = "live";
+    this.setState(patch);
+  }
   // Live LIF probe via the backend probe_lif endpoint (real vatester.neuro
   // probe_lif_wave + fi_curve). Only fires on the Neuron tab; falls back to the
   // in-page JS _lifSim when offline.
   _maybeProbe() {
     if (!this._beAvailable() || this.state.nt.tab !== "neuron") return;
-    const p = this.state.probe;
-    const key = JSON.stringify([p.iInj, p.mode, this.state.device]);
+    const p = this.state.probe, c = this.state.trainCfg;
+    const key = JSON.stringify([p.iInj, p.mode, this.state.device, c.tauM, c.vth, c.theta, c.epsp]);
     if ((this.state.probeData && this.state.probeData.key === key) || this._probePendingKey === key) return;
     this._probePendingKey = key;
     clearTimeout(this._probeTimer);
     this._probeTimer = setTimeout(() => this._runProbe(key), 150);
   }
   async _runProbe(key) {
-    const p = this.state.probe;
+    const p = this.state.probe, cfg = this.state.trainCfg;
     let data;
     try {
-      data = await this._beRaw("probe_lif", { iInj: p.iInj, mode: p.mode, tau_m: 20, vth: 1.0, theta: 0.06 });
+      // full LIF params come from the NEURON — LIF + PSP fields in the left panel
+      data = await this._beRaw("probe_lif", { iInj: p.iInj, mode: p.mode,
+        tau_m: cfg.tauM, vth: cfg.vth, refrac: cfg.refrac || 5, theta: cfg.theta, epsp: cfg.epsp });
     } catch (e) { return; }
     if (!data || !data.t) return;
     data.key = key;
@@ -1766,41 +1804,46 @@ class Component extends DCLogic {
     const el = this.chatRef.current; if (el) el.value = "";
     this.setState(s => ({ messages: [...s.messages, { who: "you", text: txt, atts }], agentOpen: true, chatAttach: [] }));
     clearTimeout(this._sayT);
-    this._sayT = setTimeout(() => {
-      const lower = txt.toLowerCase();
+    this._sayT = setTimeout(() => this._respond(txt), 120);
+  }
+  _respond(txt) {
+    const lower = txt.toLowerCase();
+    // param-management commands stay LOCAL (they act on the UI): "pin A_stdp", "drop nu_d"
+    const pm = lower.match(/(pin|promote|essential|add)\s+([a-z_]\w*)|(drop|remove|unpin|hide)\s+([a-z_]\w*)|([a-z_]\w*)\s+essential/);
+    if (pm) {
+      const names = this._parseVa(this._vaCode()).map(p => p.name);
+      const wanted = (pm[2] || pm[5] || "").toLowerCase(), unwanted = (pm[4] || "").toLowerCase();
+      const hit = n => names.find(x => x.toLowerCase() === n) || names.find(x => x.toLowerCase().includes(n));
       let m;
-      // param-management commands: "make tau_stdp essential", "pin A_stdp", "drop nu_d"
-      const pm = lower.match(/(pin|promote|essential|add)\s+([a-z_]\w*)|(drop|remove|unpin|hide)\s+([a-z_]\w*)|([a-z_]\w*)\s+essential/);
-      if (pm) {
-        const params = this._parseVa(this._vaCode());
-        const names = params.map(p => p.name);
-        const wanted = (pm[2] || pm[5] || "").toLowerCase();
-        const unwanted = (pm[4] || "").toLowerCase();
-        const hit = n => names.find(x => x.toLowerCase() === n) || names.find(x => x.toLowerCase().includes(n));
-        if (unwanted) {
-          const t = hit(unwanted);
-          if (t) { this._pinParam(t, false); m = { who: "agent", text: "Done \u2014 removed " + t + " from Essentials. It's still in All parameters." }; }
-          else m = { who: "agent", text: "I don't see a parameter matching \u201c" + unwanted + "\u201d in the current .va." };
-        } else if (wanted) {
-          const t = hit(wanted);
-          if (t) { this._pinParam(t, true); m = { who: "agent", text: "Pinned " + t + " to Essentials \u2014 it's now a live slider in the left rail." }; }
-          else m = { who: "agent", text: "I don't see a parameter matching \u201c" + wanted + "\u201d. Parsed params: " + names.slice(0, 10).join(", ") + (names.length > 10 ? "\u2026" : "") + "." };
-        }
-        if (m) { this.setState(s => ({ messages: [...s.messages, m] })); return; }
-      }
-      if (lower.includes(".va") || lower.includes("file") || lower.includes("source") || lower.includes("verilog")) {
-        m = { who: "agent", text: "ecfet_v2.va is the charge-controlled ECRAM twin. Each gate pulse delivers a charge Q; the conductance step is dG_unit \u00d7 (Q/Q_ref) shrunk by a soft-bound window exp(\u2212\u03bd\u00b7x). A fraction kappa_v of every write goes into three volatile pools (\u03c4 22 ms / 315 ms / 19 s) and relaxes back \u2014 that's the write-then-relax transient. Ask me to change any parameter and I'll patch the module and rebuild the twin." };
-      } else if (lower.includes("poisson")) {
-        m = { who: "agent", text: "Here's a rate-coded probe: Poisson spikes at 40 Hz for 1.5 s, \u221280 pA \u00d7 2 ms \u2014 gentle enough not to saturate G. Load it and the plots follow as you tweak.", card: true };
-      } else if (lower.includes("kappa") || lower.includes("\u03ba") || lower.includes("volat")) {
-        m = { who: "agent", text: "kappa_v is the volatile fraction: of every written \u0394G, 68% relaxes back through three diffusion pools (\u03c4 = 22 ms / 315 ms / 19 s) and only 32% is retained. Raise it \u2192 more short-term facilitation, weaker retention. Drag Volatility \u03ba in the left rail and watch G(t) overshoot then settle." };
-      } else if (lower.includes("stdp")) {
-        m = { who: "agent", text: "The STDP window peaks at A_stdp as \u0394t\u21920 and decays with the same 3 exponentials as the volatile pools \u2014 potentiation for \u0394t>0, depression for \u0394t<0. Open Results \u2192 STDP window and drag the dt-range slider to rescale it live." };
-      } else {
-        m = { who: "agent", text: "(demo) In the app I'd act on that \u2014 generate patterns, retune parameters, or patch the .va and re-run to verify. Try \u201cdesign a Poisson probe\u201d or \u201cexplain kappa_v\u201d." };
-      }
-      this.setState(s => ({ messages: [...s.messages, m] }));
-    }, 620);
+      if (unwanted) { const t = hit(unwanted); if (t) { this._pinParam(t, false); m = { who: "agent", text: "Done \u2014 removed " + t + " from Essentials." }; } else m = { who: "agent", text: "No parameter matching \u201c" + unwanted + "\u201d." }; }
+      else if (wanted) { const t = hit(wanted); if (t) { this._pinParam(t, true); m = { who: "agent", text: "Pinned " + t + " to Essentials \u2014 it's now a live slider." }; } else m = { who: "agent", text: "No parameter matching \u201c" + wanted + "\u201d. Parsed: " + names.slice(0, 10).join(", ") + "." }; }
+      if (m) { this.setState(s => ({ messages: [...s.messages, m] })); return; }
+    }
+    // real Claude agent (READ-ONLY backend) when available; canned demo otherwise
+    if (this._beAvailable()) { this._agentReply(txt); return; }
+    this.setState(s => ({ messages: [...s.messages, { who: "agent", text: this._cannedReply(lower) }] }));
+  }
+  async _agentReply(txt) {
+    this.setState(s => ({ messages: [...s.messages, { who: "agent", text: "\u2026", pending: true }] }));
+    const ctx = "Selected device: " + this.state.device + "\nEditor .va buffer:\n" + this._vaCode().slice(0, 6000);
+    let data;
+    try { data = await this._beRaw("agent_chat", { message: txt, context: ctx }); } catch (e) { data = null; }
+    const ok = data && data.ok && data.text;
+    const reply = ok ? data.text : this._cannedReply(txt.toLowerCase());
+    if (ok && this.state.backendMode !== "live") this.setState({ backendMode: "live" });
+    this.setState(s => {
+      const msgs = s.messages.slice();
+      for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].pending) { msgs[i] = { who: "agent", text: reply }; break; } }
+      return { messages: msgs };
+    });
+  }
+  _cannedReply(lower) {
+    if (lower.includes(".va") || lower.includes("file") || lower.includes("source") || lower.includes("verilog"))
+      return "ecfet_v2.va is the charge-controlled ECRAM twin. Each gate pulse delivers a charge Q; the conductance step is dG_unit \u00d7 (Q/Q_ref) shrunk by a soft-bound window exp(\u2212\u03bd\u00b7x). A fraction kappa_v of every write goes into three volatile pools (\u03c4 22 ms / 315 ms / 19 s) and relaxes back.";
+    if (lower.includes("poisson")) return "A rate-coded probe: Poisson spikes at 40 Hz for 1.5 s, \u221280 pA \u00d7 2 ms \u2014 gentle enough not to saturate G.";
+    if (lower.includes("kappa") || lower.includes("\u03ba") || lower.includes("volat")) return "kappa_v is the volatile fraction: of every written \u0394G, 68% relaxes back through three pools (\u03c4 = 22 ms / 315 ms / 19 s) and only 32% is retained.";
+    if (lower.includes("stdp")) return "The STDP window peaks at A_stdp as \u0394t\u21920 and decays with the volatile pools' 3 exponentials \u2014 potentiation \u0394t>0, depression \u0394t<0. Open Results \u2192 STDP window.";
+    return "(offline demo) Start the server for the real agent. Try \u201cexplain kappa_v\u201d or \u201cpin A_stdp\u201d.";
   }
 
   // ---------------- trainer: 5x5 bar-orientation classifier ----------------
@@ -2130,7 +2173,7 @@ class Component extends DCLogic {
     const lo = flat.length ? Math.min(...flat) : 0, hi = flat.length ? Math.max(...flat) : 1;
     const wnorm = flat.map(g => hi > lo ? (g - lo) / (hi - lo) : 0.5);
     if (this.state.backendMode !== "live") this.setState({ backendMode: "live" });
-    this.setState(s => ({ nt: { ...s.nt, running: false, epoch: acc.length ? acc[acc.length - 1][0] : 0, acc, weights: wnorm.length ? wnorm : s.nt.weights, weightsUS: data.weights_uS, testBatch: acc.length ? acc[acc.length - 1][2] : null, hist: wnorm.length ? [wnorm] : s.nt.hist, built: true }, status: { text: "ready", kind: "ok" } }));
+    this.setState(s => ({ nt: { ...s.nt, running: false, epoch: acc.length ? acc[acc.length - 1][0] : 0, acc, weights: wnorm.length ? wnorm : s.nt.weights, weightsUS: data.weights_uS, weightsHist: data.weights_hist || null, testBatch: acc.length ? acc[acc.length - 1][2] : null, hist: wnorm.length ? [wnorm] : s.nt.hist, built: true }, status: { text: "ready", kind: "ok" } }));
     this._log("[trainer] neuro done \u2014 train " + (data.final_train_acc || 0) + "% (" + (data.rule || "stdp") + ", real crossbar of " + this.state.device + " devices)", "ok");
   }
   _startTrainDemo() {
@@ -2715,7 +2758,11 @@ class Component extends DCLogic {
       { label: "G FINAL", value: sim.Gfinal.toFixed(0) + " \u00b5S", color: "var(--acc)", sub: "retained conductance" },
       { label: "RANGE", value: (gHi - gLo).toFixed(0) + " \u00b5S", color: "var(--text)", sub: gLo.toFixed(0) + "\u2013" + gHi.toFixed(0) + " \u00b5S" },
     ];
-    const rvDefs = [["transient", "Transient"], ["synaptic", "Synaptic curve"], ["stdp", "STDP window"], ["polar", "Hysteresis"]];
+    // Hysteresis (polarization) is a FeFET-only analysis — ECFET has no P-V loop.
+    const rvDefs = [["transient", "Transient"], ["synaptic", "Synaptic curve"], ["stdp", "STDP window"]]
+      .concat(st.device === "fefet" ? [["polar", "Hysteresis"]] : []);
+    // if the user was on Hysteresis and switched away from FeFET, fall back
+    if (st.resView === "polar" && st.device !== "fefet") { Promise.resolve().then(() => this.setState({ resView: "transient" })); }
     const resViews = rvDefs.map(([key, label]) => ({
       label, bg: st.resView === key ? "var(--surf3)" : "transparent", fg: st.resView === key ? "var(--text)" : "var(--text2)",
       select: () => this.setState({ resView: key }),
@@ -2769,14 +2816,29 @@ class Component extends DCLogic {
       stdpPts.push([dt, dt > 0 ? mag : -mag]);
     }
     const stdpMk = (Amp) => { const p = []; for (let i = -70; i <= 70; i++) { if (!i) continue; const dt = Math.sign(i) * Math.pow(10, 1 + (Math.abs(i) / 70) * (Math.log10(stdpRange) - 1)); const mag = Amp * (cs[0] * Math.exp(-Math.abs(dt) / taus[0]) + cs[1] * Math.exp(-Math.abs(dt) / taus[1]) + cs[2] * Math.exp(-Math.abs(dt) / taus[2])); p.push([dt, dt > 0 ? mag : -mag]); } return p; };
+    // real device-measured STDP window (backend) when available, else analytic placeholder
+    const stdpReal = (st.stdpData && st.stdpData.points && st.stdpData.points.length) ? st.stdpData : null;
+    const stdpCaption2 = stdpReal
+      ? "Measured STDP window \u2014 the " + st.device + " device twin run at each \u0394t (pre/post pair, correlation-isolated). \u0394t > 0 potentiates, \u0394t < 0 depresses."
+      : "STDP window (measuring from the device\u2026 or analytic reference offline). \u0394t > 0 potentiates, \u0394t < 0 depresses.";
+    const stdpYlab = stdpReal ? (stdpReal.label + " " + stdpReal.unit) : "\u0394G \u00b5S";
+    const stdpMeasuredPts = stdpReal ? stdpReal.points : stdpPts;
+    const stdpCaption = stdpReal ? "measured (" + st.device + " device)" : "\u0394G";
     const stdpPlot = sweepOn
       ? this._plot({ id: "stdp", dots: true, series: Array.from({ length: sweepSteps }, (_, i) => { const Amp = 1.5 + (7.5 - 1.5) * (sweepSteps === 1 ? 0 : i / (sweepSteps - 1)); return { pts: stdpMk(Amp), color: sweepColor(i), label: "A " + Amp.toFixed(1) }; }), xlab: "\u0394t ms", ylab: "\u0394G \u00b5S", xunit: "ms", yunit: "\u00b5S" })
-      : this._plot({ id: "stdp", dots: true, onPoint: n => { this._log("[stdp] \u0394t " + (+n.x).toFixed(1) + " ms \u2192 \u0394G " + (+n.y).toFixed(2) + " \u00b5S \u2014 opening source transient", "ok"); this.setState({ resView: "transient" }); }, series: [{ pts: stdpPts, color: "var(--acc)", label: "\u0394G" }], xlab: "\u0394t ms", ylab: "\u0394G \u00b5S", xunit: "ms", yunit: "\u00b5S" });
-    // polarization / conductance hysteresis loop (ferroelectric gate sweep)
+      : this._plot({ id: "stdp", dots: true, onPoint: n => { this._log("[stdp] \u0394t " + (+n.x).toFixed(1) + " ms \u2192 " + (+n.y).toFixed(3) + " " + (stdpReal ? stdpReal.unit : "\u00b5S") + " \u2014 opening source transient", "ok"); this.setState({ resView: "transient" }); }, series: [{ pts: stdpMeasuredPts, color: "var(--acc)", label: stdpCaption }], xlab: "\u0394t ms", ylab: stdpYlab, xunit: "ms", yunit: stdpReal ? stdpReal.unit : "\u00b5S" });
+    // FeFET P-V hysteresis loop \u2014 real device measurement (backend) else analytic
     const polUp = [], polDn = [], Ps = 22, Vc = 1.1, kk = 0.62, Vm = 3;
     for (let v = -Vm; v <= Vm + 1e-9; v += 0.08) polUp.push([v, Ps * Math.tanh((v - Vc) / kk)]);
     for (let v = Vm; v >= -Vm - 1e-9; v -= 0.08) polDn.push([v, Ps * Math.tanh((v + Vc) / kk)]);
-    const polarPlot = this._plot({ id: "polar", dots: true, onPoint: n => { this._log("[hysteresis] V " + (+n.x).toFixed(2) + " \u2192 P " + (+n.y).toFixed(1) + " \u00b5C/cm\u00b2 \u2014 opening source transient", "ok"); this.setState({ resView: "transient" }); }, series: [{ pts: polUp, color: "var(--acc)", label: "V \u2191 (write)" }, { pts: polDn, color: "var(--amber)", label: "V \u2193 (erase)" }], xlab: "gate V", ylab: "P \u00b5C/cm\u00b2", xunit: "V", yunit: "\u00b5C/cm\u00b2" });
+    const polarReal = (st.polarData && st.polarData.available && st.polarData.points && st.polarData.points.length) ? st.polarData : null;
+    const polarSeries = polarReal
+      ? [{ pts: polarReal.points, color: "var(--acc)", label: "P\u2013V (measured \u00b7 " + st.device + ")" }]
+      : [{ pts: polUp, color: "var(--acc)", label: "V \u2191 (write)" }, { pts: polDn, color: "var(--amber)", label: "V \u2193 (erase)" }];
+    const polarCaption = polarReal
+      ? "Measured P\u2013V hysteresis \u2014 the FeFET twin driven by a triangular gate-voltage sweep, polarization read from the model. Remanent P sets the retained state; \u00b1V_c is the write/erase threshold."
+      : "P\u2013V hysteresis (measuring from the FeFET\u2026 or analytic reference offline). Remanent P sets the retained state; \u00b1V_c is the write/erase threshold.";
+    const polarPlot = this._plot({ id: "polar", dots: true, onPoint: n => { this._log("[hysteresis] V " + (+n.x).toFixed(2) + " \u2192 P " + (+n.y).toFixed(2) + " \u2014 opening source transient", "ok"); this.setState({ resView: "transient" }); }, series: polarSeries, xlab: "gate V", ylab: polarReal ? ("P " + polarReal.unit) : "P \u00b5C/cm\u00b2", xunit: "V", yunit: polarReal ? polarReal.unit : "\u00b5C/cm\u00b2" });
 
     // ----- train workspace -----
     const target = Math.max(5, Math.min(80, parseInt(st.nt.epochsTarget, 10) || 30));
@@ -2878,11 +2940,22 @@ class Component extends DCLogic {
       ] },
     ];
 
-    // ----- all-synapse weight transients (records G of every synapse per epoch) -----
+    // ----- all-synapse weight transients (real per-epoch device G from the backend
+    // when trained live; else the JS-demo per-epoch snapshots) -----
+    const wHistReal = st.nt.weightsHist;       // [epoch][synapse] in real µS (backend)
     const wHist = st.nt.hist || [];
     const wtProtos = this._protos();
     const wtSeries = [];
-    if (wHist.length) {
+    if (wHistReal && wHistReal.length) {
+      const nSyn = wHistReal[0].length;
+      // colour each synapse by its final level (potentiated vs depressed)
+      const last = wHistReal[wHistReal.length - 1];
+      let lo = Infinity, hi = -Infinity; for (const g of last) { if (g < lo) lo = g; if (g > hi) hi = g; }
+      const mid = (lo + hi) / 2;
+      for (let idx = 0; idx < nSyn; idx++) {
+        wtSeries.push({ pts: wHistReal.map((wv, i) => [i + 1, wv[idx]]), color: last[idx] >= mid ? "rgba(76,214,160,0.42)" : "rgba(140,150,178,0.20)", label: "" });
+      }
+    } else if (wHist.length) {
       for (let nn = 0; nn < 4; nn++) for (let kk = 0; kk < 25; kk++) {
         const idx = nn * 25 + kk;
         wtSeries.push({ pts: wHist.map((wv, i) => [i + 1, this._gOf(wv[idx])]), color: wtProtos[nn][kk] ? "rgba(76,214,160,0.42)" : "rgba(140,150,178,0.20)", label: "" });
@@ -3002,7 +3075,7 @@ class Component extends DCLogic {
     const iInj = st.probe.iInj, probeMode = st.probe.mode;
     // prefer the real backend LIF probe (vatester.neuro) when its result matches
     // the current controls; else the in-page JS LIF (offline / pre-reply).
-    const _pk = JSON.stringify([iInj, probeMode, st.device]);
+    const _pk = JSON.stringify([iInj, probeMode, st.device, st.trainCfg.tauM, st.trainCfg.vth, st.trainCfg.theta, st.trainCfg.epsp]);
     const _pd = (st.probeData && st.probeData.key === _pk) ? st.probeData : null;
     const lif = _pd
       ? { trace: _pd.t.map((tt, i) => [tt, _pd.V[i]]), spikes: _pd.spikes, T: _pd.t[_pd.t.length - 1] || 240, vth: probeVth, rate: _pd.rate_hz }
@@ -3011,7 +3084,7 @@ class Component extends DCLogic {
       ? _pd.fI.drive.map((d, i) => [d, _pd.fI.rate[i]])
       : this._fiCurve(probeTau, probeVth);
     const onProbeI = ev => this.setState(s => ({ probe: { ...s.probe, iInj: parseFloat(ev.target.value) } }));
-    const probeModes = [["step", "Step"], ["pulse", "Pulse"], ["ramp", "Ramp"]].map(([key, label]) => ({
+    const probeModes = [["step", "Step"], ["pulse", "Pulse"], ["ramp", "Ramp"], ["epsp", "EPSP train"]].map(([key, label]) => ({
       label, bg: probeMode === key ? "var(--surf3)" : "transparent", fg: probeMode === key ? "var(--text)" : "var(--text2)",
       select: () => this.setState(s => ({ probe: { ...s.probe, mode: key } })),
     }));
@@ -3167,7 +3240,7 @@ class Component extends DCLogic {
       virtLabel: st.virt.connected ? "connected" : "offline",
       editorFile: st.editorFile, onEditorFile: ev => this._openEditorFile(ev.target.value),
       previewCaption: st.backendMode === "live" ? st.device + " engine \u00b7 live preview, updates on change" : "instant twin preview \u00b7 full run on Run",
-      statCards, resViews, isTransient, isSynaptic, isStdpView, isPolar, resStimPlot, resGPlot, resRPlot, anaPlot, anaObsBtns, anaObsName: anaObs === "R" ? "resistance" : "conductance", stdpRange, onStdpRange, stdpPlot, polarPlot,
+      statCards, resViews, isTransient, isSynaptic, isStdpView, isPolar, resStimPlot, resGPlot, resRPlot, anaPlot, anaObsBtns, anaObsName: anaObs === "R" ? "resistance" : "conductance", stdpRange, onStdpRange, stdpPlot, polarPlot, stdpCaption2, polarCaption,
       sweepOn, sweepParam, sweepOptions, onSweepParam, onSweepSteps, sweepSteps, sweepBadge,
       onTrain, onBuild, onTest, trainBtnBg, trainBtnLabel, trainStatus, trainCards, accPlot, rfViews, rfContent, protoGlyphs, currentSample, trainConfig,
       trainTopo: st.device + " · " + (Math.round(st.trainCfg.gridR) || 5) + "×" + (Math.round(st.trainCfg.gridC) || 5) + "→" + this._nOut(),
