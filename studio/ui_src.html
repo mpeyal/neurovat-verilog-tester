@@ -1241,7 +1241,7 @@ class Component extends DCLogic {
       outputs: 4, hidden: 0, seed: 1, vth: 1.0, epsp: 11.0, wta: 0.9, theta: 0.06, teacher: 1.4, split: 0.25, potAmp: 50, depAmp: 50, pulseW: 10, tauPre: 20, tauM: 20, gridR: 5, gridC: 5, presentMs: 120 },
     agentAuto: true, liveReplot: true, provider: "anthropic", modelIdx: 0,
     devSel: { v2: true, v3: false, fefet: false },
-    nt: { running: false, epoch: 0, acc: [], test: [], seed: 1, rfView: "crossbar", epochsTarget: 30, sel: null, hist: [], tab: "network" },
+    nt: { running: false, epoch: 0, acc: [], test: [], seed: 1, rfView: "crossbar", epochsTarget: 30, sel: null, hist: [], tab: "network", builtCfg: null },
     messages: [{ who: "agent", text: "Hi! I'm the NeuroVAT assistant \u2014 connected to the real Claude backend, I read the actual .va / ecfet sources to answer questions about the device models, parameters, and the STDP window, and I can pin parameters into Essentials. (Read-only on the web: no file edits or shell.) Try a chip below \u2193" }],
   };
 
@@ -1826,13 +1826,13 @@ class Component extends DCLogic {
       ylab ? e("div", { style: { position: "absolute", top: "5px", left: "6px", fontSize: "9.5px", color: axisC, fontFamily: "'IBM Plex Mono',monospace", pointerEvents: "none" } }, ylab) : null);
   }
 
-  _weightsHeatmap(weights) {
-    const e = React.createElement;
+  _weightsHeatmap(weights, dims) {
+    const e = React.createElement; const d = dims || this._dims(); const nIn = d.nIn, nOut = d.nOut;
     return e("div", { style: { width: "100%", maxWidth: "520px", display: "flex", flexDirection: "column", gap: "7px" } },
-      e("div", { style: { display: "grid", gridTemplateColumns: "repeat(25,1fr)", gridAutoRows: "1fr", gap: "2px", aspectRatio: "25 / 4" } },
-        weights.map((w, i) => e("div", { key: i, title: (100 + Math.round(Math.max(0, Math.min(1, w)) * 1050)) + " \u00b5S", style: { borderRadius: "2px", background: "color-mix(in srgb, var(--acc) " + (Math.max(0, Math.min(1, w)) * 100).toFixed(0) + "%, var(--surf3))" } }))),
+      e("div", { style: { display: "grid", gridTemplateColumns: "repeat(" + nIn + ",1fr)", gridAutoRows: "1fr", gap: nIn > 40 ? "1px" : "2px", aspectRatio: nIn + " / " + nOut } },
+        weights.slice(0, nIn * nOut).map((w, i) => e("div", { key: i, title: (100 + Math.round(Math.max(0, Math.min(1, w)) * 1050)) + " \u00b5S", style: { borderRadius: "1px", background: "color-mix(in srgb, var(--acc) " + (Math.max(0, Math.min(1, w)) * 100).toFixed(0) + "%, var(--surf3))" } }))),
       e("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "10px", fontFamily: "'IBM Plex Mono',monospace", color: "var(--muted)" } },
-        e("span", null, "G_min 100 \u00b5S"), e("span", null, "25 afferents \u00d7 4 outputs"), e("span", null, "G_max 1150 \u00b5S")));
+        e("span", null, "G_min 100 \u00b5S"), e("span", null, nIn + " afferents \u00d7 " + nOut + " outputs"), e("span", null, "G_max 1150 \u00b5S")));
   }
 
   // ---------------- agent ----------------
@@ -1939,10 +1939,23 @@ class Component extends DCLogic {
     return P;
   }
   _nOut() { return Math.max(2, Math.min(6, Math.round(this.state.trainCfg.outputs) || 4)); }
-  _initWeights() {
-    let s = 12345; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
-    return Array.from({ length: 100 }, () => 0.06 + rnd() * 0.08);
+  // The topology the network is built/trained with — grid (afferents), outputs,
+  // hidden. Clamps mirror the backend (grid 3..12, outputs 2..6, hidden 0..16) so
+  // the crossbar view and the real neuro net agree. A loaded dataset has already
+  // written its resolution into gridR/gridC and class count into outputs.
+  _builtDims() {
+    const c = this.state.trainCfg || {};
+    const gridH = Math.max(3, Math.min(12, Math.round(c.gridR) || 5));
+    const gridW = Math.max(3, Math.min(12, Math.round(c.gridC) || 5));
+    const hidden = Math.max(0, Math.min(16, Math.round(c.hidden) || 0));
+    return { gridH, gridW, nIn: gridH * gridW, nOut: this._nOut(), hidden };
   }
+  _dims() { return this.state.nt.builtCfg || this._builtDims(); }
+  _initWeightsN(n) {
+    let s = 12345; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+    return Array.from({ length: Math.max(1, n | 0) }, () => 0.06 + rnd() * 0.08);
+  }
+  _initWeights() { const d = this._dims(); return this._initWeightsN(d.nIn * d.nOut); }
   _makeSample(n, seed) {
     let s = seed % 2147483647 || 1; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
     const pn = Math.max(0, Math.min(0.5, this.state.trainCfg.noise));   // pixel-flip noise (Encoding ▸ noise)
@@ -2014,10 +2027,11 @@ class Component extends DCLogic {
     setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(u); }, 800);
   }
   _saveModel() {
+    const d = this._dims();
     const w = this.state.nt.weights || this._initWeights();
-    const model = { arch: "25x4 ECFET crossbar", unit: "uS", range: [100, 1150], epoch: this.state.nt.epoch, weights: w.map(x => +this._gOf(x).toFixed(1)) };
+    const model = { arch: d.nIn + "x" + d.nOut + " ECFET crossbar", grid: [d.gridH, d.gridW], outputs: d.nOut, hidden: d.hidden, unit: "uS", range: [100, 1150], epoch: this.state.nt.epoch, weights: w.map(x => +this._gOf(x).toFixed(1)) };
     this._download("ecfet_model.json", JSON.stringify(model, null, 2), "application/json");
-    this._log("[model] saved ecfet_model.json \u2014 100 synapses @ epoch " + this.state.nt.epoch, "ok");
+    this._log("[model] saved ecfet_model.json \u2014 " + w.length + " synapses @ epoch " + this.state.nt.epoch, "ok");
   }
   _loadModel() {
     const inp = document.createElement("input");
@@ -2042,9 +2056,10 @@ class Component extends DCLogic {
   _exportCsv() {
     // export the REAL per-synapse conductances (\u00b5S) from the trained net when
     // present (weightsUS), honouring the real output count + grid.
-    const nOut = this._nOut();
-    const grid = (this.state.nt.weightsUS && this.state.nt.weightsUS[0]) ? this.state.nt.weightsUS[0].length : 25;
-    const gw = Math.round(Math.sqrt(grid)) || 5;
+    const d = this._dims();
+    const nOut = d.nOut;
+    const grid = (this.state.nt.weightsUS && this.state.nt.weightsUS[0]) ? this.state.nt.weightsUS[0].length : d.nIn;
+    const gw = d.gridW || Math.round(Math.sqrt(grid)) || 5;
     let csv = "output,input_x,input_y,G_uS,R_kohm\n";
     let rows = 0;
     for (let n = 0; n < nOut; n++) for (let k = 0; k < grid; k++) {
@@ -2304,8 +2319,9 @@ class Component extends DCLogic {
   async _startTrainReal() {
     const cfg = this.state.trainCfg;
     const target = Math.max(5, Math.min(80, parseInt(this.state.nt.epochsTarget, 10) || 30));
-    this.setState(s => ({ nt: { ...s.nt, running: true, epoch: 0, acc: [], weights: this._initWeights(), cur: null, hist: [], testBatch: null }, status: { text: "training\u2026", kind: "run" } }));
-    this._log("[trainer] neuro crossbar training \u2014 5\u00d75\u2192" + this._nOut() + " \u00b7 " + target + " epochs \u00b7 " + cfg.rule + " \u00b7 real " + this.state.device + " device array\u2026");
+    const d0 = this._builtDims();   // the topology being sent to the backend
+    this.setState(s => ({ nt: { ...s.nt, running: true, epoch: 0, acc: [], builtCfg: d0, weights: this._initWeightsN(d0.nIn * d0.nOut), weightsUS: null, conf: null, cur: null, hist: [], testBatch: null }, status: { text: "training\u2026", kind: "run" } }));
+    this._log("[trainer] neuro crossbar training \u2014 " + d0.gridH + "\u00d7" + d0.gridW + "\u2192" + d0.nOut + (d0.hidden ? " (+" + d0.hidden + " hidden)" : "") + " \u00b7 " + target + " epochs \u00b7 " + cfg.rule + " \u00b7 real " + this.state.device + " device array\u2026");
     let data;
     try {
       data = await this._beRaw("train_net", {
@@ -2329,7 +2345,11 @@ class Component extends DCLogic {
     const lo = flat.length ? Math.min(...flat) : 0, hi = flat.length ? Math.max(...flat) : 1;
     const wnorm = flat.map(g => hi > lo ? (g - lo) / (hi - lo) : 0.5);
     if (this.state.backendMode !== "live") this.setState({ backendMode: "live" });
-    this.setState(s => ({ nt: { ...s.nt, running: false, epoch: acc.length ? acc[acc.length - 1][0] : 0, acc, weights: wnorm.length ? wnorm : s.nt.weights, weightsUS: data.weights_uS, weightsHist: data.weights_hist || null, conf: data.confusion || null, dataset: data.dataset || null, testBatch: (data.confusion ? data.confusion.acc : (acc.length ? acc[acc.length - 1][2] : null)), hist: wnorm.length ? [wnorm] : s.nt.hist, built: true }, status: { text: "ready", kind: "ok" } }));
+    // authoritative topology the backend actually trained (grid may be clamped or
+    // overridden by a loaded dataset) — keep the views in sync with the weights.
+    const g = data.grid || [d0.gridH, d0.gridW];
+    const builtCfg = { gridH: g[0], gridW: g[1], nIn: g[0] * g[1], nOut: data.n_out || d0.nOut, hidden: d0.hidden };
+    this.setState(s => ({ nt: { ...s.nt, running: false, epoch: acc.length ? acc[acc.length - 1][0] : 0, acc, builtCfg, weights: wnorm.length ? wnorm : s.nt.weights, weightsUS: data.weights_uS, weightsHist: data.weights_hist || null, conf: data.confusion || null, dataset: data.dataset || null, testBatch: (data.confusion ? data.confusion.acc : (acc.length ? acc[acc.length - 1][2] : null)), hist: wnorm.length ? [wnorm] : s.nt.hist, built: true }, status: { text: "ready", kind: "ok" } }));
     this._log("[trainer] neuro done \u2014 train " + (data.final_train_acc || 0) + "% (" + (data.rule || "stdp") + ", real crossbar of " + this.state.device + " devices)", "ok");
   }
   // Really download/decode a dataset via the backend and mark it active so
@@ -2378,10 +2398,14 @@ class Component extends DCLogic {
     this._log("[trainer] held-out test \u2014 " + (c ? c.acc.toFixed(1) : (data.test_acc || 0)) + "% \u00b7 macro-F1 " + (c ? c.macro_f1 : "?"), "ok");
   }
   _startTrainDemo() {
-    this.setState(s => ({ nt: { ...s.nt, running: true, epoch: 0, acc: [], weights: this._initWeights(), cur: null, hist: [] }, status: { text: "training\u2026", kind: "run" } }));
+    // Offline fallback (no backend): a fixed 5\u00d75 bar-orientation toy with up to 4
+    // built-in prototype classes. Pin the view dims to this toy so the crossbar /
+    // tiles match the 100-weight demo array regardless of the configured grid.
+    const nOut = Math.min(this._protos().length, this._nOut());
+    const demoCfg = { gridH: 5, gridW: 5, nIn: 25, nOut, hidden: 0 };
+    this.setState(s => ({ nt: { ...s.nt, running: true, epoch: 0, acc: [], builtCfg: demoCfg, weights: this._initWeightsN(25 * nOut), weightsUS: null, conf: null, cur: null, hist: [] }, status: { text: "training\u2026", kind: "run" } }));
     const cfg = this.state.trainCfg;
     const target = Math.max(5, Math.min(80, parseInt(this.state.nt.epochsTarget, 10) || 30));
-    const nOut = this._nOut();
     // Trainer knobs actually drive the run now:
     //   pot/dep amp -> potentiation/depression step sizes; LTP/LTD split -> their balance;
     //   seed -> reproducible RNG; teacher/theta -> accuracy sharpness/offset; outputs -> #classes.
@@ -2426,18 +2450,20 @@ class Component extends DCLogic {
     }, 240);
   }
 
-  _grid5(vec, active, size) {
-    const e = React.createElement; active = active || "var(--acc)"; size = size || 60;
-    return e("div", { style: { display: "grid", gridTemplateColumns: "repeat(5,1fr)", gridTemplateRows: "repeat(5,1fr)", gap: "2px", width: size + "px", height: size + "px", flex: "none" } },
+  _grid5(vec, active, size) { return this._gridN(vec, 5, 5, active, size); }
+  _gridN(vec, cols, rows, active, size) {
+    const e = React.createElement; active = active || "var(--acc)"; cols = Math.max(1, cols || 5); rows = Math.max(1, rows || 5); size = size || 60;
+    const h = size * rows / cols;
+    return e("div", { style: { display: "grid", gridTemplateColumns: "repeat(" + cols + ",1fr)", gridTemplateRows: "repeat(" + rows + ",1fr)", gap: cols > 8 ? "1px" : "2px", width: size + "px", height: h + "px", flex: "none" } },
       vec.map((v, i) => e("div", { key: i, style: { borderRadius: "2px", background: "color-mix(in srgb, " + active + " " + (Math.max(0, Math.min(1, v)) * 100).toFixed(0) + "%, var(--surf3))" } })));
   }
-  _rfTiles(weights) {
-    const e = React.createElement; const names = this._classNames();
-    return e("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", placeItems: "center", height: "100%", alignContent: "center" } },
-      names.map((nm, n) => e("div", { key: n, style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "5px" } },
-        this._grid5(weights.slice(n * 25, n * 25 + 25), "var(--acc)", 58),
+  _rfTiles(weights, dims) {
+    const e = React.createElement; const d = dims || this._dims(); const nIn = d.nIn, nOut = d.nOut; const names = this._classNames();
+    return e("div", { style: { display: "grid", gridTemplateColumns: nOut > 4 ? "1fr 1fr 1fr" : "1fr 1fr", gap: "10px", placeItems: "center", height: "100%", alignContent: "center", overflow: "auto" } },
+      Array.from({ length: nOut }, (_, n) => e("div", { key: n, style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "5px" } },
+        this._gridN(weights.slice(n * nIn, n * nIn + nIn), d.gridW, d.gridH, "var(--acc)", 58),
         e("span", { style: { fontSize: "11px", color: "var(--text2)", whiteSpace: "nowrap" } },
-          e("b", { style: { color: "var(--text)", fontWeight: 600 } }, "out " + n), " \u00b7 " + nm))));
+          e("b", { style: { color: "var(--text)", fontWeight: 600 } }, "out " + n), " \u00b7 " + (names[n] || ("class " + n))))));
   }
   // ---------------- spike encoding + rasters ----------------
   _encodeSpikes(grid, opts) {
@@ -2496,21 +2522,33 @@ class Component extends DCLogic {
   }
   _gOf(w) { return 100 + Math.max(0, Math.min(1, w)) * 1050; }
   _selectCell(n, k, weights) {
-    const g = this._gOf(weights[n * 25 + k]);
+    const nIn = this._dims().nIn;
+    const g = this._gOf(weights[n * nIn + k] || 0);
     this.setState(s => ({ nt: { ...s.nt, sel: { n, k }, rfView: "crossbar" } }));
     this._log("[inspect] synapse x" + String(k).padStart(2, "0") + " \u2192 N0" + n + " \u00b7 G " + g.toFixed(0) + " \u00b5S \u00b7 R " + (1000 / g).toFixed(2) + " k\u03a9");
   }
 
   // ---------------- crossbar array (build-network view) ----------------
-  _crossbarView(weights, cur, sel) {
+  _crossbarView(weights, cur, sel, dims) {
     const e = React.createElement;
-    const names = ["N00", "N01", "N02", "N03"];
+    const d = dims || this._dims();
+    const nIn = Math.max(1, d.nIn), nOut = Math.max(1, d.nOut);
+    const names = Array.from({ length: nOut }, (_, i) => "N" + String(i).padStart(2, "0"));
     const W = 640, H = 512;
-    const rowY = r => 82 + r * 15.3;
-    const colX = c => 188 + c * 118;
-    const inX = 96, wlEnd = 588;
+    // geometry scales to the built topology so the array always shows the real
+    // afferent count (wordlines) and output count (bitlines).
+    const TOP = 80, BOT = 452;
+    const rowStep = (BOT - TOP) / nIn;
+    const rowY = r => TOP + (r + 0.5) * rowStep;
+    const LEFT = 176, RIGHT = 560;
+    const colStep = (RIGHT - LEFT) / nOut;
+    const colX = c => LEFT + (c + 0.5) * colStep;
+    const inX = 96, wlEnd = RIGHT;
+    const hw = Math.max(4, Math.min(15, colStep * 0.42));      // device half-width
+    const hh = Math.max(1.3, Math.min(5.4, rowStep * 0.42));   // device half-height
+    const rowDetail = nIn <= 36;      // input dots + PRE hooks only when legible
+    const oy = 496;
     const kids = [];
-    // title + legend
     kids.push(e("text", { key: "t1", x: 12, y: 16, "font-size": 11, fill: "var(--text2)", "font-family": "'IBM Plex Sans',sans-serif" }, "single crossbar:  input neurons \u2192 wordlines \u2192 ARRAY (3-terminal ECFET per cross-point) \u2192 bitlines \u2192 output"));
     kids.push(e("text", { key: "t2", x: 12, y: 32, "font-size": 10.5, fill: "var(--acc)", "font-family": "'IBM Plex Sans',sans-serif", "font-weight": 600 }, "CLICK a cell to inspect the device"));
     const leg = [["exc", "var(--green)"], ["inh", "var(--red)"], ["PRE drv", "#7b5cff"], ["POST drv", "var(--amber)"], ["WTA", "var(--red)"]];
@@ -2519,54 +2557,51 @@ class Component extends DCLogic {
       kids.push(e("circle", { key: "lgc" + i, cx: lx, cy: 28, r: 4, fill: cl }));
       kids.push(e("text", { key: "lgt" + i, x: lx + 8, y: 32, "font-size": 9.5, fill: "var(--text2)", "font-family": "'IBM Plex Sans',sans-serif" }, lb));
     });
-    kids.push(e("text", { key: "hin", x: inX - 10, y: 62, "font-size": 10, fill: "var(--muted)", "font-family": "'IBM Plex Mono',monospace" }, "input"));
-    kids.push(e("text", { key: "har", x: colX(0) - 14, y: 62, "font-size": 10, fill: "var(--muted)", "font-family": "'IBM Plex Mono',monospace" }, "crossbar array  (25 wordlines \u00d7 4 bitlines)"));
-    // column gate buses (yellow) + bitlines
-    for (let c = 0; c < 4; c++) {
+    kids.push(e("text", { key: "hin", x: inX - 10, y: 66, "font-size": 10, fill: "var(--muted)", "font-family": "'IBM Plex Mono',monospace" }, "input"));
+    kids.push(e("text", { key: "har", x: LEFT - 12, y: 66, "font-size": 10, fill: "var(--muted)", "font-family": "'IBM Plex Mono',monospace" }, "crossbar array  (" + nIn + " wordlines \u00d7 " + nOut + " bitlines \u00b7 " + d.gridH + "\u00d7" + d.gridW + " field)"));
+    // column gate buses (yellow)
+    for (let c = 0; c < nOut; c++) {
       const x = colX(c), win = cur && cur.pred === c;
-      kids.push(e("line", { key: "gate" + c, x1: x, y1: 66, x2: x, y2: rowY(24) + 10, stroke: "var(--amber)", "stroke-width": win ? 1.8 : 1, opacity: win ? 0.9 : 0.5, "vector-effect": "non-scaling-stroke" }));
-      kids.push(e("line", { key: "bit" + c, x1: x + 8, y1: 74, x2: x + 8, y2: 466, stroke: win ? "var(--acc)" : "var(--border2)", "stroke-width": win ? 1.4 : 0.8, opacity: win ? 0.9 : 0.6, "vector-effect": "non-scaling-stroke" }));
+      kids.push(e("line", { key: "gate" + c, x1: x, y1: 70, x2: x, y2: rowY(nIn - 1) + rowStep * 0.5, stroke: "var(--amber)", "stroke-width": win ? 1.8 : 1, opacity: win ? 0.9 : 0.45, "vector-effect": "non-scaling-stroke" }));
     }
-    // rows: input node + PRE driver + wordline + devices
-    for (let k = 0; k < 25; k++) {
-      const y = rowY(k), a = cur ? Math.max(0, Math.min(1, cur.sample[k])) : 0.12;
-      kids.push(e("line", { key: "wl" + k, x1: inX + 8, y1: y, x2: wlEnd, y2: y, stroke: "var(--border2)", "stroke-width": 0.7, opacity: 0.55, "vector-effect": "non-scaling-stroke" }));
-      // PRE row driver (purple hook)
-      kids.push(e("rect", { key: "pre" + k, x: inX + 14, y: y - 5, width: 9, height: 10, rx: 2, fill: "none", stroke: "#7b5cff", "stroke-width": 0.9, opacity: a > 0.4 ? 0.95 : 0.4, "vector-effect": "non-scaling-stroke" }));
-      // input neuron
-      kids.push(e("circle", { key: "in" + k, cx: inX, cy: y, r: 3.6, fill: "color-mix(in srgb, var(--green) " + (a * 100).toFixed(0) + "%, var(--surf3))", stroke: "var(--border2)", "stroke-width": 0.5, "vector-effect": "non-scaling-stroke" }));
-      for (let n = 0; n < 4; n++) {
-        const x = colX(n), w = Math.max(0, Math.min(1, weights[n * 25 + k]));
+    // rows: wordline + (optional) input node/PRE driver + devices
+    for (let k = 0; k < nIn; k++) {
+      const y = rowY(k), a = (cur && cur.sample && cur.sample[k] != null) ? Math.max(0, Math.min(1, cur.sample[k])) : 0.12;
+      kids.push(e("line", { key: "wl" + k, x1: inX + 8, y1: y, x2: wlEnd, y2: y, stroke: "var(--border2)", "stroke-width": 0.7, opacity: 0.5, "vector-effect": "non-scaling-stroke" }));
+      if (rowDetail) {
+        kids.push(e("rect", { key: "pre" + k, x: inX + 14, y: y - 5, width: 9, height: 10, rx: 2, fill: "none", stroke: "#7b5cff", "stroke-width": 0.9, opacity: a > 0.4 ? 0.95 : 0.4, "vector-effect": "non-scaling-stroke" }));
+        kids.push(e("circle", { key: "in" + k, cx: inX, cy: y, r: 3.6, fill: "color-mix(in srgb, var(--green) " + (a * 100).toFixed(0) + "%, var(--surf3))", stroke: "var(--border2)", "stroke-width": 0.5, "vector-effect": "non-scaling-stroke" }));
+      }
+      for (let n = 0; n < nOut; n++) {
+        const x = colX(n), w = Math.max(0, Math.min(1, weights[n * nIn + k] || 0));
         const isSel = sel && sel.n === n && sel.k === k;
         kids.push(e("g", { key: "d" + n + "_" + k, style: { cursor: "pointer" }, onClick: () => this._selectCell(n, k, weights) },
           e("title", null, "x" + String(k).padStart(2, "0") + " \u2192 " + names[n] + " \u00b7 " + this._gOf(w).toFixed(0) + " \u00b5S"),
-          e("rect", { x: x - 15, y: y - 5.4, width: 30, height: 10.8, rx: 2.4, fill: "color-mix(in srgb, #7b5cff " + (18 + w * 82).toFixed(0) + "%, var(--surf))", stroke: isSel ? "var(--acc)" : "var(--border2)", "stroke-width": isSel ? 1.8 : 0.7, "vector-effect": "non-scaling-stroke" }),
-          e("rect", { x: x - 15, y: y - 5.4, width: 30, height: 10.8, rx: 2.4, fill: "transparent" })));
+          e("rect", { x: x - hw, y: y - hh, width: hw * 2, height: hh * 2, rx: Math.min(2.4, hh), fill: "color-mix(in srgb, #7b5cff " + (18 + w * 82).toFixed(0) + "%, var(--surf))", stroke: isSel ? "var(--acc)" : "var(--border2)", "stroke-width": isSel ? 1.8 : 0.6, "vector-effect": "non-scaling-stroke" })));
       }
     }
-    // WTA lateral inhibition line
-    kids.push(e("text", { key: "wtal", x: colX(0) - 6, y: 480, "font-size": 9.5, fill: "var(--red)", "font-family": "'IBM Plex Sans',sans-serif" }, "lateral inhibition (WTA)"));
-    kids.push(e("path", { key: "wta", d: "M" + (colX(0) + 8) + " 486 L" + (colX(3) + 8) + " 486", stroke: "var(--red)", "stroke-width": 0.9, opacity: 0.7, fill: "none", "vector-effect": "non-scaling-stroke" }));
-    for (let c = 0; c < 4; c++) kids.push(e("line", { key: "wtv" + c, x1: colX(c) + 8, y1: 466, x2: colX(c) + 8, y2: 486, stroke: "var(--red)", "stroke-width": 0.8, opacity: 0.6, "vector-effect": "non-scaling-stroke" }));
-    // output neurons + drv boxes
-    for (let c = 0; c < 4; c++) {
-      const x = colX(c), win = cur && cur.pred === c, oy = 500;
-      kids.push(e("circle", { key: "on" + c, cx: x + 8, cy: oy, r: 8, fill: win ? "var(--acc)" : "var(--surf3)", stroke: win ? "var(--acc)" : "#7b5cff", "stroke-width": 1.3, "vector-effect": "non-scaling-stroke", style: win ? { animation: "nv-pulse 0.8s infinite" } : null }));
-      kids.push(e("rect", { key: "drv" + c, x: x + 22, y: oy - 7, width: 26, height: 14, rx: 3, fill: "var(--surf)", stroke: "var(--amber)", "stroke-width": 1, "vector-effect": "non-scaling-stroke" }));
-      kids.push(e("text", { key: "drt" + c, x: x + 35, y: oy + 3.5, "text-anchor": "middle", "font-size": 8, fill: "var(--amber)", "font-family": "'IBM Plex Mono',monospace" }, "drv"));
-      kids.push(e("text", { key: "ont" + c, x: x + 8, y: oy + 22, "text-anchor": "middle", "font-size": 9, fill: win ? "var(--acc)" : "var(--text2)", "font-family": "'IBM Plex Mono',monospace", "font-weight": win ? 700 : 400 }, names[c]));
+    // WTA lateral inhibition line across the outputs
+    kids.push(e("text", { key: "wtal", x: 12, y: 480, "font-size": 9.5, fill: "var(--red)", "font-family": "'IBM Plex Sans',sans-serif" }, "lateral inhibition (WTA)"));
+    kids.push(e("path", { key: "wta", d: "M" + colX(0) + " 478 L" + colX(nOut - 1) + " 478", stroke: "var(--red)", "stroke-width": 0.9, opacity: 0.6, fill: "none", "vector-effect": "non-scaling-stroke" }));
+    // output neurons
+    for (let c = 0; c < nOut; c++) {
+      const x = colX(c), win = cur && cur.pred === c;
+      kids.push(e("circle", { key: "on" + c, cx: x, cy: oy, r: 7, fill: win ? "var(--acc)" : "var(--surf3)", stroke: win ? "var(--acc)" : "#7b5cff", "stroke-width": 1.3, "vector-effect": "non-scaling-stroke", style: win ? { animation: "nv-pulse 0.8s infinite" } : null }));
+      kids.push(e("text", { key: "ont" + c, x: x, y: oy + 18, "text-anchor": "middle", "font-size": nOut > 4 ? 8 : 9, fill: win ? "var(--acc)" : "var(--text2)", "font-family": "'IBM Plex Mono',monospace", "font-weight": win ? 700 : 400 }, names[c]));
     }
     return e("div", { style: { width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" } },
       e("svg", { viewBox: "0 0 " + W + " " + H, preserveAspectRatio: "xMidYMid meet", style: { width: "100%", height: "100%" } }, kids));
   }
 
   // ---------------- single synapse inspector (click / write animation) ----------------
-  _synapseInspector(weights, hist, sel) {
+  _synapseInspector(weights, hist, sel, dims) {
     const e = React.createElement;
-    const n = sel.n, k = sel.k, idx = n * 25 + k;
-    const w = Math.max(0, Math.min(1, weights[idx]));
+    const nIn = Math.max(1, (dims || this._dims()).nIn);
+    const n = sel.n, k = sel.k, idx = n * nIn + k;
+    const w = Math.max(0, Math.min(1, weights[idx] || 0));
     const g = this._gOf(w), r = 1000 / g, iRead = 0.1 * g;
-    const isPot = this._protos()[n][k] === 1;
+    const proto = this._protos()[n];   // 5×5 bar prototypes exist only for the demo task
+    const isPot = proto && k < proto.length ? proto[k] === 1 : w >= 0.5;
     const pulseC = isPot ? "var(--green)" : "var(--red)";
     const W = 660, H = 300;
     const kids = [];
@@ -3074,13 +3109,18 @@ class Component extends DCLogic {
 
     // ----- train workspace -----
     const target = Math.max(5, Math.min(80, parseInt(st.nt.epochsTarget, 10) || 30));
+    // built topology (what the crossbar/metrics reflect); falls back to the live
+    // config before the first Build. Declared here so trainStatus can use it.
+    const dims = st.nt.builtCfg || this._builtDims();
     const onTrain = () => this._startTrain();
     const onBuild = () => {
-      const nOut = this._nOut();
-      const gr = Math.round(st.trainCfg.gridR) || 5, gc = Math.round(st.trainCfg.gridC) || 5;
-      const cells = 25 * nOut;   // demo topology is a 5\u00d75 afferent field \u00d7 nOut outputs
-      this.setState(s => ({ nt: { ...s.nt, weights: this._initWeights(), acc: [], epoch: 0, cur: null, sel: null, hist: [], rfView: "crossbar", built: true, testBatch: null } }));
-      this._log("[trainer] crossbar built \u2014 " + gr + "\u00d7" + gc + " afferents \u2192 " + nOut + " outputs, " + cells + " " + st.device + " cells \u00b7 press Train", "ok");
+      // Actually apply the configured topology: size the crossbar to
+      // gridH\u00b7gridW afferents \u00d7 nOut outputs and drop any stale trained weights /
+      // metrics from the previous topology (they no longer match).
+      const d = this._builtDims();
+      const cells = d.nIn * d.nOut;
+      this.setState(s => ({ nt: { ...s.nt, builtCfg: d, weights: this._initWeightsN(cells), weightsUS: null, weightsHist: null, conf: null, acc: [], epoch: 0, cur: null, sel: null, hist: [], rfView: "crossbar", built: true, testBatch: null } }));
+      this._log("[trainer] crossbar built \u2014 " + d.gridH + "\u00d7" + d.gridW + " (" + d.nIn + ") afferents \u2192 " + d.nOut + " outputs" + (d.hidden ? " \u00b7 " + d.hidden + " hidden" : "") + " \u00b7 " + cells + " " + st.device + " synapses \u00b7 press Train", "ok");
     };
     const onTest = () => this._testNet();
     const trainBtnBg = st.nt.running ? "var(--red)" : "var(--acc)";
@@ -3088,7 +3128,7 @@ class Component extends DCLogic {
     const last = st.nt.acc[st.nt.acc.length - 1];
     const trainStatus = st.nt.running ? (st.backendMode === "live" ? "training on the real " + st.device + " crossbar (vatester.neuro)\u2026" : "epoch " + st.nt.epoch + "/" + target + " \u2014 STDP weight updates streaming\u2026")
       : (st.nt.acc.length ? "done \u00b7 " + st.nt.epoch + " epochs \u00b7 test " + last[2].toFixed(1) + "%" + (st.nt.weightsUS ? " \u00b7 real crossbar" : "")
-        : (st.nt.built ? "built \u00b7 5\u00d75 \u2192 " + this._nOut() + " outputs \u00b7 " + (25 * this._nOut()) + " cells \u2014 press Train to run " + target + " epochs"
+        : (st.nt.built ? "built \u00b7 " + dims.gridH + "\u00d7" + dims.gridW + " \u2192 " + dims.nOut + " outputs \u00b7 " + (dims.nIn * dims.nOut) + " synapses \u2014 press Train to run " + target + " epochs"
           : "idle \u2014 Build, then Train to run " + target + " epochs"));
     const trainCards = [
       { label: "EPOCH", value: st.nt.epoch + "/" + target, color: "var(--text)" },
@@ -3101,7 +3141,7 @@ class Component extends DCLogic {
       { pts: st.nt.acc.map(a => [a[0], a[2]]), color: "var(--amber)", label: "test" },
     ] : [{ pts: [[1, 0], [target, 100]], color: "transparent", label: "" }];
     const accPlot = this._plot({ id: "acc", series: accSeries, xlab: "epoch", ylab: "%", xunit: "", yunit: "%" });
-    const trainWeights = st.nt.weights || this._initWeights();
+    const trainWeights = st.nt.weights || this._initWeightsN(dims.nIn * dims.nOut);
     const rfViews = [["crossbar", "Crossbar"], ["fields", "Receptive fields"], ["matrix", "Weight matrix"]].map(([key, label]) => ({
       label, bg: st.nt.rfView === key ? "var(--surf3)" : "transparent", fg: st.nt.rfView === key ? "var(--text)" : "var(--text2)",
       select: () => this.setState(s => ({ nt: { ...s.nt, rfView: key } })),
@@ -3109,10 +3149,10 @@ class Component extends DCLogic {
     const sel = st.nt.sel;
     const hasSel = st.nt.rfView === "crossbar" && !!sel;
     const onBackToArray = () => this.setState(s => ({ nt: { ...s.nt, sel: null } }));
-    const netTitle = hasSel ? ("Synapse  x" + String(sel.k).padStart(2, "0") + " \u2192 N0" + sel.n + "  \u00b7  3-terminal ECFET") : "Crossbar array  \u00b7  25 wordlines \u00d7 4 bitlines";
+    const netTitle = hasSel ? ("Synapse  x" + String(sel.k).padStart(2, "0") + " \u2192 N0" + sel.n + "  \u00b7  3-terminal ECFET") : ("Crossbar array  \u00b7  " + dims.nIn + " wordlines \u00d7 " + dims.nOut + " bitlines");
     const netHint = hasSel ? "gate pulse programs the channel \u2014 write \u2192 read on source/drain" : "click any purple device to inspect the single-synapse write path";
-    const crossbarContent = hasSel ? this._synapseInspector(trainWeights, st.nt.hist, sel) : this._crossbarView(trainWeights, st.nt.cur, sel);
-    const rfContent = st.nt.rfView === "matrix" ? this._weightsHeatmap(trainWeights) : st.nt.rfView === "crossbar" ? crossbarContent : this._rfTiles(trainWeights);
+    const crossbarContent = hasSel ? this._synapseInspector(trainWeights, st.nt.hist, sel, dims) : this._crossbarView(trainWeights, st.nt.cur, sel, dims);
+    const rfContent = st.nt.rfView === "matrix" ? this._weightsHeatmap(trainWeights, dims) : st.nt.rfView === "crossbar" ? crossbarContent : this._rfTiles(trainWeights, dims);
     const isCrossbarView = st.nt.rfView === "crossbar";
     const protoGlyphs = this._protoRow();
     const currentSample = this._sampleRow(st.nt.cur);
