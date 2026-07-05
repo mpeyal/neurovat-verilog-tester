@@ -1154,7 +1154,7 @@
         <div style="flex:none; display:flex; align-items:center; gap:8px; padding:12px 14px 8px;">
           <span style="width:8px; height:8px; border-radius:50%; background:var(--green);"></span>
           <span onclick="{{ onToggleProvider }}" title="Switch provider" style="font-weight:600; font-size:13.5px; cursor:pointer;" style-hover="color:var(--acc);">{{ providerLabel }}</span>
-          <select value="{{ modelIdx }}" onchange="{{ onPickModel }}" style="font-size:10.5px; color:var(--text2); background:var(--surf3); border:1px solid var(--border); border-radius:9px; padding:2px 6px; font-family:inherit; outline:none; cursor:pointer; max-width:120px;">
+          <select value="{{ modelIdx }}" onchange="{{ onPickModel }}" style="font-size:10.5px; color:var(--text2); background:var(--surf3); border:1px solid var(--border); border-radius:9px; padding:2px 6px; font-family:inherit; outline:none; cursor:pointer; max-width:150px;">
             <sc-for list="{{ agentModelOpts }}" as="am" hint-placeholder-count="3"><option value="{{ am.idx }}">{{ am.name }}</option></sc-for>
           </select>
           <span onclick="{{ onToggleAuto }}" title="Autonomous edit + run + fix" style="font-size:10px; color:{{ autoFg }}; background:{{ autoBg }}; border-radius:9px; padding:2px 8px; cursor:pointer;">{{ autoLabel }}</span>
@@ -1806,6 +1806,28 @@ class Component extends DCLogic {
     clearTimeout(this._sayT);
     this._sayT = setTimeout(() => this._respond(txt), 120);
   }
+  // Selectable agent models (name shown in the picker + CLI/SDK model id sent to
+  // the backend). Opus 4.8 is the default (index 0).
+  _models() {
+    return {
+      anthropic: [
+        { name: "Claude Opus 4.8", id: "claude-opus-4-8" },
+        { name: "Claude Sonnet 5", id: "claude-sonnet-5" },
+        { name: "Claude Haiku 4.5", id: "claude-haiku-4-5-20251001" },
+        { name: "Claude Opus 4.7", id: "claude-opus-4-7" },
+        { name: "Claude Fable 5", id: "claude-fable-5" },
+      ],
+      openai: [
+        { name: "GPT-5.1", id: "gpt-5.1" },
+        { name: "GPT-5 mini", id: "gpt-5-mini" },
+        { name: "o4-mini", id: "o4-mini" },
+      ],
+    };
+  }
+  _curModel() {
+    const list = this._models()[this.state.provider] || this._models().anthropic;
+    return list[this.state.modelIdx] || list[0];
+  }
   _respond(txt) {
     const lower = txt.toLowerCase();
     // param-management commands stay LOCAL (they act on the UI): "pin A_stdp", "drop nu_d"
@@ -1819,6 +1841,17 @@ class Component extends DCLogic {
       else if (wanted) { const t = hit(wanted); if (t) { this._pinParam(t, true); m = { who: "agent", text: "Pinned " + t + " to Essentials \u2014 it's now a live slider." }; } else m = { who: "agent", text: "No parameter matching \u201c" + wanted + "\u201d. Parsed: " + names.slice(0, 10).join(", ") + "." }; }
       if (m) { this.setState(s => ({ messages: [...s.messages, m] })); return; }
     }
+    // /model [name] — list or switch the agent model (also in the top picker)
+    if (/^\/model\b/.test(txt.trim())) {
+      const list = this._models()[this.state.provider] || [];
+      const arg = txt.trim().slice(6).trim().toLowerCase();
+      if (arg) {
+        const i = list.findIndex(m => m.name.toLowerCase().includes(arg) || m.id.includes(arg));
+        if (i >= 0) { this.setState({ modelIdx: i }); this.setState(s => ({ messages: [...s.messages, { who: "agent", text: "Switched to " + list[i].name + " (" + list[i].id + ")." }] })); return; }
+      }
+      this.setState(s => ({ messages: [...s.messages, { who: "agent", text: "Models (or use the picker ↑): " + list.map(m => m.name).join(" · ") + ". Current: " + this._curModel().name + "." }] }));
+      return;
+    }
     // real Claude agent (READ-ONLY backend) when available; canned demo otherwise
     if (this._beAvailable()) { this._agentReply(txt); return; }
     this.setState(s => ({ messages: [...s.messages, { who: "agent", text: this._cannedReply(lower) }] }));
@@ -1827,7 +1860,7 @@ class Component extends DCLogic {
     this.setState(s => ({ messages: [...s.messages, { who: "agent", text: "\u2026", pending: true }] }));
     const ctx = "Selected device: " + this.state.device + "\nEditor .va buffer:\n" + this._vaCode().slice(0, 6000);
     let data;
-    try { data = await this._beRaw("agent_chat", { message: txt, context: ctx }); } catch (e) { data = null; }
+    try { data = await this._beRaw("agent_chat", { message: txt, context: ctx, model: this._curModel().id }); } catch (e) { data = null; }
     const ok = data && data.ok && data.text;
     const reply = ok ? data.text : this._cannedReply(txt.toLowerCase());
     if (ok && this.state.backendMode !== "live") this.setState({ backendMode: "live" });
@@ -2553,8 +2586,8 @@ class Component extends DCLogic {
     const agentBtnBorder = agentOpen ? "var(--acc-line)" : "var(--border)";
 
     // ----- menu bar -----
-    const providerModels = { anthropic: ["Claude Sonnet 4.6", "Claude Opus 4.1", "Claude Haiku 4"], openai: ["GPT-5.1", "GPT-5 mini", "o4-mini"] };
-    const curModelName = (providerModels[st.provider] || providerModels.anthropic)[st.modelIdx] || providerModels[st.provider][0];
+    const providerModels = this._models();
+    const curModelName = this._curModel().name;
     const openMenu = st.menu;
     const mi = (label, action, opts) => Object.assign({ label, action, sep: false, check: null }, opts || {});
     const menuDefs = [
@@ -3216,7 +3249,7 @@ class Component extends DCLogic {
     const agentAuto = st.agentAuto;
     const providerLabel = st.provider === "anthropic" ? "Claude" : "OpenAI";
     const onToggleProvider = () => this.setState(s => ({ provider: s.provider === "anthropic" ? "openai" : "anthropic", modelIdx: 0 }));
-    const agentModelOpts = (providerModels[st.provider] || []).map((m, i) => ({ name: m, idx: String(i) }));
+    const agentModelOpts = (providerModels[st.provider] || []).map((m, i) => ({ name: m.name, idx: String(i) }));
     const onPickModel = ev => this.setState({ modelIdx: parseInt(ev.target.value, 10) || 0 });
     const onToggleAuto = () => this.setState(s => ({ agentAuto: !s.agentAuto }));
     const autoBg = st.agentAuto ? "var(--green-soft)" : "var(--surf2)";

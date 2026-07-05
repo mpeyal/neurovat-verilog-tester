@@ -163,9 +163,10 @@ class Bridge:
             return {"ok": False, "text": "", "backend": None}
         try:
             r = agent.send(str(a.get("message", "")), context=str(a.get("context", "")),
-                           allow_edits=False, allow_bash=False, timeout=180)
+                           allow_edits=False, allow_bash=False,
+                           model=a.get("model") or "default", timeout=180)
             return {"ok": bool(r.get("ok")), "text": r.get("text", "") or r.get("error", ""),
-                    "backend": agent.backend_label()}
+                    "backend": agent.backend_label(), "model": a.get("model") or "default"}
         except Exception as e:
             return {"ok": False, "text": str(e), "backend": None}
 
