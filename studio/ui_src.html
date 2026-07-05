@@ -1282,6 +1282,19 @@ class Component extends DCLogic {
       this._log("[hysteresis] failed — " + e.message, "err");
     }
   }
+  // Clicking a point on the STDP window reproduces the exact stimulus that made
+  // it: a single pre/post pulse pair at that Δt, run and shown in the Transient.
+  _openStdpPair(dt) {
+    const amp = this.state.device === "fefet" ? 150 : 170;   // ~measurement drive
+    this._log("[stdp] Δt " + dt.toFixed(1) + " ms → running the pre/post pair that produced this point…", "ok");
+    this.setState(s => ({
+      gen: "stdp",
+      vals: { ...s.vals, stdp: { ...(s.vals.stdp || {}), dt: dt, n: 1, amp: amp, w: 10 } },
+      resView: "transient",
+    }));
+    clearTimeout(this._stdpPairT);
+    this._stdpPairT = setTimeout(() => this._runSim(), 40);   // after state settles
+  }
   async _plotStdp() {
     const sel = this.state.devSel;
     const devKeys = ["v2", "v3", "fefet"].filter(k => sel[k]);
@@ -2107,32 +2120,64 @@ class Component extends DCLogic {
       { name: "gpdk045", cells: [{ cell: "nmos1v", view: "veriloga", va: true }, { cell: "pmos1v", view: "veriloga", va: true }] },
     ];
   }
-  _toggleVirtuoso() {
+  async _toggleVirtuoso() {
     if (this.state.virt.busy) return;
-    if (this.state.virt.connected) { clearInterval(this._libT); this.setState({ virt: { connected: false, busy: false, libs: [], expanded: null } }); this._log("[virtuoso] disconnected", "err"); return; }
+    if (this.state.virt.connected) {
+      clearInterval(this._libT);
+      if (this._beAvailable()) { try { await this._beRaw("virtuoso_disconnect", {}); } catch (e) {} }
+      this.setState({ virt: { connected: false, busy: false, libs: [], expanded: null } });
+      this._log("[virtuoso] disconnected", "err");
+      return;
+    }
     this.setState(s => ({ virt: Object.assign({}, s.virt, { busy: true, libs: [] }) }));
     this._log("[virtuoso] opening SSH tunnel + skillbridge\u2026");
+    if (!this._beAvailable()) { this._mockVirtuoso(); return; }   // offline demo only
+    let data;
+    try { data = await this._beRaw("virtuoso_connect", {}); } catch (e) { data = { ok: false, error: e.message }; }
+    if (data && data.ok) {
+      const libs = (data.libs || []).map(name => ({ name, cells: [] }));
+      if (this.state.backendMode !== "live") this.setState({ backendMode: "live" });
+      this.setState(s => ({ virt: Object.assign({}, s.virt, { connected: true, busy: false, libs }) }));
+      this._log("[virtuoso] connected \u2014 skillbridge " + (data.version || "") + " \u00b7 " + (data.tunnel || "") + " \u00b7 " + libs.length + " libraries", "ok");
+    } else {
+      this.setState(s => ({ virt: Object.assign({}, s.virt, { connected: false, busy: false }) }));
+      this._log("[virtuoso] connect FAILED \u2014 " + ((data && data.error) || "unknown"), "err");
+    }
+  }
+  _mockVirtuoso() {   // standalone/offline: fabricated library list so the browser still works
     clearTimeout(this._virtT);
     this._virtT = setTimeout(() => {
-      this.setState(s => ({ virt: Object.assign({}, s.virt, { connected: true, busy: false } ) }));
-      this._log("[virtuoso] connected \u2014 skillbridge ready on :8003", "ok");
-      this._log("[virtuoso] ddGetLibList() \u2014 streaming libraries\u2026");
+      this.setState(s => ({ virt: Object.assign({}, s.virt, { connected: true, busy: false }) }));
+      this._log("[virtuoso] connected \u2014 offline demo (no backend) \u00b7 mock libraries", "muted");
       const all = this._cadenceLibs();
       let i = 0;
       clearInterval(this._libT);
       this._libT = setInterval(() => {
-        if (i >= all.length) { clearInterval(this._libT); this._log("[virtuoso] " + all.length + " libraries indexed", "ok"); return; }
+        if (i >= all.length) { clearInterval(this._libT); return; }
         const lib = all[i++];
         this.setState(s => ({ virt: Object.assign({}, s.virt, { libs: [...s.virt.libs, lib] }) }));
-        this._log("[virtuoso] + " + lib.name + " (" + lib.cells.length + " cells)");
-      }, 340);
-    }, 1300);
+      }, 200);
+    }, 900);
   }
   _virtLibs() {
     if (!this.state.virt.connected) { this._log("[virtuoso] not connected \u2014 connect first", "err"); return; }
     this.setState({ virtBrowser: true });
   }
-  _toggleLib(name) { this.setState(s => ({ virt: Object.assign({}, s.virt, { expanded: s.virt.expanded === name ? null : name }) })); }
+  async _toggleLib(name) {
+    const willExpand = this.state.virt.expanded !== name;
+    this.setState(s => ({ virt: Object.assign({}, s.virt, { expanded: willExpand ? name : null }) }));
+    if (!willExpand) return;
+    const lib = this.state.virt.libs.find(l => l.name === name);
+    if (!lib || (lib.cells && lib.cells.length) || !this._beAvailable()) return;   // cells already loaded / offline mock
+    let data;
+    try { data = await this._beRaw("virtuoso_cells", { lib: name }); } catch (e) { return; }
+    if (data && data.ok) {
+      this.setState(s => ({ virt: Object.assign({}, s.virt, { libs: s.virt.libs.map(l => l.name === name ? Object.assign({}, l, { cells: data.cells }) : l) }) }));
+      this._log("[virtuoso] " + name + " \u2014 " + data.cells.length + " cells" + (data.truncated ? " (capped at 80)" : ""), "ok");
+    } else if (data && data.error) {
+      this._log("[virtuoso] " + name + " \u2014 " + data.error, "err");
+    }
+  }
   async _openVaFromLib(lib, cell) {
     if (!cell.va) { this._log("[virtuoso] " + lib + "/" + cell.cell + " has no Verilog-A view (" + cell.view + ")", "err"); return; }
     const view = cell.view || "veriloga";
@@ -2883,7 +2928,7 @@ class Component extends DCLogic {
     const stdpMeasuredSeries = stdpReal ? stdpReal.curves.map(c => ({ pts: c.points, color: c.color, label: c.name })) : [];
     const stdpPlot = sweepOn
       ? this._plot({ id: "stdp", dots: true, series: Array.from({ length: sweepSteps }, (_, i) => { const Amp = 1.5 + (7.5 - 1.5) * (sweepSteps === 1 ? 0 : i / (sweepSteps - 1)); return { pts: stdpMk(Amp), color: sweepColor(i), label: "A " + Amp.toFixed(1) }; }), xlab: "\u0394t ms", ylab: "\u0394G \u00b5S", xunit: "ms", yunit: "\u00b5S" })
-      : this._plot({ id: "stdp", dots: true, onPoint: n => { this._log("[stdp] \u0394t " + (+n.x).toFixed(1) + " ms \u2192 " + (+n.y).toFixed(3) + " " + (stdpReal ? stdpReal.curves[0].unit : "\u00b5S") + " \u2014 opening source transient", "ok"); this.setState({ resView: "transient" }); }, series: stdpMeasuredSeries, xlab: "\u0394t ms", ylab: stdpYlab, xunit: "ms", yunit: stdpReal ? stdpReal.curves[0].unit : "\u00b5S" });
+      : this._plot({ id: "stdp", dots: true, onPoint: n => this._openStdpPair(+n.x), series: stdpMeasuredSeries, xlab: "\u0394t ms", ylab: stdpYlab, xunit: "ms", yunit: stdpReal ? stdpReal.curves[0].unit : "\u00b5S" });
     // FeFET P-V hysteresis \u2014 measured on the "Plot hysteresis" button, overlays
     // every selected model that has polarization. Blank canvas until pressed.
     const polarReal = (st.polarData && st.polarData.curves && st.polarData.curves.length) ? st.polarData : null;

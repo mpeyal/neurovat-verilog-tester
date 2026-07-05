@@ -93,9 +93,70 @@ class Bridge:
     # When inside the repo, "Load source" serves the SAME .va files the desktop
     # app scans, and "Write back" edits them in place (local, git-versioned).
     # Outside the repo it falls back to core/virtuoso.py (skillbridge or ./va).
+    # A REAL Cadence Virtuoso connection (the same SSH-tunnel + skillbridge the
+    # desktop app uses). Lazily built; None if vatester.virtuoso isn't importable.
+    _vlink = None
+
+    def _get_vlink(self):
+        if Bridge._vlink is None:
+            try:
+                from vatester.virtuoso import VirtuosoLink
+                Bridge._vlink = VirtuosoLink()
+            except Exception:
+                Bridge._vlink = False
+        return Bridge._vlink or None
+
+    def virtuoso_connect(self, args=None):
+        """Open the real SSH tunnel + skillbridge workspace. On success returns
+        the live libraries; on failure the real error (e.g. host unreachable /
+        skill server not running) so the UI can show WHY."""
+        link = self._get_vlink()
+        if link is None:
+            return {"ok": False, "connected": False,
+                    "error": "Virtuoso link unavailable (vatester.virtuoso not importable)"}
+        try:
+            info = link.connect()
+            return {"ok": True, "connected": True, "version": info.get("version"),
+                    "tunnel": info.get("tunnel"), "libs": info.get("libraries", [])}
+        except Exception as e:
+            return {"ok": False, "connected": False, "error": str(e)}
+
+    def virtuoso_disconnect(self, args=None):
+        link = self._get_vlink()
+        if link is not None:
+            try:
+                link.disconnect()
+            except Exception:
+                pass
+        return {"ok": True, "connected": False}
+
+    def virtuoso_cells(self, args=None):
+        """Cells in a library from the live workspace (veriloga flagged), capped."""
+        a = args or {}
+        link = self._get_vlink()
+        if link is None or not link.connected:
+            return {"ok": False, "cells": [], "error": "not connected"}
+        try:
+            allc = link.list_cells(a.get("lib", ""), False)
+            vac = set(link.list_cells(a.get("lib", ""), True))
+            cells = [{"cell": c, "view": "veriloga" if c in vac else "schematic",
+                      "va": c in vac} for c in allc[:80]]
+            return {"ok": True, "cells": cells, "truncated": len(allc) > 80}
+        except Exception as e:
+            return {"ok": False, "cells": [], "error": str(e)}
+
     def load_from_virtuoso(self, args=None):
         a = args or {}
         cell = _check_cell(a.get("cell", "") or "ecfet_v2")
+        # when a live Virtuoso session is up, read the REAL cellview source
+        link = self._get_vlink()
+        if link is not None and link.connected and a.get("lib"):
+            try:
+                r = link.read_source(a.get("lib", ""), cell, a.get("view", "veriloga"))
+                if r.get("ok") and r.get("text"):
+                    return {"source": r["text"], "engine": "skillbridge"}
+            except Exception:
+                pass
         path = _workspace_va(cell)
         if path:
             with open(path, "r", encoding="utf-8", newline="") as f:
