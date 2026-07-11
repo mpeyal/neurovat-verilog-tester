@@ -1,0 +1,68 @@
+name: build-release-exe
+
+# Build a standalone Windows .exe and publish it to a GitHub Release whenever a
+# version tag is pushed, e.g.:
+#     git tag v1.0.0
+#     git push origin v1.0.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write        # needed to create the Release + upload the asset
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build one-folder exe
+        run: pyinstaller --noconfirm --clean neurovat.spec
+
+      - name: Bundle runtime data next to the exe
+        shell: pwsh
+        run: |
+          $dst = "dist/NeuroVAT"
+          foreach ($d in "twins","patterns","studio") {
+            if (Test-Path $d) { Copy-Item -Recurse -Force $d "$dst/$d" }
+          }
+          $va = Get-ChildItem -File -Filter *.va
+          if ($va) { Copy-Item -Force $va.FullName $dst }
+          # a short readme in the folder
+          @"
+          NeuroVAT - Verilog-A neuromorphic device tester + trainer.
+          Run NeuroVAT.exe.  Add --web for the browser Studio UI.
+
+          The tester and Neuro Trainer run fully offline.
+          The AI agent chat is OPTIONAL and needs the separate Claude Code CLI
+          installed and 'claude login' (a Claude subscription or API key).
+          "@ | Out-File -Encoding utf8 "$dst/README.txt"
+
+      - name: Zip the folder
+        shell: pwsh
+        run: Compress-Archive -Path dist/NeuroVAT/* -DestinationPath NeuroVAT-win64.zip
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: NeuroVAT-win64.zip
+          generate_release_notes: true
+          body: |
+            **NeuroVAT — Windows build** (one-folder). Download
+            `NeuroVAT-win64.zip`, unzip anywhere, and run **NeuroVAT.exe**.
+            Add `--web` to launch the browser Studio UI on localhost.
+
+            The device tester and Neuro Trainer run **offline**. The AI agent
+            chat is optional and needs the separate **Claude Code CLI**
+            installed (`claude login`) — see the repo README.
