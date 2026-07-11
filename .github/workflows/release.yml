@@ -7,6 +7,7 @@ name: build-release-exe
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:        # manual "Run workflow" button (build test, no Release)
 
 permissions:
   contents: write        # needed to create the Release + upload the asset
@@ -53,7 +54,14 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path dist/NeuroVAT/* -DestinationPath NeuroVAT-win64.zip
 
+      - name: Upload build artifact (every run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeuroVAT-win64
+          path: NeuroVAT-win64.zip
+
       - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')   # only on a version tag
         uses: softprops/action-gh-release@v2
         with:
           files: NeuroVAT-win64.zip
