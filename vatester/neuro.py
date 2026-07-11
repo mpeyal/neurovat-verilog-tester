@@ -116,7 +116,9 @@ class NetConfig:
 
     # ---- spike encoding + input noise (front-end "sensor" realism) ----
     encoding: str = "rate"     # "rate" (Poisson) | "latency" (time-to-first
-    #                            spike: brighter pixel fires earlier)
+    #                            spike: brighter pixel fires earlier) | "temporal"
+    #                            (phase code: one precisely-timed spike per cycle,
+    #                            phase set by intensity - repeating spike times)
     bg_rate_hz: float = 0.0    # spontaneous background rate on EVERY input (Hz)
     input_noise: float = 0.0   # per-presentation pixel noise (Gaussian + salt
     #                            & pepper), as a fraction in [0, 1]
@@ -613,12 +615,34 @@ class Trainer:
             rates = bg + tgate[:, None] * rate_pat[None, :]    # (n_steps, n_in)
         else:
             rates = bg + rate_pat                              # full window
-        S = U < (1.0 - np.exp(-rates * dt * 1e-3))
-        if cfg.encoding == "latency":
-            onset = ((1.0 - vec) * 0.6 * n_steps).astype(int)
-            gate = np.arange(n_steps)[:, None] >= onset[None, :]
-            gate[:, mask == 0] = True
-            S &= gate
+        if cfg.encoding == "temporal":
+            # PHASE code: each active afferent fires one PRECISELY-TIMED spike per
+            # cycle, at a phase set by its intensity (bright pixels fire early in
+            # the cycle, dim ones late). The repeating, deterministic spike TIMES
+            # carry the pattern - a true temporal code, distinct from stochastic
+            # rate coding and single-shot TTFS latency.
+            period = max(2, int(round((1000.0 / max(cfg.max_rate_hz, 1.0)) / dt)))
+            phase = np.rint((1.0 - vec) * (period - 1) * 0.9).astype(int)
+            if noise and 0.0 < pat_ms < cfg.present_ms:      # temporal embedding
+                ps = max(1, int(round(pat_ms / dt)))
+                on0 = max(0, (n_steps - ps) // 2)
+                on1 = on0 + ps
+            else:
+                on0, on1 = 0, n_steps
+            S = np.zeros((n_steps, self.n_in), bool)
+            for i in np.nonzero(vec > 0.05)[0]:              # active afferents only
+                ts = np.arange(on0 + int(phase[i]), on1, period)
+                ts = ts[(ts >= 0) & (ts < n_steps)]
+                S[ts, i] = True
+            if bg > 0:                          # background dark-count on all inputs
+                S |= (U < (1.0 - np.exp(-bg * dt * 1e-3)))
+        else:
+            S = U < (1.0 - np.exp(-rates * dt * 1e-3))
+            if cfg.encoding == "latency":
+                onset = ((1.0 - vec) * 0.6 * n_steps).astype(int)
+                gate = np.arange(n_steps)[:, None] >= onset[None, :]
+                gate[:, mask == 0] = True
+                S &= gate
         if noise and cfg.jitter_ms > 0:
             ti, ii = np.nonzero(S)
             if ti.size:
