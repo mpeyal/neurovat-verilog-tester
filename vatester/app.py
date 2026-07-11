@@ -1607,6 +1607,13 @@ class App:
                                     callback=self.on_account_login)
                 dpg.bind_item_theme(bl, self.themes["primary"])
                 dpg.add_button(label="Log out", callback=self.on_account_logout)
+                dpg.add_button(label="Get Claude Code",
+                               callback=self.on_account_install)
+            self._small("The full tool-using agent (edits .va / runs builds) "
+                        "needs the free Claude Code CLI: click 'Get Claude Code' "
+                        "to install it, then 'Log in'. No CLI? Paste an Anthropic "
+                        "API key below for chat-only agent (no file edits).",
+                        wrap=440)
             dpg.add_separator()
             self._small("Run this app under a specific account (overrides the "
                         "login for THIS APP ONLY; your global Claude Code "
@@ -5241,6 +5248,18 @@ class App:
         ok, msg = self.agent.login_interactive()
         self._account_busy(msg)
         self.log("[account] " + msg)
+
+    def on_account_install(self):
+        """Open the official Claude Code install page (license-respecting - we
+        don't redistribute Anthropic's CLI; the user installs it from source)."""
+        import webbrowser
+        url = "https://claude.com/claude-code"
+        try:
+            webbrowser.open(url)
+            self._account_busy(f"opened {url} - install Claude Code, then click "
+                               "'Log in'.")
+        except Exception as e:                          # noqa: BLE001
+            self._account_busy(f"couldn't open a browser - go to {url}  ({e})")
 
     def on_account_logout(self):
         self._account_busy("logging out...")

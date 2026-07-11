@@ -6,7 +6,8 @@ dearpygui>=1.11
 # plain text if these are absent.
 uharfbuzz
 freetype-py
-# optional - agent chat fallback when the claude CLI is not installed:
-# anthropic
+# agent chat via an API key WITHOUT the Claude Code CLI (chat-only, no file/shell
+# tools). Bundled into the .exe so an ANTHROPIC_API_KEY alone enables the agent.
+anthropic
 # optional - OpenAI provider for the agent chat (/provider openai):
 # openai
