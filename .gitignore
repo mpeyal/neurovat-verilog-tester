@@ -65,3 +65,8 @@ control/
 
 # local Virtuoso login (user@host) - never commit
 /virtuoso.local
+
+# local-only demo device: kept on disk for coding tests, never committed or
+# bundled into the release exe (CI checks out from git, so it stays out)
+/twins/example_rram.va
+/twins/example_rram.py
