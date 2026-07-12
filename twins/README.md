@@ -12,8 +12,8 @@ A twin is one self-contained Python file that defines:
 - a **params dataclass**, and
 - a module-level **`TWIN_SPEC`** dict telling the GUI how to register/drive it.
 
-See `example_rram.py` for a complete, working example, and
-`vatester/twin_loader.py` for the full `TWIN_SPEC` reference.
+See `vatester/twin_loader.py` for the full `TWIN_SPEC` reference (its module
+docstring is an annotated, copy-paste template).
 
 ## How a `.va` gets a twin
 - `.va` files are matched to a twin by **keyword** (`va_keywords` in the spec,

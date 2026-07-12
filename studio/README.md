@@ -11,8 +11,8 @@ as it does here — the backend automatically uses the REAL app engine:
 * `compile_va` uses the app's OpenVAF locator (`vatester.tools_ext`), so it
   finds the same binary the desktop Tools menu uses.
 * the Virtuoso panel's **Load source / Write back** read and write the repo's
-  real root `.va` files (`ecfet_v2.va`, `ecfet_v3.va`, `FeFET.va`,
-  `ECFET_Synapse.va`) — the same sources the desktop app scans.
+  real root `.va` files (`ecfet_v2.va`, `ecfet_v3.va`, `FeFET.va`) — the same
+  sources the desktop app scans.
 
 Launch it from the repo root with:
 
