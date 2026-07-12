@@ -2848,16 +2848,49 @@ class App:
         if dpg.does_item_exist("pending_bubble"):
             dpg.delete_item("pending_bubble")
         if show:
+            self._chat_t0 = time.time()
+            self._chat_status = "Claude is thinking"
             with dpg.group(parent="chat_log", tag="pending_bubble",
                            horizontal=True):
-                with dpg.child_window(width=150, auto_resize_y=True,
+                with dpg.child_window(width=340, auto_resize_y=True,
                                       border=True) as bub:
                     with dpg.group(horizontal=True):
                         dpg.add_loading_indicator(radius=1.5, style=1,
                                                   color=C_AGENT)
-                        self._small("Claude is thinking", color=C_TEXT2)
+                        dpg.add_text("Claude is thinking…", tag="pending_text",
+                                     color=C_TEXT2)
                 dpg.bind_item_theme(bub, self.themes["bub_agent"])
             self._scroll_bottom("chat_log")
+
+    def _chat_progress(self, label):
+        """Update the live 'working…' bubble with the agent's current action."""
+        if label:
+            self._chat_status = label
+        self._chat_pending_refresh()
+
+    def _chat_tick(self):
+        """Render-loop tick: keep the pending bubble's elapsed clock moving even
+        during a long single step. Must never raise (called every frame)."""
+        try:
+            if not self.chat_busy:
+                return
+            now = time.time()
+            if now - getattr(self, "_chat_tick_last", 0.0) < 1.0:
+                return
+            self._chat_tick_last = now
+            self._chat_pending_refresh()
+        except Exception:
+            pass
+
+    def _chat_pending_refresh(self):
+        """Repaint the pending bubble text with the latest action + elapsed
+        time. Called on each tool event and once per second from the render
+        loop so a long single step still shows a ticking clock (not frozen)."""
+        if not dpg.does_item_exist("pending_text"):
+            return
+        el = int(time.time() - getattr(self, "_chat_t0", time.time()))
+        status = getattr(self, "_chat_status", "Claude is thinking")
+        dpg.set_value("pending_text", f"{status}…  ({el // 60}:{el % 60:02d})")
 
     def _scroll_bottom(self, tag):
         frame = dpg.get_frame_count() + 2
@@ -4905,13 +4938,16 @@ class App:
             dpg.configure_item("btn_send", show=False)
             dpg.configure_item("btn_stop", show=True)
 
+        def prog(label):                # live tool-activity feedback
+            self.q.put(("chat_progress", label))
+
         def worker():
             # always emit a terminal ("chat", ...) message, even on an
             # unexpected error, so chat_busy can't stay True until restart.
             try:
                 res = self.agent.send(text, ctx, allow_edits=edits,
                                       allow_bash=bash, model=model,
-                                      autonomous=auto)
+                                      autonomous=auto, on_progress=prog)
             except Exception as e:
                 res = {"ok": False, "text": "",
                        "error": f"{type(e).__name__}: {e}"}
@@ -9090,6 +9126,8 @@ class App:
                     self._show_polar(item[1])
                 elif kind == "chat":
                     self._on_chat_done(item[1], item[2])
+                elif kind == "chat_progress":
+                    self._chat_progress(item[1])
                 elif kind == "account":
                     self._on_account_status(item[1])
                 elif kind == "virtuoso":
@@ -9196,17 +9234,25 @@ class App:
                 return
         except Exception:
             pass
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        run_py = os.path.join(root, "run_gui.py")
+        # Locate studio/ and pick the right way to launch --web. In a frozen
+        # PyInstaller build sys.executable IS this exe (not python) and there is
+        # no run_gui.py on disk, so we re-launch the exe itself with --web;
+        # in dev we run the script with the python interpreter.
+        frozen = getattr(sys, "frozen", False)
+        root = (os.path.dirname(sys.executable) if frozen
+                else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         if not os.path.isfile(os.path.join(root, "studio", "server.py")):
             self.log("[studio] studio/ folder not found next to the app")
             return
+        if frozen:
+            cmd = [sys.executable, "--web", "--port", str(self._STUDIO_PORT)]
+        else:
+            cmd = [sys.executable, os.path.join(root, "run_gui.py"), "--web",
+                   "--port", str(self._STUDIO_PORT)]
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         try:    # server auto-opens the browser once it's listening
-            self._studio_proc = subprocess.Popen(
-                [sys.executable, run_py, "--web",
-                 "--port", str(self._STUDIO_PORT)],
-                cwd=root, creationflags=flags)
+            self._studio_proc = subprocess.Popen(cmd, cwd=root,
+                                                  creationflags=flags)
         except OSError as e:
             self.log(f"[studio] failed to launch: {e}")
             return
@@ -9278,6 +9324,7 @@ class App:
             self._nt_tick_layout()
             self._nt_tick_paint()
             self._nt_tick_cell_anim()
+            self._chat_tick()
             self._watch_code()
             self._nt_watch_patterns()
             if self.control is not None:        # process one bridge command/frame

@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 
 SYSTEM_PROMPT = """\
 You are the embedded engineering agent of "NeuroVAT", a neuromorphic Verilog-A
@@ -229,6 +230,30 @@ def find_claude_cli():
         if cand and os.path.isfile(cand):
             return cand
     return None
+
+
+def _tool_label(name, inp):
+    """Short human phrase for a live agent tool call (shown in the chat)."""
+    inp = inp or {}
+    base = lambda p: os.path.basename(str(p)) if p else ""
+    if name == "Read":
+        f = base(inp.get("file_path"))
+        return f"Reading {f}" if f else "Reading a file"
+    if name in ("Edit", "Write", "MultiEdit"):
+        f = base(inp.get("file_path"))
+        return f"Editing {f}" if f else "Editing a file"
+    if name == "Bash":
+        cmd = str(inp.get("command", "")).strip()
+        cmd = cmd.splitlines()[0][:48] if cmd else ""
+        return f"Running: {cmd}" if cmd else "Running a command"
+    if name == "Grep":
+        p = str(inp.get("pattern", ""))[:24]
+        return f"Searching “{p}”" if p else "Searching the code"
+    if name == "Glob":
+        return "Finding files"
+    if name == "TodoWrite":
+        return "Planning next steps"
+    return f"Using {name}" if name else "Working"
 
 
 def find_codex_cli():
@@ -449,9 +474,11 @@ class ClaudeAgent:
     # ------------------------------------------------------------------
 
     def send(self, text, context="", allow_edits=False, allow_bash=False,
-             model="default", timeout=600, autonomous=False):
+             model="default", timeout=600, autonomous=False, on_progress=None):
         """Blocking - call from a worker thread.
-        Returns {ok, text, error, cost, session_id}."""
+        Returns {ok, text, error, cost, session_id}.
+        on_progress(label): optional callback invoked from THIS thread with a
+        short status string each time the agent uses a tool (live feedback)."""
         if autonomous:                  # full edit->run->verify->fix loop
             allow_edits = allow_bash = True
             timeout = max(timeout, 1800)
@@ -468,7 +495,7 @@ class ClaudeAgent:
                              "/provider claude switches back."}
         if self.cli:
             return self._send_cli(text, context, allow_edits, allow_bash,
-                                  model, timeout, autonomous)
+                                  model, timeout, autonomous, on_progress)
         if self.sdk_ok:
             return self._send_sdk(text, context, model)
         return {"ok": False, "text": "",
@@ -479,13 +506,18 @@ class ClaudeAgent:
     # ------------------------------------------------------------------
 
     def _send_cli(self, text, context, allow_edits, allow_bash, model, timeout,
-                  autonomous=False):
+                  autonomous=False, on_progress=None):
         tools = ["Read", "Grep", "Glob", "TodoWrite"]
         if allow_edits:
             tools += ["Edit", "Write", "MultiEdit"]
         if allow_bash:
             tools.append("Bash")
-        args = [self.cli, "-p", "--output-format", "json",
+        stream = on_progress is not None
+        # stream-json (needs --verbose) lets us report each tool call live so a
+        # multi-minute autonomous run shows activity instead of a frozen spinner
+        fmt = (["--output-format", "stream-json", "--verbose"] if stream
+               else ["--output-format", "json"])
+        args = [self.cli, "-p", *fmt,
                 "--append-system-prompt", SYSTEM_PROMPT + _wrap_ctx(context),
                 "--allowedTools", ",".join(tools)]
         if autonomous:
@@ -506,23 +538,97 @@ class ClaudeAgent:
                 args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8",
                 errors="replace", cwd=self.workdir, creationflags=flags,
-                env=self._env())
+                env=self._env(), bufsize=1)
         except OSError as e:
             return {"ok": False, "text": "", "error": f"failed to launch CLI: {e}"}
-        try:
-            out, err = self._proc.communicate(input=text, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self.stop()
+
+        if not stream:                          # simple blocking path (web/bridge)
+            try:
+                out, err = self._proc.communicate(input=text, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self.stop()
+                self._proc = None
+                return {"ok": False, "text": "",
+                        "error": f"claude CLI timed out after {timeout}s"}
+            rc = self._proc.returncode
             self._proc = None
+            if self._stop_requested:
+                return {"ok": False, "text": "",
+                        "error": "stopped by user (agent run cancelled)"}
+            return self._parse_cli_json((out or "").strip(), err or "", rc)
+
+        # streaming path: feed the prompt, read NDJSON line-by-line, and report
+        # each tool call. A watchdog thread enforces the overall timeout by
+        # killing the process (readline then returns EOF and the loop ends).
+        proc = self._proc
+        try:
+            proc.stdin.write(text)
+            proc.stdin.close()
+        except Exception:
+            pass
+        done = threading.Event()
+        timed_out = {"v": False}
+
+        def _watchdog():
+            if not done.wait(timeout):
+                timed_out["v"] = True
+                self.stop()
+        threading.Thread(target=_watchdog, daemon=True).start()
+
+        result_ev = None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                et = ev.get("type")
+                if et == "assistant":
+                    for b in ev.get("message", {}).get("content", []):
+                        bt = b.get("type")
+                        if bt == "tool_use":
+                            try:
+                                on_progress(_tool_label(b.get("name"),
+                                                        b.get("input")))
+                            except Exception:
+                                pass
+                        elif bt == "text" and (b.get("text") or "").strip():
+                            try:
+                                on_progress("Writing reply…")
+                            except Exception:
+                                pass
+                elif et == "result":
+                    result_ev = ev
+        except Exception:
+            pass
+        finally:
+            done.set()
+        try:
+            err = proc.stderr.read() or ""
+        except Exception:
+            err = ""
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        rc = proc.returncode
+        self._proc = None
+        if timed_out["v"]:
             return {"ok": False, "text": "",
                     "error": f"claude CLI timed out after {timeout}s"}
-        rc = self._proc.returncode
-        self._proc = None
         if self._stop_requested:
             return {"ok": False, "text": "",
                     "error": "stopped by user (agent run cancelled)"}
+        if result_ev is None:
+            msg = (err or "no result returned by the CLI").strip()
+            return {"ok": rc == 0, "text": "", "error": msg[-2000:]}
+        return self._finish_cli(result_ev)
 
-        out = (out or "").strip()
+    def _parse_cli_json(self, out, err, rc):
+        """Parse the single-JSON (`--output-format json`) reply."""
         try:
             data = json.loads(out)
         except json.JSONDecodeError:
@@ -530,7 +636,10 @@ class ClaudeAgent:
                 msg = (err or out or "unknown CLI error").strip()
                 return {"ok": False, "text": "", "error": msg[-2000:]}
             return {"ok": True, "text": out or "(empty reply)"}
+        return self._finish_cli(data)
 
+    def _finish_cli(self, data):
+        """Turn a CLI result object into our return dict + tally usage/cost."""
         self.session_id = data.get("session_id") or self.session_id
         cost = data.get("total_cost_usd") or 0.0
         self.total_cost += cost
