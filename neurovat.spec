@@ -19,8 +19,13 @@ for pkg in ("dearpygui",):
 # our own packages (some modules are imported lazily / by string name)
 hiddenimports += collect_submodules("ecfet") + collect_submodules("vatester")
 
-# optional deps - bundle if the build env has them, ignore if not
-for opt in ("uharfbuzz", "freetype", "anthropic", "openai"):
+# optional deps - bundle if the build env has them, ignore if not.
+# anthropic's HTTP stack (httpx/httpcore/h11/anyio/sniffio/distro/certifi/idna)
+# and pydantic are NOT pulled in transitively by collect_all("anthropic"), so
+# collect each explicitly or `import anthropic` fails at runtime in the exe.
+for opt in ("uharfbuzz", "freetype", "anthropic", "openai",
+            "httpx", "httpcore", "h11", "certifi", "idna", "anyio", "sniffio",
+            "distro", "jiter", "annotated_types", "pydantic", "pydantic_core"):
     try:
         d, b, h = collect_all(opt)
         datas += d; binaries += b; hiddenimports += h
