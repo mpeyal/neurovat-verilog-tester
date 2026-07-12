@@ -20,12 +20,22 @@ import argparse
 import os
 import sys
 
+
+def _app_dir():
+    """Folder holding the .va files / twins / patterns / studio: the directory
+    that CONTAINS the exe when frozen (PyInstaller), else this script's folder.
+    A frozen build's __file__ points inside the bundle, not next to the exe."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--workspace",
-                    default=os.path.dirname(os.path.abspath(__file__)),
+                    default=_app_dir(),
                     help="folder to scan for .va files (default: app folder)")
     ap.add_argument("--smoke", type=int, default=0, metavar="N",
                     help="render N fi i nramessstarts then exit (self-test)")
@@ -44,7 +54,7 @@ if __name__ == "__main__":
     ap.set_defaults(bridge=True, open_browser=True)
     args = ap.parse_args()
     if args.web:
-        studio_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "studio")
+        studio_dir = os.path.join(_app_dir(), "studio")
         sys.path.insert(0, studio_dir)
         os.chdir(studio_dir)   # server/bridge resolve their files relative to studio/
         import server          # noqa: E402  (studio/server.py)

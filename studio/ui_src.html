@@ -1090,7 +1090,7 @@
         <div style="flex:1; min-height:0; display:flex; flex-direction:column; padding:14px 16px; gap:10px;">
           <div style="flex:none; display:flex; gap:8px; align-items:center;">
             <select value="{{ editorFile }}" onchange="{{ onEditorFile }}" style="background:var(--surf); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:5px 10px; font-size:12.5px; font-family:inherit; cursor:pointer;">
-              <option>ECFET_Synapse.va</option><option>ecfet_v2.va</option><option>ecfet_v3.va</option><option>fefet_v1.va</option>
+              <option>ECFET_Synapse.va</option><option>ecfet_v2.va</option><option>ecfet_v3.va</option><option>FeFET.va</option>
             </select>
             <button onclick="{{ onVaSave }}" title="Save the editor buffer to a local .va on disk (a local copy — does not touch the Virtuoso cell)" style="background:var(--surf); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:5px 12px; font-size:12.5px; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--border2);">Save local</button>
             <button onclick="{{ onVaReload }}" style="background:var(--surf); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:5px 12px; font-size:12.5px; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--border2);">Reload</button>
@@ -2260,7 +2260,7 @@ class Component extends DCLogic {
     return {
       "ecfet_v2.va": { cell: "ecfet_v2", dev: "v2" },
       "ecfet_v3.va": { cell: "ecfet_v3", dev: "v3" },
-      "fefet_v1.va": { cell: "fefet_v1", dev: "fefet" },
+      "FeFET.va": { cell: "fefet_v1", dev: "fefet" },
       "ECFET_Synapse.va": { cell: "ecfet_synapse", dev: "v2" },
     };
   }
@@ -2924,7 +2924,7 @@ class Component extends DCLogic {
         let n;
         if (key === "fefet") { n = { v2: false, v3: false, fefet: !s.devSel.fefet }; if (!n.fefet) n.v2 = true; }
         else { n = { v2: s.devSel.v2, v3: s.devSel.v3, fefet: false }; n[key] = !s.devSel[key]; if (!n.v2 && !n.v3) n[key] = true; }
-        const efn = { v2: "ecfet_v2.va", v3: "ecfet_v3.va", fefet: "fefet_v1.va" }[key] || "ecfet_v2.va";
+        const efn = { v2: "ecfet_v2.va", v3: "ecfet_v3.va", fefet: "FeFET.va" }[key] || "ecfet_v2.va";
         // clear measured analyses so STDP/hysteresis blank until re-plotted for the new selection
         return { devSel: n, device: key, editorFile: efn, stdpData: null, polarData: null };
       }),

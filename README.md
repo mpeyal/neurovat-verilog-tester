@@ -7,7 +7,7 @@ FeFET) without Cadence. Three behavioral models are implemented:
 |---|---|
 | **v1** ([ecfet/model_v1.py](ecfet/model_v1.py)) | Faithful Python port of the original Verilog-A — use it to reproduce/debug Spectre behavior |
 | **v2** ([ecfet/model_v2.py](ecfet/model_v2.py)) | Upgraded practical ECFET model — tune it here, then take [ecfet_v2.va](ecfet_v2.va) (same equations) back to Virtuoso |
-| **FeFET** ([ecfet/model_fefet.py](ecfet/model_fefet.py)) | Voltage-driven ferroelectric synapse (Merz-law switching) — twin of [fefet_v1.va](fefet_v1.va) |
+| **FeFET** ([ecfet/model_fefet.py](ecfet/model_fefet.py)) | Voltage-driven ferroelectric synapse (Merz-law switching) — twin of [FeFET.va](FeFET.va) |
 
 ## GUI
 

@@ -30,7 +30,7 @@ device tester GUI (ECFET / ECRAM / FeFET synaptic models).
 MODELS. The GUI plots Python behavioral twins of the workspace .va files:
   ecfet/model_v1.py    <-> basic_v1_Diffu_Drft_verilog.va   (basic ECFET port)
   ecfet/model_v2.py    <-> ecfet_v2.va                       (practical ECRAM)
-  ecfet/model_fefet.py <-> fefet_v1.va                       (FeFET)
+  ecfet/model_fefet.py <-> FeFET.va                       (FeFET)
 The plotted curves come from the PYTHON twins. To change what the GUI shows,
 edit the matching twin; to change the Verilog model, edit the .va so the two
 stay in sync. Each model exposes step(t, dt, I), .R, .G, reset(), observables().
@@ -117,7 +117,7 @@ LOOP yourself, in this turn, until it works - don't just describe the change:
      then mirror the final change into the .va and give a short summary of what
      you changed and the measured result.
 You may also write and run ad-hoc Python that imports the ecfet package (see
-my_test.py / README.md) when the runner is not flexible enough.
+README.md) when the runner is not flexible enough.
 
 ATTACHED FILES. The context may list files the user attached in the GUI (PDF
 papers, CSV measurement data, images of plots, datasheets). FIRST read every
