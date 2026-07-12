@@ -132,9 +132,11 @@ injection** → arbitrary code execution. The following defenses are in place �
    overwrites files on a **shared multi-user host** with no undo — treat any
    agent-driven remote write as destructive; prefer diff/confirm/backup.
 
-6. Don't commit secrets. Credentials come from env vars / the Account dialog
-   only. The committed host/username/IP in `virtuoso.py` / `connect_test.py` are
-   infrastructure config, not secrets, but avoid adding more.
+6. Don't commit secrets OR infrastructure identifiers. Agent credentials come
+   from env vars / the Account dialog only. The Virtuoso login (`user@host`) is
+   kept OUT of the repo (this is a **public** repo): `virtuoso.py` /
+   `virtuoso_connect.bat` read it from the `NVAT_VIRTUOSO_HOST` env var or a
+   gitignored `virtuoso.local` file. Never hard-code a host, username, or IP.
 
 7. **Studio web server** (`studio/server.py`, `run_gui.py --web`) binds
    **127.0.0.1 only** — keep it that way (never `0.0.0.0`; it has no auth and

@@ -62,3 +62,6 @@ results/stdp_plot.png
 
 # control-bridge mailbox (runtime, per-session)
 control/
+
+# local Virtuoso login (user@host) - never commit
+/virtuoso.local

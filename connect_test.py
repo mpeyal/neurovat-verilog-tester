@@ -2,16 +2,17 @@
 """
 connect_test.py  --  verify a skillbridge connection to Cadence Virtuoso.
 
-Intended to run on WINDOWS, talking to Virtuoso on the Linux box
-(coen-cassia.boisestate.edu / 10.24.1.45) through an SSH tunnel.
+Intended to run on WINDOWS, talking to Virtuoso on a Linux host through an
+SSH tunnel. Put your own login in the NVAT_VIRTUOSO_HOST env var or a
+gitignored virtuoso.local file (one "user@host" line).
 
 SETUP (run once, leave open, in a separate Windows terminal):
-    ssh -N -L 7777:/tmp/skill-server-mahmudulpeyal.sock mahmudulpeyal@coen-cassia.boisestate.edu
+    ssh -N -L 7777:/tmp/skill-server-<user>.sock <user>@<host>
 
 The skillbridge client on Windows auto-uses TCP localhost:7777, which the
-tunnel forwards to the Linux Unix socket /tmp/skill-server-mahmudulpeyal.sock.
-(Use the PER-USER socket, not the shared -default.sock: on this multi-user host
-the default socket is owned by another account and just resets the connection.)
+tunnel forwards to the Linux Unix socket /tmp/skill-server-<user>.sock.
+(Use the PER-USER socket, not the shared -default.sock: on a multi-user host
+the default socket may be owned by another account and just reset.)
 
 On the Linux side, make sure the bridge is up first (type  skill()  in the CIW).
 

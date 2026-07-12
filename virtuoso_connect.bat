@@ -4,10 +4,18 @@ REM Uses SSH key auth (no password). Prereq on the Linux side: Virtuoso is open
 REM and the skillbridge server is running (skill() in the CIW).
 
 setlocal
-set HOST=mahmudulpeyal@coen-cassia.boisestate.edu
-REM per-user socket (the shared -default.sock is squatted by another account on
-REM this multi-user host); skill()/pyStartServer use ?id = login -> this socket.
-set TUNNEL=7777:/tmp/skill-server-mahmudulpeyal.sock
+REM The Virtuoso login (user@host) is kept OUT of the repo: set the
+REM NVAT_VIRTUOSO_HOST env var, or put one "user@host" line in virtuoso.local.
+if not defined NVAT_VIRTUOSO_HOST if exist "%~dp0virtuoso.local" set /p NVAT_VIRTUOSO_HOST=<"%~dp0virtuoso.local"
+if not defined NVAT_VIRTUOSO_HOST (
+    echo Set NVAT_VIRTUOSO_HOST=user@host  ^(or create virtuoso.local with that line^).
+    pause
+    exit /b 1
+)
+set HOST=%NVAT_VIRTUOSO_HOST%
+REM per-user socket; skill()/pyStartServer use ?id = login -> this socket.
+for /f "tokens=1 delims=@" %%u in ("%HOST%") do set VUSER=%%u
+set TUNNEL=7777:/tmp/skill-server-%VUSER%.sock
 
 REM If something is already listening on 7777, assume the tunnel is up.
 powershell -NoProfile -Command "if (Test-NetConnection -ComputerName localhost -Port 7777 -InformationLevel Quiet -WarningAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>&1

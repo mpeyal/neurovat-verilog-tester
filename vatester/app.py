@@ -2068,7 +2068,7 @@ class App:
                         dpg.bind_item_theme(b, self.themes["primary"])
                         with dpg.tooltip(b):
                             dpg.add_text("Start the SSH tunnel to "
-                                         "coen-cassia and open a skillbridge "
+                                         "the Virtuoso host and open a skillbridge "
                                          "workspace.\nLinux side must have "
                                          "Virtuoso open with the skill server "
                                          "running.")

@@ -11,19 +11,40 @@ Prereqs:
   - pip install skillbridge
 """
 
+import os
 import socket
 import subprocess
 import sys
 import threading
 import time
 
-HOST = "mahmudulpeyal@coen-cassia.boisestate.edu"
+
+def _load_host():
+    """The Virtuoso login 'user@host' - kept OUT of the repo. Set the
+    NVAT_VIRTUOSO_HOST env var, or put one 'user@host' line in a gitignored
+    'virtuoso.local' file at the repo root."""
+    h = os.environ.get("NVAT_VIRTUOSO_HOST", "").strip()
+    if h:
+        return h
+    local = os.path.join(os.path.dirname(__file__), os.pardir, "virtuoso.local")
+    try:
+        with open(local, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return line
+    except OSError:
+        pass
+    return ""
+
+
+HOST = _load_host()
 # The skill server is started PER USER (skill()/pyStartServer use ?id = the
 # login name), so its socket is /tmp/skill-server-<user>.sock - NOT the shared
-# "default" socket. On this multi-user host the "default" socket is already
-# owned by another account and /tmp is sticky, so connecting to it just gets
-# reset (the WinError 10054 we kept hitting). Derive our own per-user socket.
-_USER = HOST.split("@", 1)[0]
+# "default" socket. On a multi-user host the "default" socket may be owned by
+# another account and /tmp is sticky, so connecting to it just gets reset (the
+# WinError 10054 we kept hitting). Derive our own per-user socket.
+_USER = HOST.split("@", 1)[0] if HOST else ""
 REMOTE_SOCKET = f"/tmp/skill-server-{_USER}.sock"
 PORT = 7777
 
