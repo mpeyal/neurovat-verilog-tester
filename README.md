@@ -5,7 +5,7 @@ FeFET) without Cadence. Three built-in ECFET behavioral models are included:
 
 | | |
 |---|---|
-| **v1** ([simulation_core/model_v1.py](simulation_core/model_v1.py)) | Faithful Python port of the original Verilog-A — use it to reproduce/debug Spectre behavior |
+| **v1** ([simulation_core/model_v1.py](simulation_core/model_v1.py)) | Faithful Python port of the original Verilog-A : use it to reproduce/debug Spectre behavior |
 | **v2** ([simulation_core/model_v2.py](simulation_core/model_v2.py)) | Upgraded practical ECFET model — tune it here, then take [ecfet_v2.va](verilog/ecfet_v2.va) (same equations) back to Virtuoso |
 | **v3** ([simulation_core/model_v3.py](simulation_core/model_v3.py)) | Paper-faithful ECFET model with conserved intercalation state and saturating LTP/LTD — twin of [ecfet_v3.va](verilog/ecfet_v3.va) |
 
