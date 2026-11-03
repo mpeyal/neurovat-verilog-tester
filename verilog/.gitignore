@@ -1,0 +1,5 @@
+# Only the ECFET models are shared; every other Verilog-A source in this
+# folder stays local. Files already tracked here are unaffected.
+*
+!.gitignore
+!ecfet*.va
