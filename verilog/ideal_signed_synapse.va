@@ -1,0 +1,21 @@
+// Ideal signed synapse for the MNIST convolutional SNN benchmark.
+// A behavioral multiply, NOT a calibrated ECFET/memristor model.
+// Positive weight injects current into post. Use pre=1 V for a bias.
+// Normalize summed current by g_scale to recover the software layer drive.
+// Convolution reuses each kernel weight at every spatial location.
+// Adam/BPTT and weight storage are external to this element.
+`include "constants.vams"
+`include "disciplines.vams"
+
+module ideal_signed_synapse(pre, post, weight_control, reference);
+    inout pre, post, weight_control, reference;
+    electrical pre, post, weight_control, reference;
+    parameter real weight = 0.0;
+    parameter real g_scale = 1.0e-6 from (0:inf);
+    parameter integer use_control = 0 from [0:1];
+    real signed_weight;
+    analog begin
+        signed_weight = use_control ? V(weight_control, reference) : weight;
+        I(post, reference) <+ -g_scale * signed_weight * V(pre, reference);
+    end
+endmodule

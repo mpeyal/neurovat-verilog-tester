@@ -1,0 +1,3 @@
+# Optional tensor engine for the native SNN Model Builder.
+# snnTorch is not required by the builder or device trainer.
+torch==2.14.1
