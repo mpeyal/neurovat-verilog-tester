@@ -1,0 +1,4 @@
+# cmd.exe misreads labels in LF-only batch files; shell scripts need LF
+*.bat     text eol=crlf
+*.command text eol=lf
+*.sh      text eol=lf

@@ -17,6 +17,16 @@ views. The authors' own FeFET and FeCAP models are private and not included.
 
 ## GUI
 
+**One-click setup:** install Python 3.9 or newer from
+[python.org](https://www.python.org/downloads/), then double-click
+`setup_windows.bat` (Windows) or `setup_mac.command` (macOS). The first run
+creates a `.venv` and installs the requirements; later runs just start the app.
+If macOS blocks the file, right-click it and choose **Open**, or run
+`chmod +x setup_mac.command` once in Terminal. The app is developed on Windows;
+on macOS it uses DearPyGui's built-in font in place of Segoe UI.
+
+**Manual setup:**
+
 ```
 pip install -r requirements.txt
 python run_gui.py
