@@ -53,7 +53,9 @@ Older workspaces with `.va` files at their root are still supported.
 | `vatester/network_studio.py` | Network architecture controls and Verilog-A source binding |
 | `vatester/network_data.py` | Dataset controls, custom patterns and encoding previews |
 | `vatester/network_visualization.py` | Network, cell, weight and activity rendering |
-| `vatester/neuro.py`, `trainer_state.py` | Device-backed training and state serialization |
+| `src/neurovat/` | GUI-free simulation core (crossbar, LIF, STDP, surrogate BPTT, device interface, sweeps) — see [src/neurovat/README.md](src/neurovat/README.md) |
+| `configs/`, `benchmarks/`, `tests/` | Experiment configs, legacy-vs-core benchmark, pytest suite for the core |
+| `vatester/neuro.py`, `trainer_state.py` | GUI `Trainer` on top of the `neurovat` core; state serialization |
 | `vatester/analysis.py`, `stdp_protocol.py`, `compute.py` | Device measurements, timing experiments and compute calculations |
 | `tools/`, root `test_*.py` | Research utilities and regression checks |
 | `results/`, `datasets/`, `saved_model/` | Research outputs, downloaded data and saved networks |
@@ -67,6 +69,12 @@ Run the numerical regression suite:
 
 ```powershell
 python -m unittest test_compute test_trainer_integrity test_stdp_protocol test_snn_builder -v
+```
+
+Run the simulation-core tests (`pip install pytest`):
+
+```powershell
+python -m pytest
 ```
 
 Run the native desktop checks (each opens a test window briefly):

@@ -1,0 +1,33 @@
+# Baseline: 16x10 crossbar on MNIST, one training run per seed.
+#   neurovat run configs/crossbar_16x10.toml
+name = "crossbar_16x10"
+
+[data]
+path = "datasets/mnist.npz"
+fetch_mnist = true          # download on first use; SHA-256 pinned
+train_per_class = 100
+val_per_class = 20
+test_per_class = 50
+seed = 0
+
+[network]                   # 16 inputs (4x4 pixels) x 10 output neurons
+grid_h = 4
+grid_w = 4
+n_out = 10
+learn_rule = "surrogate"    # or "stdp" (device-local)
+encoding = "rate"
+
+[stdp]
+pot_amp = 0.02              # write-pulse amplitudes, in the device model's drive unit
+dep_amp = 0.02
+sg_lr = 0.02
+
+[device]
+model = "softbound"         # any name from `neurovat devices`
+write_noise = 0.0
+
+[train]
+epochs = 6
+
+[sweep]
+seeds = [1, 2, 3]

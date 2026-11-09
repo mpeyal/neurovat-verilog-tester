@@ -17,7 +17,10 @@ for pkg in ("dearpygui",):
     datas += d; binaries += b; hiddenimports += h
 
 # our own packages (some modules are imported lazily / by string name)
-hiddenimports += collect_submodules("simulation_core") + collect_submodules("vatester")
+import sys
+sys.path.insert(0, "src")      # the neurovat core lives in src/ (not installed)
+hiddenimports += (collect_submodules("simulation_core") + collect_submodules("vatester")
+                  + collect_submodules("neurovat"))
 
 # optional deps - bundle if the build env has them, ignore if not.
 # anthropic's HTTP stack (httpx/httpcore/h11/anyio/sniffio/distro/certifi/idna)
@@ -34,7 +37,7 @@ for opt in ("uharfbuzz", "freetype", "anthropic", "openai",
 
 a = Analysis(
     ["run_gui.py"],
-    pathex=["."],
+    pathex=[".", "src"],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

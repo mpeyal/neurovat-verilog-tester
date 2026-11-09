@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "NeuroVAT: a neuromorphic Verilog-A test bench and crossbar spiking-network simulator"
+type: software
+version: 0.1.0
+authors:
+  - family-names: Peyal
+    given-names: Md Mahmudul Kabir
+    affiliation: Boise State University
+repository-code: "https://github.com/mpeyal/neurovat-verilog-tester"
+abstract: >-
+  NeuroVAT is a test bench for neuromorphic synaptic device models. Its
+  neurovat package simulates crossbar arrays of pluggable device models with
+  leaky integrate-and-fire neurons, winner-take-all inhibition, device-local
+  STDP and surrogate-gradient training, and runs seeded, config-driven sweeps
+  of device variation, spike-time jitter and input noise.
+keywords:
+  - neuromorphic computing
+  - spiking neural networks
+  - STDP
+  - ferroelectric devices
+  - crossbar arrays
+  - in-memory computing

@@ -31,6 +31,13 @@ results/model_cache.json
 results/*.log
 results/session_log.txt
 
+# neurovat experiment / benchmark outputs (regenerated from configs/)
+results/sweeps/
+results/benchmark/
+.pytest_cache/
+build/
+dist/
+
 # downloaded datasets (MNIST etc.) + saved-model JSON (outputs, not source)
 /datasets/
 results/models/
