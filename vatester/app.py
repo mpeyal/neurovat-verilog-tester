@@ -4851,6 +4851,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                                 self._nt_learning_tab()
                             with dpg.tab(label="  Metrics  "):
                                 self._nt_metrics_tab()
+                            with dpg.tab(label="  Power  "):
+                                self._nt_power_tab()
                 dpg.set_item_callback("nt_viz_tabs", self._on_nt_viz_tab)
         # Data is the default tab - populate its live rasters right away
         self._nt_encoding_preview()
@@ -5605,6 +5607,27 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                                           tag="nt_metrics_holder",
                                           border=False):
                         pass
+
+    NT_POWER_HINT = ("build a network, then Train / Evaluate to see its "
+                     "energy breakdown")
+
+    def _nt_power_tab(self):
+        with self._pad(left=6, top=4, bottom=0):
+            self._small("component energy of the last training run and "
+                        "evaluation: array read / write, neurons, peripherals, "
+                        "static. Parameters come from power_params.json in the "
+                        "workspace; anything not set there is a PLACEHOLDER "
+                        "and is listed under each table.", color=C_TEXT2)
+            dpg.add_separator()
+            with dpg.child_window(width=-1, height=-1, border=False):
+                t = dpg.add_text(self.NT_POWER_HINT, tag="nt_power_txt",
+                                 color=C_TEXT)
+                if "mono" in self.fonts:
+                    dpg.bind_item_font(t, self.fonts["mono"])
+
+    def _nt_show_power(self, text):
+        if text and dpg.does_item_exist("nt_power_txt"):
+            dpg.set_value("nt_power_txt", text)
 
     # ---- embedded trainer agent -------------------------------------
 
@@ -6396,9 +6419,11 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
             # the grid + n_out); built-in sources return (None, None)
             self._nt_pending_test = None
             patterns, targets = self._nt_build_patterns(cfg)
+            power, power_note = neuro.load_power_params()
             self.trainer = neuro.Trainer(self._nt_dev["make"],
                                          self._nt_dev["kind"], N, S, cfg,
-                                         patterns=patterns, targets=targets)
+                                         patterns=patterns, targets=targets,
+                                         power=power)
         except Exception as e:                          # noqa: BLE001
             self._nt_status(f"build failed: {e}", C_RED)
             self.log(f"[neuro] build failed: {e!r}")
@@ -6431,6 +6456,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                       ("nt_stat_teacc", "--"), ("nt_stat_valacc", "--"), ("nt_stat_best", "--")):
             self._nt_stat(tg, v)
         self._nt_reset_output()
+        if dpg.does_item_exist("nt_power_txt"):
+            dpg.set_value("nt_power_txt", self.NT_POWER_HINT)
+        self.log(f"[neuro] power model: {power_note}")
         # the receptive-field montage shows crossbar 0's post-layer (first
         # hidden layer, or the output for a single crossbar)
         self._nt_setup_rf_texture(self.trainer.layer_sizes[1], cfg.grid_h,
@@ -6507,7 +6535,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
         # demo sets without a validation partition). Never inspect test here.
         best_acc, best_loss, best_w, best_ep = -1.0, float("inf"), None, 0
         error = None
-        output_spikes, weight_change = 0, None
+        output_spikes, weight_change, power_txt = 0, None, None
         try:
             initial_weights = tr.capture_weights()
             for e in range(epochs):
@@ -6552,12 +6580,14 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                             f"(epoch {best_ep}/{done}; selection: {'validation' if tr.validation_patterns else 'training'})"))
             weight_change = max(float(np.max(np.abs(a-b))) for a, b in
                                 zip(tr.capture_weights(), initial_weights))
+            power_txt = neuro.power_text(tr, ("init", "train"))
         except Exception as ex:                          # noqa: BLE001
             error = str(ex)
             self.q.put(("log", f"[neuro] training error: {ex!r}"))
         self.q.put(("nt_done", {"epochs": done, "stopped": self._trainer_stop,
                                 "best_acc": best_acc, "best_ep": best_ep, "error": error,
-                                "output_spikes": output_spikes, "max_weight_change_S": weight_change}))
+                                "output_spikes": output_spikes, "max_weight_change_S": weight_change,
+                                "power": power_txt}))
 
     def on_nt_stop(self, *_):
         if self.trainer_running:
@@ -6588,9 +6618,11 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
     def _nt_test_worker(self):
         tr = self.trainer
         try:
+            tr.energy.reset("eval")          # energy of THIS evaluation only
             tr_yt, tr_yp = tr.evaluate(use_test=False)
             has_test = bool(tr.test_patterns)
             te_yt, te_yp = (tr.evaluate(use_test=True) if has_test else ([], []))
+            power_txt = neuro.power_text(tr, ("init", "train", "eval"))
             # The raster preview is also evaluation: infer advances device time
             # and neuron/RNG state. Keep Evaluate from altering a later resume.
             preview_state = tr.capture_state()
@@ -6604,7 +6636,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
             self.q.put(("nt_metrics", {
                 "train": (tr_yt, tr_yp), "test": (te_yt, te_yp),
                 "n": tr.n_out, "names": list(tr.class_names),
-                "mode": tr.cfg.mode}, snap))
+                "mode": tr.cfg.mode, "power": power_txt}, snap))
         except Exception as ex:                          # noqa: BLE001
             self.q.put(("log", f"[neuro] eval error: {ex!r}"))
             self.q.put(("nt_metrics", None, None))
@@ -6614,6 +6646,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
         self._nt_busy(False)
         self._nt_training_error = info.get("error")
         self._nt_last_training = dict(info)
+        self._nt_show_power(info.get("power"))
         if self._nt_training_error:
             self._nt_status(f"training failed: {self._nt_training_error}", C_RED)
             return
@@ -6675,6 +6708,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
         if not data:
             self._nt_status("evaluation failed", C_RED)
             return
+        self._nt_show_power(data.get("power"))
+        if data.get("power"):
+            self.log("[neuro] " + data["power"])
         n, names = data["n"], data["names"]
         tr_yt, tr_yp = data["train"]
         te_yt, te_yp = data["test"]

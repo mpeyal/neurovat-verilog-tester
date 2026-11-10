@@ -46,6 +46,7 @@ neurovat run configs/crossbar_16x10.toml
 neurovat run configs/sweep_device_variation.toml
 neurovat run configs/sweep_jitter.toml
 neurovat run configs/sweep_noise.toml --set train.epochs=3 --set "sweep.seeds=[1,2,3,4,5]"
+neurovat run configs/sweep_energy_accuracy.toml
 ```
 
 A config names the dataset, network, neuron, learning rule, device and one
@@ -56,13 +57,73 @@ once per seed and re-scores under each value. Each run writes, under
 
 - `config.json` — the resolved config; re-running it reproduces the results,
 - `results.json` — every run (accuracy clean and noisy, validation accuracy,
-  per-epoch history, training time, write count, write effort) with
-  provenance (git commit, versions, dataset SHA-256),
-- `summary.csv` — mean and seed-to-seed standard deviation per swept value.
+  per-epoch history, training time, write count, write effort, energy
+  breakdown of initialisation / training / evaluation) with provenance (git
+  commit, versions, dataset SHA-256) and the power parameters used,
+- `summary.csv` — mean and seed-to-seed standard deviation per swept value,
+  accuracy and energy side by side,
+- `energy/<run>.npz` and `energy/<run>_train.png` / `_eval.png` — per-synapse
+  and per-neuron energy maps (`output.energy_maps = false` turns them off).
 
 `write_effort` is the sum of |amplitude| x pulse width over all write pulses,
-in the device's drive unit. It is a programming-activity proxy, not a power
-model.
+in the device's drive unit. It is a programming-activity proxy; the energy
+figures come from the power model below.
+
+## Power and energy
+
+Every `CrossbarSNN` carries an `EnergyMeter` (`net.energy`) that accumulates
+energy while the network trains and evaluates. It only observes; results are
+identical with or without it.
+
+| Component | Energy |
+|---|---|
+| array read | `v_read^2 * G * t_read` per device, per input spike on its row, with the conductance the MVM actually used |
+| array write | per programming pulse and per device: `amplitude * I * width`. `I` is `power.write_current`, else the device's `write_current()` if it has one, else ohmic `amplitude * mean(G before, G after)`. Current-driven devices: `abs(I_pulse) * v_write * width` |
+| neurons | `e_spike` per spike |
+| peripherals | `e_row_driver` per input spike per crossbar, `e_col_sense` per column per timestep with an active row, `e_wta` per inhibition event (reported as three lines) |
+| static | `p_leak` per neuron and `p_peripheral_static`, times simulated time |
+
+```python
+print(neurovat.power.format_report(net.energy.report("eval")))
+```
+
+`report(phase)` (`"init"`, `"train"`, `"eval"`) gives the breakdown table,
+energy per synaptic operation (pJ/SOP, one SOP = one input spike arriving at
+one synapse), energy per neuron spike, energy per presentation (inference),
+and average power at `timestep_s` (default: the simulation step
+`network.dt_ms`). `net.energy.maps(phase)` returns the per-synapse and
+per-neuron arrays; `power.save_maps` / `power.plot_maps` write them out.
+
+Parameters go in the config (SI units):
+
+```toml
+[power]
+v_read = 0.1                 # V
+t_read = 100e-9              # s
+neuron_file = "lif_energy.json"   # values extracted from the LIF circuit
+```
+
+`neuron_file` is the hook for circuit-extracted neuron values: a `.json`,
+`.toml` or `.csv` (`name,value` rows) with `e_spike` (J per spike) and/or
+`p_leak` (W per neuron), plus optional `source`, `corner`, `vdd`,
+`temperature`, `cell`, `date`, `notes`. The path is relative to the working
+directory. It is read as data only.
+
+**No parameter has a silent default.** Anything not supplied runs on the
+value in `neurovat.power.PLACEHOLDERS`, and is listed as a PLACEHOLDER in the
+run log, in every report and in `results.json` (`power.placeholders`). The
+counts behind each energy are stored, not the energies, so
+`net.energy.params.load_neuron_file(...)` after a run re-prices it without
+re-simulating.
+
+`power.*` values can be swept like any other parameter, and every sweep
+reports `infer_energy_J`, `infer_power_W`, `pj_per_sop`,
+`pj_per_neuron_spike`, `train_energy_J`, `train_write_energy_J` next to the
+accuracies.
+
+Not modelled: wire and sneak-path losses, and write time in the average-power
+clock (pulses are assumed to fit inside the timestep). WTA events are counted
+on the STDP path only.
 
 ## Adding a device model
 
@@ -77,6 +138,7 @@ class FTJArray(DeviceArray):
     def state_dict(self): ...
     def load_state_dict(self, state): ...
     def nominal(self): ...                     # fresh 1x1 nominal device
+    def write_current(self, rows, cols, amps, width): ...    # optional, A
 
 register_device("ftj", FTJArray)               # then: [device] model = "ftj"
 ```

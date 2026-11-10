@@ -30,6 +30,31 @@ from neurovat.devices import (ScalarTwinArray, device_weight,
 from neurovat.lif import (probe_lif, probe_lif_wave, fi_curve, probe_lif_psp,
                           fi_curve_psp)
 from neurovat.network import CrossbarSNN
+from neurovat.power import PowerParams, format_report
+
+POWER_FILE = "power_params.json"      # optional, in the workspace (data only)
+
+
+def load_power_params(path=POWER_FILE):
+    """Energy-model parameters for the Trainer: the values in the workspace
+    file ``power_params.json`` (a flat ``name -> value`` table of PowerParams
+    fields, SI units) when it exists; everything else stays a flagged
+    placeholder. Returns (params, note)."""
+    if not os.path.isfile(path):
+        return PowerParams(), f"no {path}: all placeholder values"
+    try:
+        params = PowerParams().load_file(path)
+    except (OSError, ValueError) as exc:
+        return PowerParams(), f"{path} ignored ({exc}): all placeholder values"
+    return params, f"{path}: {len(params.sources)} value(s) loaded"
+
+
+def power_text(trainer, phases=("train", "eval")):
+    """Energy breakdown tables of a trainer, as text."""
+    names = {"init": "Energy - weight initialisation",
+             "train": "Energy - training", "eval": "Energy - evaluation"}
+    return "\n\n".join(format_report(trainer.energy.report(ph), names[ph])
+                       for ph in phases if ph in trainer.energy.tallies)
 
 
 class Trainer(CrossbarSNN):
@@ -37,11 +62,11 @@ class Trainer(CrossbarSNN):
     train_step() per stimulus; weights_uS() reads the live conductances."""
 
     def __init__(self, make_device, input_kind, neuron, stdp, cfg,
-                 patterns=None, targets=None):
+                 patterns=None, targets=None, power=None):
         self.make_device = make_device
         self.input_kind = input_kind          # "current" | "voltage"
         super().__init__(twin_factory(make_device), neuron, stdp, cfg,
-                         patterns=patterns, targets=targets)
+                         patterns=patterns, targets=targets, power=power)
 
     @property
     def crossbars(self):

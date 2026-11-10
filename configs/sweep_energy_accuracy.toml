@@ -1,0 +1,53 @@
+# Accuracy vs energy under device-to-device variation.
+#   neurovat run configs/sweep_energy_accuracy.toml
+# summary.csv has test_acc next to infer_energy_J, pj_per_sop, train_energy_J, ...
+name = "sweep_energy_accuracy"
+
+[data]
+path = "datasets/mnist.npz"
+fetch_mnist = true          # download on first use; SHA-256 pinned
+train_per_class = 100
+val_per_class = 20
+test_per_class = 50
+seed = 0
+
+[network]                   # 16 inputs (4x4 pixels) x 10 output neurons
+grid_h = 4
+grid_w = 4
+n_out = 10
+learn_rule = "surrogate"    # or "stdp" (device-local; counts WTA events)
+encoding = "rate"
+
+[stdp]
+pot_amp = 0.02              # write-pulse amplitudes, in the device model's drive unit
+dep_amp = 0.02
+sg_lr = 0.02
+
+[device]
+model = "softbound"         # any name from `neurovat devices`
+write_noise = 0.0
+
+[train]
+epochs = 6
+
+# Energy-model parameters, SI units. Every line left commented out runs on a
+# flagged PLACEHOLDER (listed in the log, the reports and results.json), so
+# fill in the values of your own design before quoting any number.
+[power]
+# v_read = ...              # V, read voltage across a synapse
+# t_read = ...              # s, read pulse width
+# v_write = ...             # V, write compliance (current-driven devices only)
+# write_current = ...       # A; unset = device model, else ohmic V x G
+# e_row_driver = ...        # J per row drive (one input spike)
+# e_col_sense = ...         # J per column sense / ADC / integrator operation
+# e_wta = ...               # J per WTA / inhibition event
+# p_peripheral_static = ... # W
+# timestep_s = ...          # s, clock for average power; unset = network.dt_ms
+# neuron_file = "lif_energy.json"   # e_spike (J) and p_leak (W) from the LIF circuit
+# e_spike = ...             # or give them here instead of neuron_file
+# p_leak = ...
+
+[sweep]
+parameter = "device.variation.tau_w"    # or "network.input_noise", "device.write_noise", "power.v_read"
+values = [0.0, 0.05, 0.1, 0.2, 0.4]
+seeds = [1, 2, 3]

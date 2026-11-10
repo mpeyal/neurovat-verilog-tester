@@ -58,6 +58,11 @@ class DeviceArray:
         not a function of conductance alone should raise ValueError."""
         raise ValueError(f"Cannot restore {type(self).__name__} conductance")
 
+    #: Optional ``write_current(rows, cols, amps, width) -> A``: the current
+    #: each device draws during a voltage write pulse, called BEFORE
+    #: ``program``. Without it the energy model assumes an ohmic device
+    #: (amplitude x conductance); see ``neurovat.power``.
+
     def potentiation_sign(self, amp, width):
         """+1 if a positive drive raises conductance, else -1."""
         probe = self.nominal()

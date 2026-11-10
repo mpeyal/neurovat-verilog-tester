@@ -31,6 +31,7 @@ from .crossbar import input_drive, normalize, trace_matrix
 from .devices import device_factory
 from .encoding import encode_spikes as _encode_spikes
 from .patterns import make_patterns
+from .power import EnergyMeter
 from .state import pack, unpack
 
 CLEAN_SEED = 20240517     # fixed rng of a clean (noise-free) evaluation
@@ -42,9 +43,12 @@ class CrossbarSNN:
 
     device   a registered model name ("fefet", "softbound", ...) or a factory
              ``f(n_post, n_pre, seed) -> DeviceArray``
+    power    :class:`neurovat.power.PowerParams` of the energy model
+             (``self.energy``); None runs it on flagged placeholder values
     """
 
-    def __init__(self, device, neuron, stdp, cfg, patterns=None, targets=None):
+    def __init__(self, device, neuron, stdp, cfg, patterns=None, targets=None,
+                 power=None):
         self.N = neuron
         self.S = stdp
         self.cfg = cfg
@@ -63,6 +67,12 @@ class CrossbarSNN:
         self.arrays = [factory(self.layer_sizes[c + 1], self.layer_sizes[c],
                                seed=[int(cfg.seed), 53, c])
                        for c in range(self.n_layers)]
+        # energy accounting by phase: "init" (weight initialisation writes),
+        # "train" (learning presentations + writes), "eval" (forward-only)
+        self.energy = EnergyMeter([a.shape for a in self.arrays],
+                                  [a.input_kind for a in self.arrays],
+                                  power, cfg.dt_ms * 1e-3)
+        self._phase = "init"
         self.g_max = float(self.arrays[0].g_max)
         self.g_min = float(self.arrays[0].g_min)
         self.pot_sign = (stdp.pot_sign if stdp.pot_sign else
@@ -121,6 +131,7 @@ class CrossbarSNN:
         # only randomise for the surrogate rule.
         if cfg.learn_rule == "surrogate":
             self._randomize_weights(self.rng)
+        self._phase = "train"
 
     def _randomize_weights(self, rng, spread=0.55):
         """Spread the crossbar conductances around their reset value by writing
@@ -229,8 +240,16 @@ class CrossbarSNN:
             np.broadcast_to(strength, shape), gain, self.S, self.pot_sign)
         if not rows.size:
             return
-        self._t_dev = self.arrays[c].program(rows, cols, amps,
-                                             self.S.pulse_width, self._t_dev)
+        array = self.arrays[c]
+        g_before = np.asarray(array.conductance(), float)[rows, cols]
+        current = getattr(array, "write_current", None)
+        if current is not None:
+            current = current(rows, cols, amps, self.S.pulse_width)
+        self._t_dev = array.program(rows, cols, amps,
+                                    self.S.pulse_width, self._t_dev)
+        self.energy.record_write(
+            self._phase, c, rows, cols, amps, self.S.pulse_width, g_before,
+            np.asarray(array.conductance(), float)[rows, cols], current)
         if c not in self._lw:
             self._lw[c] = (np.zeros(shape, bool), np.full(shape, np.nan))
         self._lw[c][0][rows, cols] = pot
@@ -322,6 +341,7 @@ class CrossbarSNN:
         refrac = [np.zeros(L[c + 1]) for c in range(K)]
         v_trace = np.zeros((T, self.n_out))      # output layer membrane
         wta = N.inhibition > 0 and self.n_out > 1
+        wta_ops = 0
 
         for t in range(T):
             for c in range(K):
@@ -352,6 +372,7 @@ class CrossbarSNN:
                     if wta and c == K - 1:
                         idx = np.nonzero(fired)[0]
                         win = idx[int(np.argmax(vc[idx]))]
+                        wta_ops += 1
                         vc -= N.inhibition          # the winner is reset below
                         fired = np.zeros(L[c + 1], bool)
                         fired[win] = True
@@ -376,6 +397,9 @@ class CrossbarSNN:
                     self.theta[c] *= d_theta
 
         counts = rast[-1].sum(0)
+        self.energy.record_forward("train" if learn else "eval",
+                                   [self.weights_S(c) for c in range(K)],
+                                   rast, wta_ops)
         if learn:
             self.spike_count += counts              # not polluted by eval
             for c in range(K):
@@ -448,6 +472,8 @@ class CrossbarSNN:
         _, S_in = self._input(vec01, clean, rng)
         spk, cache = _sg.forward(np.asarray(S_in, float), Wn, gains, alpha, thr)
         T = spk[0].shape[0]
+        self.energy.record_forward("train" if learn else "eval",
+                                   [self.weights_S(c) for c in range(K)], spk)
 
         # readout: mean output-membrane "evidence" -> softmax; the winner is the
         # argmax, used for BOTH the loss and inference, so train == test.
@@ -538,7 +564,9 @@ class CrossbarSNN:
         for a in range(0, len(vecs), batch):
             S = np.array([self._input(v, True, rng_of(a + k))[1]
                           for k, v in enumerate(vecs[a:a + batch])], dtype=float)
-            _, cache = _sg.forward(S, Wn, gains, alpha, thr)
+            spk, cache = _sg.forward(S, Wn, gains, alpha, thr)
+            self.energy.record_forward(
+                "eval", [self.weights_S(c) for c in range(self.n_layers)], spk)
             out.extend(np.argmax(cache[-1][0].mean(1), axis=1).tolist())
         return out
 
