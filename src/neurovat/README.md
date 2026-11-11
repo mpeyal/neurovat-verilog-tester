@@ -155,7 +155,26 @@ python -m pytest
 python benchmarks/bench_mnist.py --train 1000 --test 1000
 ```
 
-The benchmark trains and scores the pre-package engine
+### Unsupervised pattern finding (Masquelier et al. 2008)
+
+```
+python benchmarks/masquelier2008.py --seeds 20 --jobs 8
+python benchmarks/masquelier2008.py --seeds 4 --device softbound --write-window-ms 50
+```
+
+`neurovat.masquelier` reproduces Masquelier, Guyonneau & Thorpe (2008,
+PLoS ONE 3:e1377): one SRM neuron, 2000 afferents firing continuously at
+64 Hz, a 50 ms pattern on half of them recurring in a quarter of the time
+under 1 ms jitter and 10 Hz noise, and nearest-spike additive STDP, for
+450 s. A run succeeds when, over the last 150 s, the hit rate is above 98 %,
+there is no false alarm and the mean latency after pattern onset is below
+10 ms (the paper: 96 % of 100 runs). The STDP pairing and the 0.1 ms neuron
+step follow the Brian replication (Hathway & Goodman 2018, ReScience 4:6);
+with a 1 ms step every weight potentiates and nothing is learnt. `--device`
+puts a registered device model behind each synapse and is reported, not
+asserted.
+
+The MNIST benchmark trains and scores the pre-package engine
 (`benchmarks/legacy_neuro.py`) and this package on the same MNIST subset from
 the same seed, and reports wall time and the difference in the trained
 conductances and predictions.
