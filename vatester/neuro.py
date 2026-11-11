@@ -43,17 +43,48 @@ def power_profile_path(family, folder=POWER_DIR):
     return os.path.join(folder, name + ".json") if name else None
 
 
-def load_power_params(family, folder=POWER_DIR):
-    """Energy-model parameters for the Trainer from the selected device
-    family's profile ``power_profiles/<family>.json`` (a flat ``name -> value``
-    table of PowerParams fields in SI units, plus optional source / corner /
-    temperature / notes). There is no shared fallback file, so one family
-    never runs on another family's numbers: anything the profile does not set
-    stays a flagged placeholder. Returns (params, note)."""
-    path = power_profile_path(family, folder)
-    if path is None or not os.path.isfile(path):
-        where = path or f"{folder}/<family>.json"
-        return PowerParams(), f"no {where}: all placeholder values"
+PROFILE_DEFAULT = "Default (match device)"
+PROFILE_NONE = "Placeholders only"
+DEFAULT_PROFILE = "default"            # power_profiles/default.json, optional
+
+
+def list_power_profiles(folder=POWER_DIR):
+    """Names of the profiles in ``power_profiles/`` (``ecfet.json`` ->
+    "ecfet"), sorted."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    return sorted(n[:-5] for n in names
+                  if n.lower().endswith(".json")
+                  and os.path.isfile(os.path.join(folder, n)))
+
+
+def load_power_params(family, folder=POWER_DIR, choice=None):
+    """Energy-model parameters for the Trainer. Returns (params, note).
+
+    ``choice`` is a profile name from :func:`list_power_profiles` (use that
+    file whatever the device), :data:`PROFILE_NONE` (no file: every value a
+    flagged placeholder), or None / :data:`PROFILE_DEFAULT`: the selected
+    device family's own profile ``power_profiles/<family>.json``, else the
+    user's ``power_profiles/default.json``, else placeholders. A profile is a
+    flat ``name -> value`` table of PowerParams fields in SI units plus
+    optional source / corner / temperature / notes. Anything a profile does
+    not set stays a flagged placeholder."""
+    if choice == PROFILE_NONE:
+        return PowerParams(), "placeholders only (no profile): all placeholder values"
+    if choice and choice != PROFILE_DEFAULT:
+        path = power_profile_path(choice, folder)
+        if path is None or not os.path.isfile(path):
+            return PowerParams(), f"no {path}: all placeholder values"
+    else:
+        path = power_profile_path(family, folder)
+        if path is None or not os.path.isfile(path):
+            path = power_profile_path(DEFAULT_PROFILE, folder)
+            if not os.path.isfile(path):
+                where = power_profile_path(family, folder) or f"{folder}/<family>.json"
+                return PowerParams(), (f"no {where} and no {path}: "
+                                       "all placeholder values")
     try:
         params = PowerParams().load_file(path)
     except (OSError, ValueError) as exc:

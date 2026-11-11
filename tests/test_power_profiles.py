@@ -36,3 +36,34 @@ def test_bad_profile_is_reported_not_used(tmp_path):
     _write(d, "alpha.json", {"e_spike": -1})
     p, note = neuro.load_power_params("alpha", str(d))
     assert p.sources == {} and "ignored" in note
+
+
+def test_explicit_choice_and_default_file(tmp_path):
+    d = tmp_path / "power_profiles"
+    _write(d, "alpha.json", {"e_spike": 1e-12})
+    _write(d, "beta.json", {"e_spike": 2e-12})
+    assert neuro.list_power_profiles(str(d)) == ["alpha", "beta"]
+    # an explicit choice wins over the device family
+    p, note = neuro.load_power_params("alpha", str(d), choice="beta")
+    assert p.e_spike == 2e-12 and "beta.json" in note
+    # placeholders only, on request
+    p, _ = neuro.load_power_params("alpha", str(d), choice=neuro.PROFILE_NONE)
+    assert p.sources == {}
+    # default: own family first, then default.json, then placeholders
+    p, _ = neuro.load_power_params("alpha", str(d), choice=neuro.PROFILE_DEFAULT)
+    assert p.e_spike == 1e-12
+    p, _ = neuro.load_power_params("gamma", str(d))
+    assert p.sources == {}
+    _write(d, "default.json", {"e_spike": 5e-12})
+    p, note = neuro.load_power_params("gamma", str(d))
+    assert p.e_spike == 5e-12 and "default.json" in note
+
+
+def test_new_params_reprice_a_recorded_run():
+    import numpy as np
+    from neurovat.power import EnergyMeter, PowerParams
+    m = EnergyMeter([(1, 1)], ["current"], PowerParams(e_spike=1e-12), 1e-3)
+    m.record_forward("eval", [np.zeros((1, 1))], [np.zeros((4, 1)), np.ones((4, 1))])
+    assert m.report("eval")["energy_J"]["neurons"] == pytest.approx(4e-12)
+    m.params = PowerParams(e_spike=3e-12)
+    assert m.report("eval")["energy_J"]["neurons"] == pytest.approx(12e-12)

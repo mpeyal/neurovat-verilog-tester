@@ -5620,6 +5620,18 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                         "workspace (e.g. ecfet.json); anything not set there "
                         "is a PLACEHOLDER and is listed under each table.",
                         color=C_TEXT2)
+            with dpg.group(horizontal=True):
+                self._small("NEURON / PERIPHERAL POWER", color=C_TEXT2)
+                dpg.add_combo(self._nt_power_choices(), tag="nt_power_profile",
+                              default_value=neuro.PROFILE_DEFAULT, width=220,
+                              callback=lambda *_: self._on_nt_power_profile())
+                dpg.add_button(label="Refresh list",
+                               callback=lambda *_: self._nt_refresh_power_choices())
+            self._small("Default = the selected device's own profile "
+                        "(ecfet.json for ECFET, fefet.json for FeFET), else "
+                        "power_profiles/default.json if you create one, else "
+                        "placeholders. Changing it re-prices the last run.",
+                        color=C_TEXT2)
             dpg.add_separator()
             with dpg.child_window(width=-1, height=-1, border=False):
                 t = dpg.add_text(self.NT_POWER_HINT, tag="nt_power_txt",
@@ -5630,6 +5642,45 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
     def _nt_show_power(self, text):
         if text and dpg.does_item_exist("nt_power_txt"):
             dpg.set_value("nt_power_txt", text)
+
+    @staticmethod
+    def _nt_power_choices():
+        return ([neuro.PROFILE_DEFAULT] + neuro.list_power_profiles()
+                + [neuro.PROFILE_NONE])
+
+    def _nt_refresh_power_choices(self):
+        if not dpg.does_item_exist("nt_power_profile"):
+            return
+        items = self._nt_power_choices()
+        dpg.configure_item("nt_power_profile", items=items)
+        if dpg.get_value("nt_power_profile") not in items:
+            dpg.set_value("nt_power_profile", neuro.PROFILE_DEFAULT)
+
+    def _nt_power_choice(self):
+        if dpg.does_item_exist("nt_power_profile"):
+            return dpg.get_value("nt_power_profile") or neuro.PROFILE_DEFAULT
+        return neuro.PROFILE_DEFAULT
+
+    def _nt_load_power(self):
+        family = (self._nt_dev or {}).get("family")
+        return neuro.load_power_params(family, choice=self._nt_power_choice())
+
+    def _on_nt_power_profile(self):
+        """Profile changed: re-price the last run (the meter keeps counts, not
+        energies), or just take effect at the next Build."""
+        tr = self.trainer
+        if tr is None or self.trainer_running:
+            self.log(f"[neuro] power profile '{self._nt_power_choice()}' "
+                     "applies at the next Build / Train")
+            return
+        power, note = self._nt_load_power()
+        tr.energy.params = power
+        tr.power_note = note
+        self.log(f"[neuro] power model: {note}")
+        if tr.energy.tallies:
+            self._nt_show_power(neuro.power_text(
+                tr, tuple(ph for ph in ("init", "train", "eval")
+                          if ph in tr.energy.tallies)))
 
     # ---- embedded trainer agent -------------------------------------
 
@@ -5679,7 +5730,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                 val = str(val)
         except (TypeError, ValueError):
             return False
-        if tag in ("nt_device", "nt_va_source") and val not in dpg.get_item_configuration(tag).get("items", []):
+        if tag == "nt_power_profile":
+            self._nt_refresh_power_choices()
+        if tag in ("nt_device", "nt_va_source", "nt_power_profile") and val not in dpg.get_item_configuration(tag).get("items", []):
             return False
         dpg.set_value(tag, val)
         if tag == "nt_learnrule":
@@ -5688,6 +5741,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
             self._on_nt_device_change()
         elif tag == "nt_va_source":
             self.network_studio.select_source()
+        elif tag == "nt_power_profile":
+            self._on_nt_power_profile()
         return True
 
     def _run_nt_actions(self, actions):
@@ -6422,8 +6477,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
             # the grid + n_out); built-in sources return (None, None)
             self._nt_pending_test = None
             patterns, targets = self._nt_build_patterns(cfg)
-            power, power_note = neuro.load_power_params(
-                self._nt_dev.get("family"))
+            self._nt_refresh_power_choices()
+            power, power_note = self._nt_load_power()
             self.trainer = neuro.Trainer(self._nt_dev["make"],
                                          self._nt_dev["kind"], N, S, cfg,
                                          patterns=patterns, targets=targets,

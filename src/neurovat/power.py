@@ -241,6 +241,17 @@ class EnergyMeter:
         self.device_current = [False] * len(self.shapes)
         self.tallies = {}
 
+    @property
+    def params(self):
+        """The :class:`PowerParams` energies are priced with. The tallies are
+        parameter-independent, so assigning new params re-prices every phase
+        already recorded without re-simulating."""
+        return self.p
+
+    @params.setter
+    def params(self, value):
+        self.p = value if value is not None else PowerParams()
+
     def tally(self, phase):
         if phase not in self.tallies:
             self.tallies[phase] = _Tally(self.shapes)
