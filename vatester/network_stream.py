@@ -370,7 +370,7 @@ class NetworkStreamMixin:
                         sign = array.potentiation_sign(d["pot"], d["width"])
                         w = {"pot_sign": sign, "pulse_width": d["width"],
                              "write_gain": d["pot"] / P.a_plus,
-                             "dep_gain": d["dep"] / a_minus,
+                             "dep_gain": d["dep"] / a_minus if a_minus > 0 else 0.0,
                              "pot_amp": d["pot"], "dep_amp": d["dep"],
                              "pot_step": pulse_step(array, sign * d["pot"],
                                                     d["width"], P.w_init),

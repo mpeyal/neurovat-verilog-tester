@@ -132,6 +132,13 @@ def test_calibrated_pulses_make_one_stdp_step():
     assert down == pytest.approx(-a_minus, rel=0.03)
 
 
+def test_calibration_skips_a_direction_that_is_switched_off():
+    P = MasquelierParams(a_minus_ratio=0.0)
+    cal = calibrate_write(device_factory("softbound")(1, 1), P, 1e-3)
+    assert cal["dep_gain"] == 0.0 and cal["dep_amp"] == 0.0
+    assert cal["pot_step"] == pytest.approx(P.a_plus, rel=0.03)
+
+
 def test_calibration_reports_a_step_that_is_out_of_reach():
     P = MasquelierParams(a_plus=0.9)        # softbound cannot jump that far
     with pytest.raises(ValueError, match="cannot make a step"):

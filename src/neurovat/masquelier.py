@@ -515,6 +515,10 @@ def calibrate_write(device, P, width, amp0=1.0, tol=0.02):
     a_minus = P.a_minus_ratio * P.a_plus
     for name, direction, target in (("pot", 1.0, P.a_plus),
                                     ("dep", -1.0, a_minus)):
+        if target <= 0.0:                   # that direction is switched off
+            out[name + "_amp"], out[name + "_step"] = 0.0, 0.0
+            continue
+
         def step(amp):
             return abs(pulse_step(device, direction * sign * amp, width,
                                   P.w_init))
@@ -530,8 +534,8 @@ def calibrate_write(device, P, width, amp0=1.0, tol=0.02):
                 break
             lo, hi = (mid, hi) if got < target else (lo, mid)
         out[name + "_amp"], out[name + "_step"] = mid, got
-    out["write_gain"] = out["pot_amp"] / P.a_plus
-    out["dep_gain"] = out["dep_amp"] / a_minus
+    out["write_gain"] = out["pot_amp"] / P.a_plus if P.a_plus > 0 else 0.0
+    out["dep_gain"] = out["dep_amp"] / a_minus if a_minus > 0 else 0.0
     return out
 
 

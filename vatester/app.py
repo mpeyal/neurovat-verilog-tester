@@ -331,6 +331,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         self._trainer_stop = False
         self._nt_dev = None             # {make, kind, label} synapse factory
         self._nt_loaded_model = False   # the built network holds loaded weights
+        self._nt_loading = False        # inside on_nt_load
         self._rf_tex = None             # receptive-field montage raw texture
         self._rf_layout = None          # (n_out, gh, gw, cell, gap, tw, th)
         self._nt_series = {}            # group -> [series tags] to clear
@@ -6447,7 +6448,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         showing the old device: rebuild at once if nothing was learnt yet,
         otherwise say clearly that the views are those of the old device."""
         tr = self.trainer
-        if tr is None or self.trainer_running:
+        if tr is None or self.trainer_running or self._nt_loading:
             return
         try:
             now = self.network_studio.binding()
@@ -6680,7 +6681,11 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         except (ValueError, OSError) as exc:
             self._nt_status(f"load failed: {exc}", C_RED)
             return
-        self._on_nt_device_change()
+        self._nt_loading = True         # the load rebuilds below, once
+        try:
+            self._on_nt_device_change()
+        finally:
+            self._nt_loading = False
         # 1. restore every control so the rebuild matches the saved setup
         for tag, val in (model.get("controls") or {}).items():
             if dpg.does_item_exist(tag):
