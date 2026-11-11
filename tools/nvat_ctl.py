@@ -21,6 +21,7 @@ Then drive it from any shell (this is what the agent / Claude Code calls):
     python tools/nvat_ctl.py nt_build            # build the trainer crossbar
     python tools/nvat_ctl.py nt_train            # train (waits for completion)
     python tools/nvat_ctl.py nt_test
+    python tools/nvat_ctl.py nt_power_save       # Power tab report -> results/energy_reports/
 
 Typical closed loop the driver runs:
     set params -> run -> read results/agent_snapshot.json -> (if wrong) edit the

@@ -30,7 +30,7 @@ from neurovat.devices import (ScalarTwinArray, device_weight,
 from neurovat.lif import (probe_lif, probe_lif_wave, fi_curve, probe_lif_psp,
                           fi_curve_psp)
 from neurovat.network import CrossbarSNN
-from neurovat.power import PowerParams, format_report
+from neurovat.power import PowerParams, format_report, _eng as fmt_si
 
 POWER_DIR = "power_profiles"          # optional, in the workspace (data only)
 
@@ -93,6 +93,38 @@ def load_power_params(family, folder=POWER_DIR, choice=None):
     corner = " ".join(str(meta[k]) for k in ("corner", "temperature") if k in meta)
     return params, (f"{path}" + (f" ({corner})" if corner else "")
                     + f": {len(params.sources)} value(s) loaded")
+
+
+POWER_PHASES = ("init", "train", "eval")
+PHASE_NAMES = {"init": "Initialisation", "train": "Training",
+               "eval": "Evaluation"}
+# (label, group, key) of every energy component, in report order; group None
+# = top-level line, else the line it is part of
+POWER_COMPONENTS = (
+    ("array read", None, "array_read"),
+    ("array write", None, "array_write"),
+    ("neuron spikes", None, "neurons"),
+    ("peripherals", None, "peripherals"),
+    ("row drivers", "peripherals", "row_driver"),
+    ("column sense", "peripherals", "column_sense"),
+    ("WTA / inhibition", "peripherals", "wta"),
+    ("static", None, "static"),
+    ("neuron leakage", "static", "neuron_leak"),
+    ("peripheral static", "static", "peripheral_static"),
+)
+
+
+def power_component(rep, group, key):
+    """Energy (J) of one POWER_COMPONENTS entry in a report."""
+    if group is None:
+        return rep["energy_J"][key]
+    return rep[group + "_J"][key]
+
+
+def power_reports(trainer, phases=POWER_PHASES):
+    """{phase: energy report} for the phases the trainer has run."""
+    return {ph: trainer.energy.report(ph, parameters=False)
+            for ph in phases if ph in trainer.energy.tallies}
 
 
 def power_text(trainer, phases=("train", "eval")):

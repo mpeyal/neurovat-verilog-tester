@@ -345,6 +345,13 @@ class ControlBridge:
         return self._await_trainer("nt_test", write_nt=True,
                                    timeout_s=args.get("timeout_s", 300))
 
+    def _cmd_nt_power_save(self, args):
+        # no caller-supplied path: always results/energy_reports/<timestamp>.txt
+        path = self.app.on_nt_power_save()
+        if path is None:
+            raise RuntimeError("no energy report yet: train or evaluate first")
+        return {"path": path}
+
     # -- shared async waiters --------------------------------------------
     def _await_sim(self, name, write_snapshot, timeout_s):
         app = self.app
@@ -394,6 +401,7 @@ class ControlBridge:
         "run": _cmd_run, "stdp": _cmd_stdp, "reload": _cmd_reload,
         "nt_build": _cmd_nt_build, "nt_load": _cmd_nt_load,
         "nt_train": _cmd_nt_train, "nt_test": _cmd_nt_test,
+        "nt_power_save": _cmd_nt_power_save,
         "check_va": _cmd_check_va, "openvaf": _cmd_openvaf, "fit": _cmd_fit,
         "log": _cmd_log,
         "noise_plot": _cmd_noise_plot, "noise_data": _cmd_noise_data,

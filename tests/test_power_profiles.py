@@ -67,3 +67,19 @@ def test_new_params_reprice_a_recorded_run():
     assert m.report("eval")["energy_J"]["neurons"] == pytest.approx(4e-12)
     m.params = PowerParams(e_spike=3e-12)
     assert m.report("eval")["energy_J"]["neurons"] == pytest.approx(12e-12)
+
+
+def test_power_components_add_up_to_the_total():
+    import numpy as np
+    from neurovat.power import EnergyMeter, PowerParams
+    m = EnergyMeter([(2, 3)], ["current"], PowerParams(e_spike=1e-12), 1e-3)
+    m.record_forward("eval", [np.full((2, 3), 1e-6)],
+                     [np.ones((4, 3)), np.ones((4, 2))])
+    rep = m.report("eval", parameters=False)
+    top = sum(neuro.power_component(rep, g, k)
+              for _, g, k in neuro.POWER_COMPONENTS if g is None)
+    assert top == pytest.approx(rep["energy_J"]["total"])
+    for group in ("peripherals", "static"):
+        parts = sum(neuro.power_component(rep, g, k)
+                    for _, g, k in neuro.POWER_COMPONENTS if g == group)
+        assert parts == pytest.approx(rep["energy_J"][group])

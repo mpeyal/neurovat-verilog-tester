@@ -4774,6 +4774,13 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                              callback=self._on_nt_save_file, default_path=mdir,
                              default_filename="neuro_model"):
             dpg.add_file_extension(".json", color=(220, 200, 140, 255))
+        os.makedirs(self._nt_power_report_dir, exist_ok=True)
+        with dpg.file_dialog(directory_selector=False, show=False, modal=True,
+                             width=640, height=420, tag="nt_power_save_dialog",
+                             callback=self._on_nt_power_save_file,
+                             default_path=self._nt_power_report_dir,
+                             default_filename="energy_report"):
+            dpg.add_file_extension(".txt", color=(150, 220, 160, 255))
         with dpg.file_dialog(directory_selector=False, show=False, modal=True,
                              width=640, height=420, tag="nt_load_dialog",
                              callback=self._on_nt_load_file, default_path=mdir):
@@ -4846,12 +4853,12 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                                 self._nt_output_tab()
                     with dpg.tab(label="Results", tag="nt_tab_results"):
                         self._nt_result_summary()
-                        with dpg.tab_bar():
+                        with dpg.tab_bar(tag="nt_results_tabs"):
                             with dpg.tab(label="  Learning  "):
                                 self._nt_learning_tab()
                             with dpg.tab(label="  Metrics  "):
                                 self._nt_metrics_tab()
-                            with dpg.tab(label="  Power  "):
+                            with dpg.tab(label="  Power  ", tag="nt_tab_power"):
                                 self._nt_power_tab()
                 dpg.set_item_callback("nt_viz_tabs", self._on_nt_viz_tab)
         # Data is the default tab - populate its live rasters right away
@@ -5612,14 +5619,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                      "energy breakdown")
 
     def _nt_power_tab(self):
+        head = (126, 150, 220)
         with self._pad(left=6, top=4, bottom=0):
-            self._small("component energy of the last training run and "
-                        "evaluation: array read / write, neurons, peripherals, "
-                        "static. Parameters come from the selected device "
-                        "family's profile, power_profiles/<family>.json in the "
-                        "workspace (e.g. ecfet.json); anything not set there "
-                        "is a PLACEHOLDER and is listed under each table.",
-                        color=C_TEXT2)
             with dpg.group(horizontal=True):
                 self._small("NEURON / PERIPHERAL POWER", color=C_TEXT2)
                 dpg.add_combo(self._nt_power_choices(), tag="nt_power_profile",
@@ -5627,6 +5628,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                               callback=lambda *_: self._on_nt_power_profile())
                 dpg.add_button(label="Refresh list",
                                callback=lambda *_: self._nt_refresh_power_choices())
+                dpg.add_button(label="Save report (.txt)...",
+                               callback=lambda *_: self._on_nt_power_save_click())
             self._small("Default = the selected device's own profile "
                         "(ecfet.json for ECFET, fefet.json for FeFET), else "
                         "power_profiles/default.json if you create one, else "
@@ -5634,14 +5637,209 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                         color=C_TEXT2)
             dpg.add_separator()
             with dpg.child_window(width=-1, height=-1, border=False):
-                t = dpg.add_text(self.NT_POWER_HINT, tag="nt_power_txt",
-                                 color=C_TEXT)
-                if "mono" in self.fonts:
-                    dpg.bind_item_font(t, self.fonts["mono"])
+                self._small(self.NT_POWER_HINT, tag="nt_power_note",
+                            color=C_TEXT2)
+                dpg.add_text("", tag="nt_power_warn", color=C_AMBER, wrap=0,
+                             show=False)
+                dpg.add_spacer(height=4)
+                with dpg.group(horizontal=True):
+                    with dpg.child_window(width=440, height=300, border=False):
+                        self._small("KEY FIGURES", color=head)
+                        dpg.add_group(tag="nt_power_keys")
+                    with dpg.group():
+                        self._small("WHERE THE ENERGY GOES  (share of each "
+                                    "phase's total)", color=head)
+                        with dpg.plot(width=-1, height=280, tag="nt_power_plot",
+                                      no_menus=True, no_mouse_pos=True):
+                            dpg.add_plot_legend()
+                            dpg.add_plot_axis(dpg.mvXAxis, tag="nt_power_x",
+                                              no_menus=True)
+                            dpg.add_plot_axis(dpg.mvYAxis, label="share (%)",
+                                              tag="nt_power_y", no_menus=True)
+                self._small("BREAKDOWN  (energy per component; % of the "
+                            "phase total)", color=head)
+                dpg.add_group(tag="nt_power_table")
+                dpg.add_spacer(height=6)
+                with dpg.collapsing_header(label="Full text report",
+                                           default_open=False):
+                    t = dpg.add_text(self.NT_POWER_HINT, tag="nt_power_txt",
+                                     color=C_TEXT)
+                    if "mono" in self.fonts:
+                        dpg.bind_item_font(t, self.fonts["mono"])
 
     def _nt_show_power(self, text):
-        if text and dpg.does_item_exist("nt_power_txt"):
+        """Show the last run's energy: text report (kept for Save), key
+        figures, component chart and breakdown table. Called on the render
+        thread once the trainer is idle."""
+        if not text:
+            return
+        self._nt_power_report = text
+        if dpg.does_item_exist("nt_power_txt"):
             dpg.set_value("nt_power_txt", text)
+        tr = self.trainer
+        try:
+            reports = ({} if tr is None or self.trainer_running
+                       else neuro.power_reports(tr))
+            self._nt_draw_power(reports, getattr(tr, "power_note", None))
+        except Exception as ex:                          # noqa: BLE001
+            self.log(f"[neuro] energy view error: {ex!r}")
+
+    def _nt_clear_power(self):
+        self._nt_power_report = None
+        if dpg.does_item_exist("nt_power_txt"):
+            dpg.set_value("nt_power_txt", self.NT_POWER_HINT)
+        self._nt_draw_power({}, None)
+
+    def _nt_draw_power(self, reports, note):
+        if not dpg.does_item_exist("nt_power_keys"):
+            return
+        for tag in ("nt_power_keys", "nt_power_table", "nt_power_y"):
+            dpg.delete_item(tag, children_only=True)
+        if note:                     # workspace-relative path, easier to read
+            note = note.replace(os.path.join(self.workdir, ""), "")
+        dpg.set_value("nt_power_note", f"Power profile: {note}" if note
+                      else self.NT_POWER_HINT)
+        phases = [ph for ph in neuro.POWER_PHASES if ph in reports]
+        placeholders = sorted({n for ph in phases
+                               for n in reports[ph]["placeholders"]})
+        dpg.set_value("nt_power_warn",
+                      "PLACEHOLDER values (not measured): "
+                      + ", ".join(placeholders)
+                      + ". Any energy that uses them is not a real number."
+                      if placeholders else "")
+        dpg.configure_item("nt_power_warn", show=bool(placeholders))
+        if not phases:
+            dpg.set_axis_ticks("nt_power_x", (("", 0.0),))
+            return
+        si, names = neuro.fmt_si, neuro.PHASE_NAMES
+        pj = lambda v, unit: si(None if v is None else v * 1e-12, "J")
+        table = dict(header_row=True, borders_innerH=True,
+                     borders_outerH=True, borders_innerV=True,
+                     borders_outerV=True, policy=dpg.mvTable_SizingStretchProp)
+
+        # key figures: one column per phase
+        rows = (
+            ("total energy", lambda r: si(r["energy_J"]["total"], "J")),
+            ("average power", lambda r: si(r["avg_power_W"], "W")),
+            ("energy / presentation", lambda r: si(r["e_inference_J"], "J")),
+            ("energy / synaptic op", lambda r: pj(r["e_sop_pJ"], "pJ")),
+            ("energy / neuron spike", lambda r: pj(r["e_neuron_spike_pJ"], "pJ")),
+            ("energy / write pulse", lambda r: pj(r["e_write_pulse_pJ"], "pJ")),
+            ("presentations", lambda r: str(r["counts"]["presentations"])),
+            ("simulated time", lambda r: si(r["sim_time_s"], "s")),
+        )
+        with dpg.table(parent="nt_power_keys", **table):
+            dpg.add_table_column(label="", init_width_or_weight=1.4)
+            for ph in phases:
+                dpg.add_table_column(label=names[ph])
+            for label, fn in rows:
+                with dpg.table_row():
+                    dpg.add_text(label, color=C_TEXT2)
+                    for ph in phases:
+                        dpg.add_text(fn(reports[ph]))
+
+        # share of each component, grouped bars per phase; components that
+        # are zero in every phase are left out
+        def share(rep, group, key):
+            total = rep["energy_J"]["total"]
+            v = neuro.power_component(rep, group, key)
+            return 100.0 * v / total if total else 0.0
+        parts = [(lbl, g, k) for lbl, g, k in neuro.POWER_COMPONENTS
+                 if k not in ("peripherals", "static")
+                 and any(neuro.power_component(reports[ph], g, k) > 0
+                         for ph in phases)]
+        width = 0.8 / len(phases)
+        for i, ph in enumerate(phases):
+            off = (i - (len(phases) - 1) / 2.0) * width
+            dpg.add_bar_series([j + off for j in range(len(parts))],
+                               [share(reports[ph], g, k) for _, g, k in parts],
+                               weight=width * 0.9, label=names[ph],
+                               parent="nt_power_y")
+        short = {"neuron spikes": "spikes", "row drivers": "row drive",
+                 "column sense": "col sense", "WTA / inhibition": "WTA",
+                 "neuron leakage": "leakage", "peripheral static": "periph static",
+                 "array read": "read", "array write": "write"}
+        dpg.set_axis_ticks("nt_power_x", tuple((short.get(lbl, lbl), float(j))
+                                               for j, (lbl, _, _)
+                                               in enumerate(parts))
+                           or (("", 0.0),))
+        dpg.set_axis_limits("nt_power_x", -0.6, max(len(parts), 1) - 0.4)
+        dpg.set_axis_limits("nt_power_y", 0.0, 105.0)
+
+        # breakdown: energy and share per phase
+        with dpg.table(parent="nt_power_table", **table):
+            dpg.add_table_column(label="component", init_width_or_weight=1.4)
+            for ph in phases:
+                dpg.add_table_column(label=names[ph])
+                dpg.add_table_column(label="%", init_width_or_weight=0.5)
+            for lbl, g, k in neuro.POWER_COMPONENTS + (("total", None, "total"),):
+                sub = g is not None
+                with dpg.table_row():
+                    dpg.add_text(("    " if sub else "") + lbl,
+                                 color=C_TEXT2 if sub else C_TEXT)
+                    for ph in phases:
+                        v = neuro.power_component(reports[ph], g, k)
+                        dpg.add_text(si(v, "J"), color=C_TEXT2 if sub else C_TEXT)
+                        dpg.add_text(f"{share(reports[ph], g, k):.1f}",
+                                     color=C_TEXT2)
+
+    @property
+    def _nt_power_report_dir(self):
+        return os.path.join(self.workdir, "results", "energy_reports")
+
+    def _on_nt_power_save_click(self):
+        if not getattr(self, "_nt_power_report", None):
+            self._nt_status("train or evaluate first, then save the energy "
+                            "report", C_AMBER)
+            return
+        os.makedirs(self._nt_power_report_dir, exist_ok=True)
+        dpg.configure_item("nt_power_save_dialog",
+                           default_filename="energy_report_"
+                           + time.strftime("%Y%m%d_%H%M%S"))
+        dpg.show_item("nt_power_save_dialog")
+
+    def _on_nt_power_save_file(self, sender, app_data):
+        path = (app_data or {}).get("file_path_name")
+        if path:
+            self.on_nt_power_save(path)
+
+    def on_nt_power_save(self, path=None):
+        """Write the energy report shown in the Power tab to a .txt file
+        (default: results/energy_reports/energy_report_<time>.txt). Returns
+        the path, or None if there is nothing to save or the write failed."""
+        text = getattr(self, "_nt_power_report", None)
+        if not text:
+            self._nt_status("train or evaluate first, then save the energy "
+                            "report", C_AMBER)
+            return None
+        if not path:
+            path = os.path.join(self._nt_power_report_dir, "energy_report_"
+                                + time.strftime("%Y%m%d_%H%M%S") + ".txt")
+        if path.endswith(".*"):                  # DPG "all files" filter
+            path = path[:-2]
+        if not path.lower().endswith(".txt"):
+            path += ".txt"
+        head = ["NeuroVAT energy report",
+                "saved:  " + time.strftime("%Y-%m-%d %H:%M:%S")]
+        dev = (getattr(self.trainer, "device_binding", None)
+               or self._nt_dev or {}).get("label")
+        if dev:
+            head.append("device: " + str(dev))
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join(head) + "\n\n"
+                         + text.replace(os.path.join(self.workdir, ""), "")
+                         + "\n")
+        except OSError as ex:
+            self._nt_status(f"could not save the energy report: {ex}", C_RED)
+            return None
+        shown = os.path.abspath(path)
+        if shown.startswith(os.path.join(self.workdir, "")):
+            shown = os.path.relpath(shown, self.workdir)
+        self._nt_status(f"energy report saved: {shown}", C_GREEN)
+        self.log(f"[neuro] energy report saved: {path}")
+        return path
 
     @property
     def _nt_power_dir(self):
@@ -6523,8 +6721,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                       ("nt_stat_teacc", "--"), ("nt_stat_valacc", "--"), ("nt_stat_best", "--")):
             self._nt_stat(tg, v)
         self._nt_reset_output()
-        if dpg.does_item_exist("nt_power_txt"):
-            dpg.set_value("nt_power_txt", self.NT_POWER_HINT)
+        self._nt_clear_power()
         self.log(f"[neuro] power model: {power_note}")
         # the receptive-field montage shows crossbar 0's post-layer (first
         # hidden layer, or the output for a single crossbar)
