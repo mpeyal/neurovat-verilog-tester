@@ -207,12 +207,30 @@ print(r["pattern_owner"], r["false_alarms_per_s"], r["spikes_per_window"])
 ```
 
 Every `run` draws new background activity, jitter and noise around the same
-patterns and carries the weights over. Pass a `DeviceArray` as `device` to
-store the weights as conductances (`write_gain` / `dep_gain` map a weight
-change to a pulse amplitude, `write_window_ms` merges the updates of one
-window into one pulse per synapse); that mapping is a free parameter and
-device runs are experiments. The GUI's Trainer exposes this as the **Stream**
-tab.
+patterns and carries the weights over.
+
+Pass a `DeviceArray` as `device` to store the weights as conductances. A
+requested weight change becomes a pulse whose amplitude is `write_gain` (or
+`dep_gain`) times the change, and `write_window_ms` merges the updates of one
+window into one pulse per synapse. The gain decides everything: a pulse that
+moves the device far less than one STDP step leaves the weights frozen.
+`calibrate_write` finds the amplitudes at which one pulse on a device at
+`w_init` equals one step (`a_plus` up, `a_minus` down):
+
+```python
+from neurovat.masquelier import calibrate_write
+
+cal = calibrate_write(device, P, width=1e-3, amp0=1.0)   # amp0: usual drive level
+s = Session(P, 1, device, write_window_ms=50.0,
+            **{k: cal[k] for k in ("write_gain", "dep_gain", "pot_sign", "pulse_width")})
+```
+
+Larger requests are scaled linearly from that point, which a real device
+does not follow exactly, so device runs remain experiments. With calibrated
+pulses and 1000 afferents the built-in `softbound` synapse does not become
+selective in 60 s: its weights stay in the middle of the range. The
+benchmark takes `--device softbound --calibrate`. The GUI's Trainer exposes
+all of this as the **Stream** tab.
 
 The MNIST benchmark trains and scores the pre-package engine
 (`benchmarks/legacy_neuro.py`) and this package on the same MNIST subset from

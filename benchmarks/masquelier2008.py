@@ -38,7 +38,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np
 
-from neurovat.masquelier import MasquelierParams, random_members, run
+from neurovat.masquelier import (MasquelierParams, calibrate_write,
+                                 random_members, run)
 
 
 def one(job):
@@ -54,9 +55,15 @@ def one(job):
     if args["device"]:
         from neurovat.devices import device_factory
         device = device_factory(args["device"])(P.n_out, P.n_afferents)
+    gain = {"write_gain": args["write_gain"]}
+    if device is not None and args["calibrate"]:
+        cal = calibrate_write(device, P, getattr(device, "pulse_width", 1e-3))
+        gain = {k: cal[k] for k in ("write_gain", "dep_gain", "pot_sign",
+                                    "pulse_width")}
     t0 = time.perf_counter()
     r = run(P, device=device, write_window_ms=args["write_window_ms"],
-            write_gain=args["write_gain"], members=members)
+            members=members, **gain)
+    r["write"] = gain
     r["wall_s"] = time.perf_counter() - t0
     pt, lat = r.pop("post_t_ms"), r.pop("post_latency_ms")
     fa = np.nonzero(np.isnan(lat))[0]
@@ -79,6 +86,9 @@ def main():
     ap.add_argument("--device", default="")
     ap.add_argument("--write-window-ms", type=float, default=0.0)
     ap.add_argument("--write-gain", type=float, default=10.0)
+    ap.add_argument("--calibrate", action="store_true",
+                    help="device runs: size the pulses so that one pulse "
+                         "makes one STDP step (replaces --write-gain)")
     ap.add_argument("--min-success", type=float, default=0.9)
     ap.add_argument("--neurons", type=int, default=1)
     ap.add_argument("--patterns", type=int, default=1)
@@ -90,6 +100,7 @@ def main():
     a = ap.parse_args()
     args = {"device": a.device, "write_window_ms": a.write_window_ms,
             "write_gain": a.write_gain, "sim_dt_ms": a.sim_dt_ms,
+            "calibrate": a.calibrate,
             "neurons": a.neurons, "patterns": a.patterns,
             "pattern_frac": a.pattern_frac, "seconds": a.seconds}
     multi = a.neurons > 1 or a.patterns > 1

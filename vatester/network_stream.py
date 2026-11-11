@@ -20,6 +20,7 @@ from . import neuro
 from .ui_constants import C_AMBER, C_GREEN, C_MUTED, C_RED, C_TEXT2
 
 IDEAL, DEVICE = "ideal weights", "selected device"
+CALIBRATED, AS_SET = "calibrated", "as set"
 CHUNK_S = 2.0                       # live-plot resolution
 
 # (tag, one-line meaning) - added to the controls the agent / bridge may set
@@ -36,6 +37,8 @@ STREAM_CONTROLS = [
     ("nt_st_thr", "stream: neuron threshold (0 = 0.25 x afferents)"),
     ("nt_st_synapse", f"stream: {IDEAL} | {DEVICE}"),
     ("nt_st_window", "stream: device write window ms (one pulse per synapse per window)"),
+    ("nt_st_pulse", f"stream: device pulse amplitude, {CALIBRATED} (one pulse = "
+                    f"one STDP step) | {AS_SET} (nt_potamp / nt_depamp)"),
 ]
 
 
@@ -61,6 +64,8 @@ class NetworkStreamMixin:
     _nt_stream_key = None           # settings the session was built for
     _nt_stream_last = None          # JSON-safe result of the last run
     _nt_stream_error = None
+    _nt_stream_agent = False        # the agent started the run in flight
+    _nt_stream_rounds = 0           # agent-started runs since the last pause
 
     # ---- layout -----------------------------------------------------
 
@@ -85,7 +90,7 @@ class NetworkStreamMixin:
                     "learnt so far. Test: STDP off, a new stream around the "
                     "same patterns.", color=C_TEXT2, wrap=296)
         dpg.add_spacer(height=4)
-        with self._card("Network", height=268):
+        with self._card("Network", height=304):
             with self._ctl_table(label_w=120):
                 self._ctl_row("Afferents", "nt_st_aff", "int", 1000)
                 self._ctl_row("Neurons", "nt_st_neurons", "int", 3)
@@ -109,6 +114,16 @@ class NetworkStreamMixin:
                               tip="Device synapses only. The STDP updates of "
                                   "one window are merged into one pulse per "
                                   "synapse. 0 = one pulse per update (slow).")
+                self._ctl_row("Pulse amplitude", "nt_st_pulse", "combo",
+                              items=[CALIBRATED, AS_SET], dv=CALIBRATED,
+                              tip="Device synapses only. Calibrated: the "
+                                  "amplitudes are searched so that one pulse "
+                                  "on a device at the starting weight moves "
+                                  "it by one STDP step (pulse width from the "
+                                  "left panel); the values found are logged. "
+                                  "As set: the left panel's pot / dep "
+                                  "amplitude stands for one STDP step, "
+                                  "whatever the device does with it.")
         with self._card("Stream", height=212):
             with self._ctl_table(label_w=120):
                 self._ctl_row("Seconds", "nt_st_seconds", default=60.0,
@@ -141,7 +156,8 @@ class NetworkStreamMixin:
                     with dpg.plot_axis(dpg.mvYAxis, label="hit rate (%)",
                                        tag="nt_st_y1"):
                         dpg.add_line_series([], [], label="pattern windows "
-                                            "answered", tag="nt_st_s_hit")
+                                            "answered by exactly one spike "
+                                            "of a neuron", tag="nt_st_s_hit")
                 with dpg.plot(width=-1, height=185, no_menus=True):
                     dpg.add_plot_legend()
                     dpg.add_plot_axis(dpg.mvXAxis, label="stream time (s)",
@@ -210,9 +226,11 @@ class NetworkStreamMixin:
                 "dep": self._nt_getu("nt_depamp", 50.0) * scale,
                 "width": max(self._nt_getu("nt_pwidth", 10.0), 0.01) * 1e-3,
                 "window": max(float(g("nt_st_window", 50.0)), 0.0),
+                "calibrate": g("nt_st_pulse", CALIBRATED) == CALIBRATED,
                 "power": power, "power_note": note}
             d = cfg["device"]
-            key += [dev["key"], d["pot"], d["dep"], d["width"], d["window"]]
+            key += [dev["key"], d["pot"], d["dep"], d["width"], d["window"],
+                    d["calibrate"]]
         return tuple(key), cfg
 
     def on_nt_stream(self, *_):
@@ -281,7 +299,8 @@ class NetworkStreamMixin:
     def _nt_stream_worker(self, cfg, learn, session):
         out = {"learn": learn, "error": None, "session": session}
         try:
-            from neurovat.masquelier import MasquelierParams, Session
+            from neurovat.masquelier import (MasquelierParams, Session,
+                                             calibrate_write, pulse_step)
             from neurovat.power import EnergyMeter, format_report
             d = cfg["device"]
             if session is None:
@@ -296,24 +315,47 @@ class NetworkStreamMixin:
                                                           cfg["aff"])
                     energy = EnergyMeter([(cfg["n_out"], cfg["aff"])],
                                          [d["kind"]], d["power"], 1e-3)
+                    a_minus = P.a_minus_ratio * P.a_plus
+                    if d["calibrate"]:
+                        w = calibrate_write(array, P, d["width"], d["pot"])
+                    else:
+                        sign = array.potentiation_sign(d["pot"], d["width"])
+                        w = {"pot_sign": sign, "pulse_width": d["width"],
+                             "write_gain": d["pot"] / P.a_plus,
+                             "dep_gain": d["dep"] / a_minus,
+                             "pot_amp": d["pot"], "dep_amp": d["dep"],
+                             "pot_step": pulse_step(array, sign * d["pot"],
+                                                    d["width"], P.w_init),
+                             "dep_step": -pulse_step(array, -sign * d["dep"],
+                                                     d["width"], P.w_init)}
+                    unit = "A" if d["kind"] == "current" else "V"
+                    how = CALIBRATED if d["calibrate"] else AS_SET
+                    self.q.put(("log", (
+                        f"[stream] write pulses ({how}): potentiation "
+                        f"{w['pot_amp']:.3g} {unit} -> +{w['pot_step']:.4f} "
+                        f"of the range (STDP step {P.a_plus:.4f}); depression "
+                        f"{w['dep_amp']:.3g} {unit} -> -{w['dep_step']:.4f} "
+                        f"(STDP step {a_minus:.4f}); width {d['width']:.3g} s")))
                     session = Session(
-                        P, cfg["n_pat"], array,
-                        write_window_ms=d["window"],
-                        write_gain=d["pot"] / P.a_plus,
-                        dep_gain=d["dep"] / P.a_plus,
-                        pot_sign=neuro.calibrate_pot_sign(
-                            d["make"], d["pot"], d["width"]),
-                        pulse_width=d["width"], energy=energy)
+                        P, cfg["n_pat"], array, write_window_ms=d["window"],
+                        energy=energy, **{k: w[k] for k in (
+                            "write_gain", "dep_gain", "pot_sign",
+                            "pulse_width")})
+                    session.pulse = {k: w[k] for k in (
+                        "pot_amp", "dep_amp", "pot_step", "dep_step")}
+                    session.pulse["calibrated"] = d["calibrate"]
                 out["session"] = session
             acc = {"n": 0, "pat": 0, "hit": 0, "fa": 0, "lat": []}
             per = max(int(round(CHUNK_S * 1000.0 / session.P.pattern_ms)), 1)
 
             def on_section(t_ms, info):
                 first = min((s[0] for s in info["spikes"]), default=None)
+                count = (np.bincount([s[1] for s in info["spikes"]])
+                         if info["spikes"] else [])
                 acc["n"] += 1
                 if info["label"] >= 0:
                     acc["pat"] += 1
-                    if first is not None:
+                    if 1 in count:          # some neuron fired exactly once
                         acc["hit"] += 1
                         acc["lat"].append(first)
                 else:
@@ -333,12 +375,7 @@ class NetworkStreamMixin:
                               pattern_frac=cfg["share"], jitter_ms=cfg["jitter"],
                               noise_hz=cfg["noise"],
                               spike_deletion=cfg["delete"])
-            # a pattern counts as learnt only if its neuron is also quiet
-            # everywhere else (the hit rate alone is met by a neuron that
-            # fires all the time)
-            table = np.asarray(res["spikes_per_window"], float)
-            owner = {p: j for p, j in res["pattern_owner"].items()
-                     if np.delete(table[j], p).max() <= 0.05}
+            owner = res["pattern_owner"]
             lats = [res["per_neuron"][j]["mean_latency_ms"]
                     for j in owner.values()]
             out["weights"] = np.atleast_2d(np.array(res["weights"], float))
@@ -346,6 +383,7 @@ class NetworkStreamMixin:
                 "phase": "train" if learn else "test",
                 "stopped": bool(self._trainer_stop),
                 "synapses": d["label"] if d else IDEAL,
+                "write_pulse": getattr(session, "pulse", None),
                 "afferents": cfg["aff"], "neurons": cfg["n_out"],
                 "patterns": cfg["n_pat"], "threshold": cfg["threshold"],
                 "stream": {k: cfg[k] for k in ("share", "jitter", "noise",
@@ -395,11 +433,14 @@ class NetworkStreamMixin:
         self._nt_busy(False)
         if out.get("session") is not None:
             self._nt_stream_session = out["session"]
+        agent, self._nt_stream_agent = self._nt_stream_agent, False
         if out["error"]:
             self._nt_stream_error = out["error"]
             self._nt_stream_session = self._nt_stream_key = None
             self._nt_status("stream failed", C_RED)
             self._nt_stream_say("failed: " + out["error"], C_RED)
+            if agent:
+                self.append_chat("sys", "stream run failed: " + out["error"])
             return
         r = self._nt_stream_last = out["result"]
         self._nt_stream_t0 += r["simulated_s"]
@@ -429,6 +470,24 @@ class NetworkStreamMixin:
         self._nt_stream_weights(out["weights"])
         if out.get("energy"):
             dpg.set_value("nt_st_energy", out["energy"])
+        if agent and not r["stopped"]:
+            self._nt_stream_feedback(text)
+
+    def _nt_stream_feedback(self, text, limit=8):
+        """Hand the result of an agent-started run back to the agent, which
+        may start another; pause after ``limit`` runs in a row."""
+        self._nt_stream_rounds += 1
+        if self._nt_stream_rounds >= limit or self.chat_busy:
+            self._nt_stream_rounds = 0
+            self.append_chat("sys", "stream run done: " + text
+                             + " (ask the agent to continue)")
+            return
+        self.append_chat("sys", "stream run done - result sent to the agent")
+        self._main_send("The stream run you started just finished.\n"
+                        + "\n".join(self._nt_stream_context())
+                        + "\nSay what it shows. Start another stream / "
+                        "stream_test only if a specific change is worth "
+                        "testing; otherwise stop.")
 
     def _nt_stream_table(self, table):
         dpg.delete_item("nt_st_table_holder", children_only=True)

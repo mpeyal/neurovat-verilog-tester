@@ -199,9 +199,11 @@ nt_st_noise / nt_st_delete / nt_st_share between a stream and a stream_test to
 measure robustness; changing any other nt_st_* control or nt_seed starts a new
 network. A run is good when every pattern has its own neuron (about one spike
 per window of that pattern, none elsewhere) and false alarms are below 1 /s.
-With nt_st_synapse = "selected device" the weights are device conductances
-written with nt_potamp / nt_depamp / nt_pwidth; whether a given device learns
-is an open question, report what you see.
+With nt_st_synapse = "selected device" the weights are device conductances.
+nt_st_pulse = "calibrated" searches the pulse amplitudes so that one pulse of
+width nt_pwidth moves a device by one STDP step; "as set" uses nt_potamp /
+nt_depamp as they are. Whether a given device learns is an open question:
+report what you see. After a stream run you started, its result is sent to you.
 """
 
 
@@ -6029,6 +6031,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                 if not self.trainer_running:
                     dpg.set_value("nt_viz_tabs", "nt_tab_stream")
                     self._nt_stream_start(name == "stream")
+                    self._nt_stream_agent = self.trainer_running
                     self.append_chat("sys", self._nt_stream_error
                                      or f"{name} started...")
 

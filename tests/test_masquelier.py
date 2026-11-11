@@ -2,8 +2,11 @@
 nearest-spike rule, and pattern finding on a shortened run."""
 import numpy as np
 
-from neurovat.masquelier import (MasquelierParams, Session,
-                                 make_pattern_stream, make_stream,
+import pytest
+
+from neurovat.devices import device_factory
+from neurovat.masquelier import (MasquelierParams, Session, calibrate_write,
+                                 make_pattern_stream, make_stream, pulse_step,
                                  random_members, run, _pattern_sections)
 
 
@@ -112,3 +115,24 @@ def test_on_section_reports_each_section_and_can_stop_the_run():
     assert len(seen) == 20
     assert abs(r["simulated_s"] - 1.0) < 1e-6       # 20 sections of 50 ms
     assert {lab for _, lab in seen} <= {-1, 0}
+
+
+def test_calibrated_pulses_make_one_stdp_step():
+    P = MasquelierParams()
+    device = device_factory("softbound")(1, 4)
+    cal = calibrate_write(device, P, 1e-3)
+    a_minus = P.a_minus_ratio * P.a_plus
+    assert cal["pot_step"] == pytest.approx(P.a_plus, rel=0.03)
+    assert cal["dep_step"] == pytest.approx(a_minus, rel=0.03)
+    up = pulse_step(device, cal["pot_sign"] * cal["write_gain"] * P.a_plus,
+                    1e-3, P.w_init)
+    down = pulse_step(device, -cal["pot_sign"] * cal["dep_gain"] * a_minus,
+                      1e-3, P.w_init)
+    assert up == pytest.approx(P.a_plus, rel=0.03)
+    assert down == pytest.approx(-a_minus, rel=0.03)
+
+
+def test_calibration_reports_a_step_that_is_out_of_reach():
+    P = MasquelierParams(a_plus=0.9)        # softbound cannot jump that far
+    with pytest.raises(ValueError, match="cannot make a step"):
+        calibrate_write(device_factory("softbound")(1, 1), P, 1e-3)

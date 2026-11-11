@@ -488,6 +488,53 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
     return res
 
 
+def pulse_step(device, amp, width, w):
+    """Weight change (fraction of the conductance range) that one pulse of
+    ``amp`` and ``width`` seconds makes on a fresh nominal device placed at
+    weight ``w``."""
+    lo, hi = float(device.g_min), float(device.g_max)
+    probe = device.nominal()
+    probe.set_conductance(np.full((1, 1), lo + w * (hi - lo)))
+    g0 = float(probe.conductance()[0, 0])
+    probe.program(np.array([0]), np.array([0]), np.array([float(amp)]), width)
+    return (float(probe.conductance()[0, 0]) - g0) / (hi - lo)
+
+
+def calibrate_write(device, P, width, amp0=1.0, tol=0.02):
+    """Pulse amplitudes at which one pulse on a device at ``P.w_init`` equals
+    one STDP step: ``+a_plus`` (potentiation) and ``-a_minus`` (depression).
+
+    Searched by bisection within 1e-4 .. 1e4 x ``amp0`` (the device's usual
+    drive level, in its drive unit). Returns the ``write_gain``, ``dep_gain``,
+    ``pot_sign`` and ``pulse_width`` arguments of :func:`run` plus the
+    amplitudes and steps found. A larger or smaller request is scaled
+    linearly from there; the device decides what it does with it. Raises
+    ValueError when a step is out of reach in that range."""
+    sign = float(device.potentiation_sign(amp0, width))
+    out = {"pot_sign": sign, "pulse_width": float(width)}
+    a_minus = P.a_minus_ratio * P.a_plus
+    for name, direction, target in (("pot", 1.0, P.a_plus),
+                                    ("dep", -1.0, a_minus)):
+        def step(amp):
+            return abs(pulse_step(device, direction * sign * amp, width,
+                                  P.w_init))
+        lo, hi = abs(amp0) * 1e-4, abs(amp0) * 1e4
+        if step(hi) < target or step(lo) > target:
+            raise ValueError(
+                f"one {name} pulse cannot make a step of {target:.4g}: "
+                f"{step(lo):.3g} at {lo:.3g}, {step(hi):.3g} at {hi:.3g}")
+        for _ in range(60):
+            mid = math.sqrt(lo * hi)
+            got = step(mid)
+            if abs(got - target) <= tol * target:
+                break
+            lo, hi = (mid, hi) if got < target else (lo, mid)
+        out[name + "_amp"], out[name + "_step"] = mid, got
+    out["write_gain"] = out["pot_amp"] / P.a_plus
+    out["dep_gain"] = out["dep_amp"] / a_minus
+    return out
+
+
 class Session:
     """One population that is trained and then tested on the same hidden
     patterns. Every :meth:`run` generates a fresh stream (new background
@@ -593,9 +640,15 @@ def _score(P, S, post_t, post_j, post_lab, lat, syn, t_done, last_s=150.0):
             table[j, p] = (mine & (post_lab == p)).sum() / max((slab == p).sum(), 1)
         table[j, n_pats] = (mine & (post_lab < 0)).sum() / n_noise
     # one neuron per pattern, best hit rate first; a pattern counts as learnt
-    # at a hit rate of 90 % or more
+    # at a hit rate of 90 % or more by a neuron that is quiet elsewhere (at
+    # most 0.05 spikes per window of any other pattern or of background) - a
+    # neuron that fires all the time hits every pattern
     hits = np.array([[r["hit_rate"] for r in q["patterns"]] for q in per])
     owner, free = {}, hits.copy()
+    for j in range(P.n_out):
+        for p in range(n_pats):
+            if np.delete(table[j], p).max() > 0.05:
+                free[j, p] = -1.0
     for _ in range(min(P.n_out, n_pats)):
         j, p = np.unravel_index(np.argmax(free), free.shape)
         if free[j, p] < 0.9:
