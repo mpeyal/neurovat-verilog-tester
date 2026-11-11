@@ -39,7 +39,10 @@ def install(app):
             ("mvThemeCol_ButtonHovered", (38, 70, 69) if active else SURFACE_2),
             ("mvThemeCol_ButtonActive", (44, 81, 78)),
             ("mvThemeCol_Text", ACCENT if active else TEXT_SECONDARY),
-        ], styles=[("mvStyleVar_FrameRounding", 6), ("mvStyleVar_FramePadding", (16, 9))])
+        # Nav buttons have a fixed size (130x28); a large frame padding leaves
+        # less inner room than the label needs, and ImGui then pins the text to
+        # the top-left of that space instead of centering it.
+        ], styles=[("mvStyleVar_FrameRounding", 6), ("mvStyleVar_FramePadding", (6, 0))])
     app._mk_theme("workspace", colors=[("mvThemeCol_ChildBg", BG)],
                   styles=[("mvStyleVar_WindowPadding", (0, 0))])
     app._mk_theme("dialog_body", colors=[("mvThemeCol_ChildBg", (0, 0, 0, 0))],
