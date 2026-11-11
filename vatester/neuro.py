@@ -32,29 +32,47 @@ from neurovat.lif import (probe_lif, probe_lif_wave, fi_curve, probe_lif_psp,
 from neurovat.network import CrossbarSNN
 from neurovat.power import PowerParams, format_report
 
-POWER_FILE = "power_params.json"      # optional, in the workspace (data only)
+POWER_DIR = "power_profiles"          # optional, in the workspace (data only)
 
 
-def load_power_params(path=POWER_FILE):
-    """Energy-model parameters for the Trainer: the values in the workspace
-    file ``power_params.json`` (a flat ``name -> value`` table of PowerParams
-    fields, SI units) when it exists; everything else stays a flagged
-    placeholder. Returns (params, note)."""
-    if not os.path.isfile(path):
-        return PowerParams(), f"no {path}: all placeholder values"
+def power_profile_path(family, folder=POWER_DIR):
+    """``power_profiles/<family>.json`` for a device family ("ECFET" ->
+    ``power_profiles/ecfet.json``), or None for an unnamed family."""
+    name = "".join(ch for ch in str(family or "").lower()
+                   if ch.isalnum() or ch in "-_")
+    return os.path.join(folder, name + ".json") if name else None
+
+
+def load_power_params(family, folder=POWER_DIR):
+    """Energy-model parameters for the Trainer from the selected device
+    family's profile ``power_profiles/<family>.json`` (a flat ``name -> value``
+    table of PowerParams fields in SI units, plus optional source / corner /
+    temperature / notes). There is no shared fallback file, so one family
+    never runs on another family's numbers: anything the profile does not set
+    stays a flagged placeholder. Returns (params, note)."""
+    path = power_profile_path(family, folder)
+    if path is None or not os.path.isfile(path):
+        where = path or f"{folder}/<family>.json"
+        return PowerParams(), f"no {where}: all placeholder values"
     try:
         params = PowerParams().load_file(path)
     except (OSError, ValueError) as exc:
         return PowerParams(), f"{path} ignored ({exc}): all placeholder values"
-    return params, f"{path}: {len(params.sources)} value(s) loaded"
+    meta = params.metadata
+    corner = " ".join(str(meta[k]) for k in ("corner", "temperature") if k in meta)
+    return params, (f"{path}" + (f" ({corner})" if corner else "")
+                    + f": {len(params.sources)} value(s) loaded")
 
 
 def power_text(trainer, phases=("train", "eval")):
-    """Energy breakdown tables of a trainer, as text."""
+    """Energy breakdown tables of a trainer, as text, headed by the power
+    profile they were computed with."""
     names = {"init": "Energy - weight initialisation",
              "train": "Energy - training", "eval": "Energy - evaluation"}
-    return "\n\n".join(format_report(trainer.energy.report(ph), names[ph])
-                       for ph in phases if ph in trainer.energy.tallies)
+    tables = [format_report(trainer.energy.report(ph), names[ph])
+              for ph in phases if ph in trainer.energy.tallies]
+    note = getattr(trainer, "power_note", None)
+    return "\n\n".join(([f"Power profile: {note}"] if note else []) + tables)
 
 
 class Trainer(CrossbarSNN):

@@ -5615,9 +5615,11 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
         with self._pad(left=6, top=4, bottom=0):
             self._small("component energy of the last training run and "
                         "evaluation: array read / write, neurons, peripherals, "
-                        "static. Parameters come from power_params.json in the "
-                        "workspace; anything not set there is a PLACEHOLDER "
-                        "and is listed under each table.", color=C_TEXT2)
+                        "static. Parameters come from the selected device "
+                        "family's profile, power_profiles/<family>.json in the "
+                        "workspace (e.g. ecfet.json); anything not set there "
+                        "is a PLACEHOLDER and is listed under each table.",
+                        color=C_TEXT2)
             dpg.add_separator()
             with dpg.child_window(width=-1, height=-1, border=False):
                 t = dpg.add_text(self.NT_POWER_HINT, tag="nt_power_txt",
@@ -6166,7 +6168,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
         if terms is None:
             terms = 3 if DEVICE_OF_KEY.get(key) in ("ECFET", "FeFET") else 2
         return {"make": make, "kind": spec.input_kind, "label": spec.label,
-                "key": key, "three_terminal": terms >= 3}
+                "key": key, "three_terminal": terms >= 3,
+                "family": DEVICE_OF_KEY.get(key) or key}
 
     def _nt_read_params(self):
         N = neuro.NeuronParams(
@@ -6419,11 +6422,13 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
             # the grid + n_out); built-in sources return (None, None)
             self._nt_pending_test = None
             patterns, targets = self._nt_build_patterns(cfg)
-            power, power_note = neuro.load_power_params()
+            power, power_note = neuro.load_power_params(
+                self._nt_dev.get("family"))
             self.trainer = neuro.Trainer(self._nt_dev["make"],
                                          self._nt_dev["kind"], N, S, cfg,
                                          patterns=patterns, targets=targets,
                                          power=power)
+            self.trainer.power_note = power_note
         except Exception as e:                          # noqa: BLE001
             self._nt_status(f"build failed: {e}", C_RED)
             self.log(f"[neuro] build failed: {e!r}")
