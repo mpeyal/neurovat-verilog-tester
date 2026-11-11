@@ -49,6 +49,7 @@ from .registry import (
 from .plot_interaction import PlotInteractionMixin
 from .network_visualization import NetworkVisualizationMixin
 from .network_data import NetworkDataMixin
+from .network_stream import NetworkStreamMixin, STREAM_CONTROLS
 from . import analysis, stdp_protocol
 from .stdp_panel import StdpControls
 
@@ -100,7 +101,7 @@ NT_CONTROLS = [
     ("nt_refrac", "refractory period ms"), ("nt_tausyn", "synaptic time constant ms"),
     ("nt_aplus", "potentiation scale"), ("nt_aminus", "depression scale"),
     ("nt_taupre", "pre-synaptic trace time constant ms"),
-]
+] + STREAM_CONTROLS
 
 
 NT_AGENT_SYSTEM = """
@@ -186,13 +187,29 @@ Before each retrain, name WHICH lever you are moving and WHY from the metrics;
 if you already raised epochs last round and it plateaued, move a different lever
 this round. Keep replies short and concrete; say what you changed and why.
 Use exact combo strings for nt_learnrule / nt_mode / nt_encoding / nt_patset.
+
+STREAM MODE (the "Stream" tab; Masquelier-style unsupervised learning): one
+continuous spike stream, no epochs and no labels. Hidden 50 ms patterns recur
+in background activity; STDP acts at every spike and lateral inhibition lets
+each neuron take one pattern. It is a separate network set by the nt_st_*
+controls (it does not use the pixel grid or "build"). Actions: "stream" (run
+nt_st_seconds with STDP on, continuing from the current weights) and
+"stream_test" (same patterns, new stream, STDP off). Change nt_st_jitter /
+nt_st_noise / nt_st_delete / nt_st_share between a stream and a stream_test to
+measure robustness; changing any other nt_st_* control or nt_seed starts a new
+network. A run is good when every pattern has its own neuron (about one spike
+per window of that pattern, none elsewhere) and false alarms are below 1 /s.
+With nt_st_synapse = "selected device" the weights are device conductances
+written with nt_potamp / nt_depamp / nt_pwidth; whether a given device learns
+is an open question, report what you see.
 """
 
 
 GEN_BY_NAME = {g.name: g for g in sf.GENERATORS}
 
 
-class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
+class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
+          NetworkStreamMixin):
     """Own shared UI state and dispatch queued worker results on the render thread.
 
     Analysis modules are called through module attributes so hot reload takes
@@ -4851,6 +4868,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                                 self._nt_activity_tab()
                             with dpg.tab(label="  Out spikes  "):
                                 self._nt_output_tab()
+                    with dpg.tab(label="Stream", tag="nt_tab_stream"):
+                        self._nt_stream_tab()
                     with dpg.tab(label="Results", tag="nt_tab_results"):
                         self._nt_result_summary()
                         with dpg.tab_bar(tag="nt_results_tabs"):
@@ -6006,6 +6025,12 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                 if not self.trainer_running:
                     self._nt_agent_run = True
                     self.on_nt_test()
+            elif name in ("stream", "stream_test"):
+                if not self.trainer_running:
+                    dpg.set_value("nt_viz_tabs", "nt_tab_stream")
+                    self._nt_stream_start(name == "stream")
+                    self.append_chat("sys", self._nt_stream_error
+                                     or f"{name} started...")
 
     # ---- agent context + snapshot -----------------------------------
 
@@ -6085,6 +6110,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                              + str([int(x) for x in sp]))
             L.append("last evaluation:")
             L.append(self._nt_metrics_text())
+        L.extend(self._nt_stream_context())
         L.append("")
         L.append("=== CONTROLS (current values) ===")
         for tag, desc in NT_CONTROLS:
@@ -7230,6 +7256,10 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
                     self._on_nt_done(item[1])
                 elif kind == "nt_metrics":
                     self._on_nt_metrics(item[1], item[2])
+                elif kind == "nt_stream":
+                    self._on_nt_stream(item[1])
+                elif kind == "nt_stream_done":
+                    self._on_nt_stream_done(item[1])
                 elif kind == "nt_acc":
                     self._on_nt_acc(item[1], item[2], item[3])
                 elif kind == "nt_spk":

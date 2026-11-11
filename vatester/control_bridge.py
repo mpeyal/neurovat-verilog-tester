@@ -345,6 +345,24 @@ class ControlBridge:
         return self._await_trainer("nt_test", write_nt=True,
                                    timeout_s=args.get("timeout_s", 300))
 
+    def _cmd_nt_stream(self, args, learn=True):
+        app = self.app
+        if app.trainer_running:
+            raise RuntimeError("Trainer is busy.")
+        app._nt_stream_start(learn)
+        if not app.trainer_running:
+            raise RuntimeError(app._nt_stream_error or "stream did not start")
+
+        def finalize():
+            if app._nt_stream_error:
+                raise RuntimeError(app._nt_stream_error)
+            return {"stream": app._nt_stream_last}
+        return _Async(lambda: not app.trainer_running, finalize,
+                      timeout_s=args.get("timeout_s", 3600))
+
+    def _cmd_nt_stream_test(self, args):
+        return self._cmd_nt_stream(args, learn=False)
+
     def _cmd_nt_power_save(self, args):
         # no caller-supplied path: always results/energy_reports/<timestamp>.txt
         path = self.app.on_nt_power_save()
@@ -401,6 +419,7 @@ class ControlBridge:
         "run": _cmd_run, "stdp": _cmd_stdp, "reload": _cmd_reload,
         "nt_build": _cmd_nt_build, "nt_load": _cmd_nt_load,
         "nt_train": _cmd_nt_train, "nt_test": _cmd_nt_test,
+        "nt_stream": _cmd_nt_stream, "nt_stream_test": _cmd_nt_stream_test,
         "nt_power_save": _cmd_nt_power_save,
         "check_va": _cmd_check_va, "openvaf": _cmd_openvaf, "fit": _cmd_fit,
         "log": _cmd_log,

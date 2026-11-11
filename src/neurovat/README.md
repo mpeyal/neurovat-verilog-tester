@@ -174,6 +174,46 @@ with a 1 ms step every weight potentiates and nothing is learnt. `--device`
 puts a registered device model behind each synapse and is reported, not
 asserted.
 
+Competitive version (the mechanism of Masquelier, Guyonneau & Thorpe 2009,
+Neural Computation 21:1259): several neurons, several patterns, and lateral
+inhibition so that each neuron takes one pattern.
+
+```
+python benchmarks/masquelier2008.py --neurons 3 --patterns 3 --seeds 10 --jobs 10
+```
+
+Each pattern sits on its own random half of the afferents and the patterns
+together fill `--pattern-frac` of the time. A neuron that fires resets the
+others and holds them back by `inh_alpha` x threshold, decaying with
+`tau_inh`. A run succeeds when every pattern is answered by its own neuron in
+at least 90 % of its occurrences with fewer than 1 false alarm per second.
+At paper scale (2000 afferents, 150 s) 6 of 10 seeds learn all three
+patterns and the other 4 learn two (one neuron stays silent or two share a
+pattern), with no false alarm in any run.
+
+These are choices made here, not values from the 2009 paper, so the result
+is reported and never asserted: `inh_alpha = 0.4`, `tau_inh = 20 ms`, the
+40 % pattern share, independent random halves, and the success test.
+
+`Session` trains and then tests one population on the same hidden patterns:
+
+```python
+from neurovat.masquelier import MasquelierParams, Session
+
+s = Session(MasquelierParams(n_out=3, pattern_frac=0.4, seed=1), n_patterns=3)
+s.run(150.0)                                   # STDP on
+r = s.run(20.0, learn=False, jitter_ms=3.0)    # frozen weights, new stream
+print(r["pattern_owner"], r["false_alarms_per_s"], r["spikes_per_window"])
+```
+
+Every `run` draws new background activity, jitter and noise around the same
+patterns and carries the weights over. Pass a `DeviceArray` as `device` to
+store the weights as conductances (`write_gain` / `dep_gain` map a weight
+change to a pulse amplitude, `write_window_ms` merges the updates of one
+window into one pulse per synapse); that mapping is a free parameter and
+device runs are experiments. The GUI's Trainer exposes this as the **Stream**
+tab.
+
 The MNIST benchmark trains and scores the pre-package engine
 (`benchmarks/legacy_neuro.py`) and this package on the same MNIST subset from
 the same seed, and reports wall time and the difference in the trained
