@@ -5643,9 +5643,15 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
         if text and dpg.does_item_exist("nt_power_txt"):
             dpg.set_value("nt_power_txt", text)
 
-    @staticmethod
-    def _nt_power_choices():
-        return ([neuro.PROFILE_DEFAULT] + neuro.list_power_profiles()
+    @property
+    def _nt_power_dir(self):
+        # the workspace's folder, not the process cwd (VS Code's Run button,
+        # shortcuts and the exe all start elsewhere)
+        return os.path.join(self.workdir, neuro.POWER_DIR)
+
+    def _nt_power_choices(self):
+        return ([neuro.PROFILE_DEFAULT]
+                + neuro.list_power_profiles(self._nt_power_dir)
                 + [neuro.PROFILE_NONE])
 
     def _nt_refresh_power_choices(self):
@@ -5663,7 +5669,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin):
 
     def _nt_load_power(self):
         family = (self._nt_dev or {}).get("family")
-        return neuro.load_power_params(family, choice=self._nt_power_choice())
+        return neuro.load_power_params(family, folder=self._nt_power_dir,
+                                       choice=self._nt_power_choice())
 
     def _on_nt_power_profile(self):
         """Profile changed: re-price the last run (the meter keeps counts, not
