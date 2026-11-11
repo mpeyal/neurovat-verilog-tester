@@ -197,7 +197,11 @@ nt_st_seconds with STDP on, continuing from the current weights) and
 "stream_test" (same patterns, new stream, STDP off). Change nt_st_jitter /
 nt_st_noise / nt_st_delete / nt_st_share between a stream and a stream_test to
 measure robustness; changing any other nt_st_* control or nt_seed starts a new
-network. A run is good when every pattern has its own neuron (about one spike
+network. nt_st_aplus / nt_st_aratio / nt_st_tplus / nt_st_tminus / nt_st_w0
+(STDP), nt_st_taum / nt_st_taus / nt_st_refr (neuron) and nt_st_inh /
+nt_st_tinh (lateral inhibition) are the rule's constants; their defaults are
+the validated paper values, so change them only with a stated reason.
+A run is good when every pattern has its own neuron (about one spike
 per window of that pattern, none elsewhere) and false alarms are below 1 /s.
 With nt_st_synapse = "selected device" the weights are device conductances.
 nt_st_pulse = "calibrated" searches the pulse amplitudes so that one pulse of
@@ -326,6 +330,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         self.trainer_running = False
         self._trainer_stop = False
         self._nt_dev = None             # {make, kind, label} synapse factory
+        self._nt_loaded_model = False   # the built network holds loaded weights
         self._rf_tex = None             # receptive-field montage raw texture
         self._rf_layout = None          # (n_out, gh, gw, cell, gap, tw, th)
         self._nt_series = {}            # group -> [series tags] to clear
@@ -1526,6 +1531,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                             "range_ms": 100., "settle_ms": 20., "npts": 24}
                 if stim:
                     self._apply_stdp_stimulus(stim)
+                if dpg.does_item_exist("stdp_include_rule"):
+                    dpg.set_value("stdp_include_rule", self._stdp_own_timing(keys))
         if hasattr(self, "stdp_controls"):
             self.stdp_controls.refresh()
         # the per-pulse Analysis metric set also changes (G/R vs Vth/P)
@@ -1641,6 +1648,21 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
 
         if hasattr(self, "desktop"):
             self._on_center_tab()
+
+    @staticmethod
+    def _stdp_own_timing(keys):
+        """True if a model of this class responds to spike timing by itself
+        (a non-zero A_stdp / A_stdp_V in its default parameters), as the
+        ECFET does: its STDP is then measured with plain rectangular pulses."""
+        for key in keys:
+            spec = SPEC_BY_KEY.get(key)
+            try:
+                p = spec.params_cls() if spec else None
+            except Exception:                           # noqa: BLE001
+                continue
+            if any(getattr(p, name, 0.) for name in ("A_stdp", "A_stdp_V")):
+                return True
+        return False
 
     def _apply_stdp_stimulus(self, stim):
         """Load a STDP_STIMULUS dict into the STDP tab widgets."""
@@ -2977,7 +2999,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             else:
                 self.log(f"[stdp] waveform-driven: {spike['shape']}; "
                          f"tau={stdp_protocol.tau(spike)*1e3:g} ms; includes peak overlap and dt=0")
-            self.log(f"[stdp] {measurement}; added timing rule {'ON' if include_rule else 'OFF'}; "
+            self.log(f"[stdp] {measurement}; device's own timing response {'ON' if include_rule else 'OFF'}; "
                      "each timing starts from the same initial state")
             for m in models:
                 mk = getattr(m, "input_kind", "current")
@@ -6406,6 +6428,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         device = self._nt_device_factory()
         kind = (device or {}).get("kind", "current")
         if kind == getattr(self, "_nt_last_kind", None):
+            self._nt_source_changed()
             return
         self._nt_last_kind = kind
         fields = (dict(nt_potamp=2.0, nt_depamp=2.0, nt_pwidth=1.0, nt_epsp=6.0)
@@ -6416,6 +6439,37 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             if dpg.does_item_exist(tag):
                 dpg.set_value(tag, val)
         self._nt_set_amp_units(kind)
+        self._nt_source_changed()
+
+    def _nt_source_changed(self):
+        """The synapse source was changed while a network is built. The views
+        (Cell, Weights, ...) show the BUILT network, so they would keep
+        showing the old device: rebuild at once if nothing was learnt yet,
+        otherwise say clearly that the views are those of the old device."""
+        tr = self.trainer
+        if tr is None or self.trainer_running:
+            return
+        try:
+            now = self.network_studio.binding()
+        except (ValueError, OSError):
+            return
+        built = getattr(tr, "source_binding", None) or {}
+        label = dpg.get_value("nt_devlabel") if dpg.does_item_exist("nt_devlabel") else ""
+        note = "NOT REBUILT  |  "
+        if now == built:
+            if label.startswith(note):
+                dpg.set_value("nt_devlabel", label[len(note):])
+                self._nt_status("built", C_GREEN)
+            return
+        if tr.write_count == 0 and not self._nt_loaded_model:
+            self.log("[neuro] synapse source changed - network rebuilt")
+            self.on_nt_build()
+            return
+        old, new = (os.path.basename(b.get("path", "?")) for b in (built, now))
+        if not label.startswith(note):
+            dpg.set_value("nt_devlabel", note + label)
+        self._nt_status(f"synapse changed to {new} - the views still show the "
+                        f"{old} network; press Build network", C_AMBER)
 
     def _nt_device_factory(self):
         # the SYNAPSE DEVICE selector in the trainer's left-panel controls picks
@@ -6652,6 +6706,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         self._nt_loaded_patterns = (pats, tgts) if pats else None
         self.on_nt_build()
         self._nt_loaded_patterns = None
+        self._nt_loaded_model = self.trainer is not None
         tr = self.trainer
         if tr is None:
             self._nt_status("load: rebuild failed", C_AMBER)
@@ -6706,6 +6761,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                 raise ValueError("The selected source has no conductance twin.")
             self._nt_cell = None
             self._nt_dev = device
+            self._nt_loaded_model = False
             N, S, cfg = self._nt_read_params()
             # custom / dataset sources supply explicit patterns (and may resize
             # the grid + n_out); built-in sources return (None, None)

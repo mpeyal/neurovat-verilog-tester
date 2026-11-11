@@ -23,6 +23,33 @@ IDEAL, DEVICE = "ideal weights", "selected device"
 CALIBRATED, AS_SET = "calibrated", "as set"
 CHUNK_S = 2.0                       # live-plot resolution
 
+# Learning-rule, neuron and inhibition constants of the stream network:
+# (tag, label, MasquelierParams field, default, min, max, meaning). The
+# defaults are the values of Masquelier et al. 2008 that the benchmark is
+# validated with; the two inhibition values are choices made here.
+RULE = [
+    ("nt_st_aplus", "A+ (LTP step)", "a_plus", 0.03125, 1e-5, 0.5,
+     "weight gained by a synapse whose spike just preceded the output spike"),
+    ("nt_st_aratio", "A- / A+", "a_minus_ratio", 0.85, 0.0, 5.0,
+     "depression step as a multiple of A+"),
+    ("nt_st_tplus", "tau+ ms", "tau_plus", 16.8, 0.5, 200.0,
+     "LTP window time constant"),
+    ("nt_st_tminus", "tau- ms", "tau_minus", 33.7, 0.5, 200.0,
+     "LTD window time constant"),
+    ("nt_st_w0", "Start weight", "w_init", 0.475, 0.0, 1.0,
+     "initial weight of every synapse, 0-1 of the range"),
+    ("nt_st_taum", "tau m ms", "tau_m", 10.0, 0.5, 200.0,
+     "membrane time constant"),
+    ("nt_st_taus", "tau s ms", "tau_s", 2.5, 0.1, 100.0,
+     "synapse time constant (must stay below tau m)"),
+    ("nt_st_refr", "Refractory ms", "t_ref_ms", 1.0, 0.0, 50.0,
+     "time after a spike in which the neuron cannot fire"),
+    ("nt_st_inh", "Inhibition", "inh_alpha", 0.4, 0.0, 5.0,
+     "a neuron that fires holds the others back by this x threshold"),
+    ("nt_st_tinh", "tau inh ms", "tau_inh", 20.0, 0.5, 500.0,
+     "decay of that inhibition"),
+]
+
 # (tag, one-line meaning) - added to the controls the agent / bridge may set
 STREAM_CONTROLS = [
     ("nt_st_aff", "stream: afferents (100-4000)"),
@@ -39,7 +66,8 @@ STREAM_CONTROLS = [
     ("nt_st_window", "stream: device write window ms (one pulse per synapse per window)"),
     ("nt_st_pulse", f"stream: device pulse amplitude, {CALIBRATED} (one pulse = "
                     f"one STDP step) | {AS_SET} (nt_potamp / nt_depamp)"),
-]
+] + [(tag, f"stream: {tip} ({lo:g}-{hi:g}, default {default:g})")
+     for tag, _label, _field, default, lo, hi, tip in RULE]
 
 
 def _clean(x):
@@ -138,12 +166,27 @@ class NetworkStreamMixin:
                 self._ctl_row("Spike deletion", "nt_st_delete", default=0.0,
                               tip="Fraction of the pattern's spikes dropped "
                                   "at each presentation.")
-        self._small("The four stream settings may be changed between runs "
-                    "(test under more jitter, noise or deletion). Changing a "
-                    "network setting or the seed starts a new network. "
-                    "Inhibition: a neuron that fires resets the others and "
-                    "holds them back by 0.4 x threshold, decaying over 20 ms.",
+        self._small("The stream settings above may be changed between runs "
+                    "(test under more jitter, noise or deletion). Changing "
+                    "anything else here, or the seed, starts a new network.",
                     color=C_MUTED, wrap=296)
+        with self._card("Learning rule and neuron", height=382):
+            with self._ctl_table(label_w=120):
+                for tag, label, _field, default, lo, hi, tip in RULE:
+                    self._ctl_row(label, tag, default=default,
+                                  tip=f"{tip[0].upper()}{tip[1:]}. Default "
+                                      f"{default:g}, allowed {lo:g} to {hi:g}.")
+            dpg.add_button(label="Paper defaults", width=-1,
+                           callback=self.on_nt_stream_rule_defaults)
+        self._small("Defaults: Masquelier et al. 2008, the values the "
+                    "benchmark is validated with. The two inhibition values "
+                    "are choices made here: a neuron that fires resets the "
+                    "others and holds them back.", color=C_MUTED, wrap=296)
+
+    def on_nt_stream_rule_defaults(self, *_):
+        for tag, _label, _field, default, *_rest in RULE:
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, default)
 
     def _nt_stream_views(self):
         dpg.add_text("press Train", tag="nt_st_status", color=C_TEXT2, wrap=0)
@@ -209,9 +252,14 @@ class NetworkStreamMixin:
             "noise": max(float(g("nt_st_noise", 10.0)), 0.0),
             "delete": min(max(float(g("nt_st_delete", 0.0)), 0.0), 0.95),
             "device": None,
+            "rule": {field: min(max(float(g(tag, default)), lo), hi)
+                     for tag, _label, field, default, lo, hi, _tip in RULE},
         }
+        if cfg["rule"]["tau_s"] >= cfg["rule"]["tau_m"]:
+            raise ValueError("tau s must be smaller than tau m")
         key = [cfg[k] for k in ("aff", "n_out", "n_pat", "n_pattern",
                                 "threshold", "seed")]
+        key += [cfg["rule"][field] for _t, _l, field, *_rest in RULE]
         if g("nt_st_synapse", IDEAL) == DEVICE:
             dev = self._nt_device_factory()
             if dev is None:
@@ -307,7 +355,7 @@ class NetworkStreamMixin:
                 P = MasquelierParams(
                     n_afferents=cfg["aff"], n_pattern=cfg["n_pattern"],
                     threshold=cfg["threshold"], n_out=cfg["n_out"],
-                    seed=cfg["seed"])
+                    seed=cfg["seed"], **cfg["rule"])
                 if d is None:
                     session = Session(P, cfg["n_pat"])
                 else:
@@ -386,6 +434,7 @@ class NetworkStreamMixin:
                 "write_pulse": getattr(session, "pulse", None),
                 "afferents": cfg["aff"], "neurons": cfg["n_out"],
                 "patterns": cfg["n_pat"], "threshold": cfg["threshold"],
+                "rule": cfg["rule"],
                 "stream": {k: cfg[k] for k in ("share", "jitter", "noise",
                                                "delete")},
                 "simulated_s": res["simulated_s"],

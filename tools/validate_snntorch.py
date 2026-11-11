@@ -23,6 +23,22 @@ from vatester.neuro import Trainer, NetConfig, NeuronParams, STDPParams
 torch.set_default_dtype(torch.float64)
 torch.set_num_threads(1)
 
+# Pass criteria. Two networks that start identical and are trained separately
+# do not stay bit-identical: the two gradients differ by rounding (~1e-15),
+# and every device write amplifies that. So the mathematics is checked where
+# rounding cannot accumulate - both sides at the SAME state, one step - with
+# tight limits, and the free-running trajectories (8 epochs apart) with a
+# drift allowance. Measured on the steepest device in the suite the drift
+# reaches 2.5e-8; with the reference fed the app's own gradient it is exactly
+# zero, which is what identifies it as amplified rounding.
+MATCHED = {"matched_state_gradient": 1e-10,     # gradient at the same state
+           "matched_state_weight": 1e-9}        # weights after that one step,
+#                                                 relative to the largest
+DRIFT = {"loss": 1e-6, "gradient": 1e-6, "membrane": 1e-6,
+         "weight_rel": 1e-6}                    # weights, relative as above
+# the limits used before the drift allowance; still reported per run
+STRICT = {"loss": 1e-9, "gradient": 1e-8, "membrane": 1e-8, "weight_S": 1e-11}
+
 
 class FastSigmoid64(surrogate.FastSigmoid):
     """Keep float64 output; snnTorch 1.0's forward hardcasts spikes to float32.
@@ -181,8 +197,9 @@ def compare(cls, hidden, seed, rule="surrogate", *, input_kind=None, write_amp=N
                   targets=[y for x, y in train])
     ref = copy.deepcopy(app)
     encode = app.encode_spikes
-    errors = dict(loss=0., gradient=0., membrane=0., weight_S=0.,
-                  matched_state_gradient=0., spike_mismatches=0, prediction_mismatches=0)
+    errors = dict(loss=0., gradient=0., membrane=0., weight_S=0., weight_rel=0.,
+                  matched_state_gradient=0., matched_state_weight=0.,
+                  spike_mismatches=0, prediction_mismatches=0)
     history = []
     best_score, best_loss, best_states = -1., float("inf"), None
     rng = np.random.default_rng(seed+777)
@@ -213,7 +230,8 @@ def compare(cls, hidden, seed, rule="surrogate", *, input_kind=None, write_amp=N
             app.encode_spikes = lambda *a, **k: spikes
             # Tight local gradient check at identical states separates a math
             # error from amplified floating-point drift during device updates.
-            local_reference = reference(copy.deepcopy(app), spikes, target) if rule == "surrogate" else None
+            local = copy.deepcopy(app) if rule == "surrogate" else None
+            local_reference = reference(local, spikes, target) if rule == "surrogate" else None
             gradients = {}
             original = app._apply_grad
             def record(c, grad):
@@ -230,9 +248,17 @@ def compare(cls, hidden, seed, rule="surrogate", *, input_kind=None, write_amp=N
                 if rule == "surrogate":
                     errors["matched_state_gradient"] = max(errors["matched_state_gradient"],
                         float(np.max(np.abs(gradients[c]-local_reference["grads"][c]))))
+                    # one step from the same state with the independent gradient
+                    local._apply_grad(c, local_reference["grads"][c])
+                    errors["matched_state_weight"] = max(errors["matched_state_weight"],
+                        float(np.max(np.abs(app.weights_S(c)-local.weights_S(c)))
+                              / np.max(np.abs(app.weights_S(c)))))
                     errors["gradient"] = max(errors["gradient"], float(np.max(np.abs(gradients[c]-r["grads"][c]))))
                     ref._apply_grad(c, r["grads"][c])
                 errors["weight_S"] = max(errors["weight_S"], float(np.max(np.abs(app.weights_S(c)-ref.weights_S(c)))))
+                errors["weight_rel"] = max(errors["weight_rel"],
+                    float(np.max(np.abs(app.weights_S(c)-ref.weights_S(c)))
+                          / np.max(np.abs(app.weights_S(c)))))
                 actual = np.zeros_like(r["layers"][c+1])
                 for j, times in enumerate(a["layer_spikes"][c+1]):
                     actual[np.rint(np.array(times)/app.cfg.dt_ms).astype(int), j] = 1
@@ -264,13 +290,16 @@ def compare(cls, hidden, seed, rule="surrogate", *, input_kind=None, write_amp=N
                             snntorch_spikes=expected["layers"][-1], app_membrane=actual["v_trace"],
                             snntorch_membrane=expected["membrane"], dt_ms=app.cfg.dt_ms,
                             target=target)
-    passed = (errors["matched_state_gradient"] < 1e-10 and errors["loss"] < 1e-9 and errors["gradient"] < 1e-8 and errors["membrane"] < 1e-8
-              and errors["weight_S"] < 1e-11 and errors["spike_mismatches"] == 0 and errors["prediction_mismatches"] == 0)
+    exact = errors["spike_mismatches"] == 0 and errors["prediction_mismatches"] == 0
+    passed = (exact and all(errors[k] < v for k, v in MATCHED.items())
+              and all(errors[k] < v for k, v in DRIFT.items()))
+    drift_free = all(errors[k] < v for k, v in STRICT.items())
     return {"device": cls.__name__, "rule": rule, "layers": app.layer_sizes, "seed": seed,
             "config": dataclasses.asdict(app.cfg), "neuron": dataclasses.asdict(app.N),
             "plasticity": dataclasses.asdict(app.S), "device_params": dataclasses.asdict(app.crossbars[0][0][0].p),
             "errors": errors, "history": history, "app_test_accuracy": test_acc[0],
-            "snntorch_test_accuracy": test_acc[1], "passed": passed}
+            "snntorch_test_accuracy": test_acc[1], "passed": passed,
+            "drift_free": drift_free}
 
 
 def main():
@@ -281,9 +310,14 @@ def main():
                 for seed in (1, 7, 23):
                     row = compare(cls, hidden, seed, rule)
                     rows.append(row)
-                    print(rule, row["device"], row["layers"], seed, row["passed"], row["errors"], flush=True)
+                    print(rule, row["device"], row["layers"], seed, row["passed"],
+                          "" if row["drift_free"] else "(drift above the strict limits)",
+                          row["errors"], flush=True)
     report = {"torch": torch.__version__, "snntorch": snn.__version__, "dtype": "float64 CPU",
               "epochs": 8, "train_validation_test_counts": [16, 6, 8],
+              "limits": {"matched_state": MATCHED, "free_running_drift": DRIFT,
+                         "strict_free_running": STRICT,
+                         "spike_and_prediction_mismatches": 0},
               "scope": "Matched equations, spikes, initialization and device pulse updates for surrogate and supervised STDP modes. Independent snnTorch neurons/autograd and Torch eligibility rule; device physics/programming is shared, not independently validated. Synthetic two-class data, not MNIST or hardware validation. Float64-preserving wrapper around snnTorch FastSigmoid; explicit immediate reset and app-specific refractory/homeostasis/WTA.",
               "runs": rows, "passed": all(r["passed"] for r in rows)}
     path = Path(__file__).resolve().parents[1]/"results"/"snntorch_validation.json"

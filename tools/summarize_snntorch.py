@@ -18,14 +18,17 @@ def main():
              f"Versions: PyTorch {report['torch']}; snnTorch {report['snntorch']}",
              f"Runs: {len(rows)}; epochs/run: {report['epochs']}; train/validation/test: 16/6/8 synthetic samples",
              f"Identical final test accuracy: {equal}/{len(rows)}",
-             f"Strict numerical tolerance passes: {passed}/{len(rows)}", "",
+             f"Passes: {passed}/{len(rows)}; without measurable drift: "
+             f"{sum(r.get('drift_free', r['passed']) for r in rows)}/{len(rows)}", "",
              "The same validation-selected checkpoint epoch is used for both sides.",
              "Gradient checks at identical states isolate algorithmic errors from accumulated drift.",
-             "Strict limits: loss 1e-9; gradient 1e-8; membrane 1e-8; weight 1e-11 S;",
-             "matched-state gradient 1e-10; zero spike/prediction mismatches.", "",
+             "Limits at identical states: gradient 1e-10; weights after one step 1e-9 (relative).",
+             "Limits on the free-running trajectories: loss, gradient, membrane 1e-6; weights 1e-6",
+             "(relative); zero spike/prediction mismatches. 'Without drift' = the former limits",
+             "(loss 1e-9; gradient 1e-8; membrane 1e-8; weight 1e-11 S) also hold.", "",
              report["scope"], "",
              "Poor accuracy remains visible: matching another implementation does not mean a configuration learns well.", "",
-             "rule | device | layers | seed | app test | snnTorch test | strict pass"]
+             "rule | device | layers | seed | app test | snnTorch test | pass"]
     for row in rows:
         lines.append(f"{row['rule']} | {row['device']} | {row['layers']} | {row['seed']} | "
                      f"{row['app_test_accuracy']:.1%} | {row['snntorch_test_accuracy']:.1%} | {row['passed']}")
@@ -45,7 +48,7 @@ def main():
     ax.set_yticks(y, [f"{r['rule']} / {r['device']} / {'-'.join(map(str,r['layers']))} / seed {r['seed']}" for r in rows], fontsize=8)
     ax.invert_yaxis(); ax.set_xlim(0, 105)
     ax.set_xlabel("Held-out test accuracy (%) — eight synthetic samples per run")
-    ax.set_title(f"Same final accuracy in {equal}/{len(rows)} runs\nStrict numerical checks: {passed}/{len(rows)} passed", loc="left")
+    ax.set_title(f"Same final accuracy in {equal}/{len(rows)} runs\nNumerical checks: {passed}/{len(rows)} passed", loc="left")
     ax.legend(loc="lower right"); ax.grid(axis="x", alpha=.15)
     fig.tight_layout()
     fig.savefig(folder/"snntorch_validation.png", dpi=160)

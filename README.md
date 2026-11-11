@@ -270,7 +270,12 @@ learning settings. Both sides deliberately use the same device-programming
 model. It covers supervised STDP and surrogate learning, ECFET v2 (plus FeFET when installed), direct and
 hidden-layer networks, and three seeds. It writes every run, parameter and
 maximum error to `results/snntorch_validation.json`. The script exits nonzero
-if any strict numerical tolerance fails, even when all predictions agree.
+if any tolerance fails, even when all predictions agree. At identical states
+the gradient must agree to 1e-10 and the weights after one step to 1e-9
+(relative); spikes and predictions must be identical. The two separately
+trained trajectories are allowed 1e-6 of drift, because rounding differences
+of ~1e-15 between the two gradients are amplified by every device write;
+each run also reports whether it stays within the former, tighter limits.
 
 The snnTorch reference explicitly matches the app's immediate reset, membrane
 readout, normalization, and (for STDP) refractory, inhibition and homeostasis.
