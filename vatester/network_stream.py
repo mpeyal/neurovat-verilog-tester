@@ -1,4 +1,6 @@
-"""Trainer 'Stream' tab: continuous-stream STDP (Masquelier et al. 2008/2009).
+"""Trainer mode 'unsupervised stream': continuous-stream STDP (Masquelier et
+al. 2008/2009). Selecting the mode swaps the Trainer's left-panel controls and
+centre views for the ones built here; Build / Train / Test / Stop act on it.
 
 One uninterrupted spike stream instead of epochs: hidden 50 ms patterns recur
 in background activity, STDP acts at every spike, and lateral inhibition lets
@@ -20,6 +22,7 @@ from . import neuro
 from .ui_constants import C_AMBER, C_GREEN, C_MUTED, C_RED, C_TEXT2
 
 IDEAL, DEVICE = "ideal weights", "selected device"
+STREAM_MODE = "unsupervised stream"    # value of the nt_mode combo
 CALIBRATED, AS_SET = "calibrated", "as set"
 CHUNK_S = 2.0                       # live-plot resolution
 
@@ -94,94 +97,128 @@ class NetworkStreamMixin:
     _nt_stream_error = None
     _nt_stream_agent = False        # the agent started the run in flight
     _nt_stream_rounds = 0           # agent-started runs since the last pause
+    _nt_mode_shown = "supervised"   # the mode the window currently shows
+    _nt_devlabel_grid = None        # the grid network's label, while hidden
 
     # ---- layout -----------------------------------------------------
 
-    def _nt_stream_tab(self):
-        with self._pad(left=6, top=4, bottom=0):
-            with dpg.group(horizontal=True):
-                with dpg.child_window(width=310, border=False):
-                    self._nt_stream_controls()
-                with dpg.child_window(width=-1, border=False):
-                    self._nt_stream_views()
-        self._nt_stream_clear()
+    def _nt_is_stream(self):
+        return self._nt_get("nt_mode", "") == STREAM_MODE
 
-    def _nt_stream_controls(self):
-        with dpg.group(horizontal=True):
-            b = dpg.add_button(label=" Train ", callback=self.on_nt_stream)
-            dpg.bind_item_theme(b, self.themes["primary"])
-            dpg.add_button(label=" Test ", callback=self.on_nt_stream_test)
-            b = dpg.add_button(label=" Stop ", callback=self.on_nt_stop)
-            dpg.bind_item_theme(b, self.themes["stop"])
-            dpg.add_button(label=" Reset ", callback=self.on_nt_stream_reset)
-        self._small("Train: STDP on, the stream continues from the weights "
-                    "learnt so far. Test: STDP off, a new stream around the "
-                    "same patterns.", color=C_TEXT2, wrap=296)
-        dpg.add_spacer(height=4)
-        with self._card("Network", height=304):
-            with self._ctl_table(label_w=120):
-                self._ctl_row("Afferents", "nt_st_aff", "int", 1000)
-                self._ctl_row("Neurons", "nt_st_neurons", "int", 3)
-                self._ctl_row("Patterns", "nt_st_patterns", "int", 3)
-                self._ctl_row("In pattern", "nt_st_in_pattern", default=0.5,
-                              tip="Fraction of the afferents that take part in "
-                                  "each pattern. With several patterns each "
-                                  "gets its own random set.")
-                self._ctl_row("Threshold", "nt_st_thr", default=0.0,
-                              tip="Neuron threshold in units of weight. 0 = "
-                                  "0.25 x afferents (the 2008 paper: 500 for "
-                                  "2000 afferents).")
-                self._ctl_row("Synapses", "nt_st_synapse", "combo",
-                              items=[IDEAL, DEVICE], dv=IDEAL,
-                              tip="Ideal weights: the additive rule of the "
-                                  "paper. Selected device: the weight is the "
-                                  "conductance of the synapse device chosen "
-                                  "in the left panel, written with its "
-                                  "potentiation / depression pulses.")
-                self._ctl_row("Write window ms", "nt_st_window", default=50.0,
-                              tip="Device synapses only. The STDP updates of "
-                                  "one window are merged into one pulse per "
-                                  "synapse. 0 = one pulse per update (slow).")
-                self._ctl_row("Pulse amplitude", "nt_st_pulse", "combo",
-                              items=[CALIBRATED, AS_SET], dv=CALIBRATED,
-                              tip="Device synapses only. Calibrated: the "
-                                  "amplitudes are searched so that one pulse "
-                                  "on a device at the starting weight moves "
-                                  "it by one STDP step (pulse width from the "
-                                  "left panel); the values found are logged. "
-                                  "As set: the left panel's pot / dep "
-                                  "amplitude stands for one STDP step, "
-                                  "whatever the device does with it.")
-        with self._card("Stream", height=212):
-            with self._ctl_table(label_w=120):
-                self._ctl_row("Seconds", "nt_st_seconds", default=60.0,
+    def _nt_stream_left(self):
+        """Left-panel controls of the stream mode (inside ``nt_stream_group``)."""
+        self._small("One continuous spike stream, no epochs and no labels: "
+                    "hidden 50 ms patterns recur in background activity. "
+                    "Train = STDP on, continuing from the weights learnt so "
+                    "far. Test = STDP off, a new stream around the same "
+                    "patterns. Build network = start a new network.",
+                    color=C_MUTED, wrap=340)
+        with self._ctl_table():
+            self._ctl_row("afferents", "nt_st_aff", "int", 1000,
+                          "Input lines (100-4000).")
+            self._ctl_row("neurons", "nt_st_neurons", "int", 3,
+                          "Output neurons (1-8); lateral inhibition lets each "
+                          "take one pattern.")
+            self._ctl_row("patterns", "nt_st_patterns", "int", 3,
+                          "Hidden patterns (1-8).")
+            self._ctl_row("in pattern", "nt_st_in_pattern", default=0.5,
+                          tip="Fraction of the afferents that take part in "
+                              "each pattern. With several patterns each "
+                              "gets its own random set.")
+            self._ctl_row("threshold", "nt_st_thr", default=0.0,
+                          tip="Neuron threshold in units of weight. 0 = "
+                              "0.25 x afferents (the 2008 paper: 500 for "
+                              "2000 afferents).")
+            self._ctl_row("synapses", "nt_st_synapse", "combo",
+                          items=[IDEAL, DEVICE], dv=IDEAL,
+                          tip="Ideal weights: the additive rule of the "
+                              "paper. Selected device: the weight is the "
+                              "conductance of the Verilog-A synapse chosen "
+                              "above, written with its potentiation / "
+                              "depression pulses.")
+            self._ctl_row("write window", "nt_st_window", default=50.0,
+                          tip="ms. Device synapses only. The STDP updates of "
+                              "one window are merged into one pulse per "
+                              "synapse. 0 = one pulse per update (slow).")
+            self._ctl_row("pulse amp", "nt_st_pulse", "combo",
+                          items=[CALIBRATED, AS_SET], dv=CALIBRATED,
+                          tip="Device synapses only. Calibrated: the "
+                              "amplitudes are searched so that one pulse "
+                              "on a device at the starting weight moves "
+                              "it by one STDP step (pulse width from "
+                              "'Synapse write pulses'); the values found are "
+                              "logged. As set: the pot / dep amplitude "
+                              "below stands for one STDP step, whatever "
+                              "the device does with it.")
+        with dpg.collapsing_header(label="Stream input", default_open=True):
+            with self._ctl_table():
+                self._ctl_row("seconds", "nt_st_seconds", default=60.0,
                               tip="Simulated time of one Train or Test run.")
-                self._ctl_row("Pattern share", "nt_st_share", default=0.4,
+                self._ctl_row("pattern share", "nt_st_share", default=0.4,
                               tip="Share of the time that holds a pattern "
                                   "(0.25 in the 2008 paper). Patterns never "
                                   "follow one another directly.")
-                self._ctl_row("Jitter ms", "nt_st_jitter", default=1.0)
-                self._ctl_row("Noise Hz", "nt_st_noise", default=10.0,
+                self._ctl_row("jitter ms", "nt_st_jitter", default=1.0)
+                self._ctl_row("noise Hz", "nt_st_noise", default=10.0,
                               tip="Extra random spikes on every afferent.")
-                self._ctl_row("Spike deletion", "nt_st_delete", default=0.0,
+                self._ctl_row("spike deletion", "nt_st_delete", default=0.0,
                               tip="Fraction of the pattern's spikes dropped "
                                   "at each presentation.")
-        self._small("The stream settings above may be changed between runs "
-                    "(test under more jitter, noise or deletion). Changing "
-                    "anything else here, or the seed, starts a new network.",
-                    color=C_MUTED, wrap=296)
-        with self._card("Learning rule and neuron", height=382):
-            with self._ctl_table(label_w=120):
+            self._small("These five may be changed between runs (test under "
+                        "more jitter, noise or deletion). Changing anything "
+                        "else, or the seed, starts a new network.",
+                        color=C_MUTED, wrap=340)
+        with dpg.collapsing_header(label="Learning rule and neuron (stream)",
+                                   default_open=False):
+            with self._ctl_table(label_w=110):
                 for tag, label, _field, default, lo, hi, tip in RULE:
                     self._ctl_row(label, tag, default=default,
                                   tip=f"{tip[0].upper()}{tip[1:]}. Default "
                                       f"{default:g}, allowed {lo:g} to {hi:g}.")
             dpg.add_button(label="Paper defaults", width=-1,
                            callback=self.on_nt_stream_rule_defaults)
-        self._small("Defaults: Masquelier et al. 2008, the values the "
-                    "benchmark is validated with. The two inhibition values "
-                    "are choices made here: a neuron that fires resets the "
-                    "others and holds them back.", color=C_MUTED, wrap=296)
+            self._small("Defaults: Masquelier et al. 2008, the values the "
+                        "benchmark is validated with. The two inhibition "
+                        "values are choices made here: a neuron that fires "
+                        "resets the others and holds them back.",
+                        color=C_MUTED, wrap=340)
+
+    def _nt_apply_mode(self):
+        """Show the controls and views of the selected learning mode. Called
+        on every change of ``nt_mode`` (set_value fires no callback)."""
+        stream = self._nt_is_stream()
+        for tag, show in (("nt_grid_net", not stream), ("nt_grid_rule", not stream),
+                          ("nt_grid_neuron", not stream), ("nt_viz_tabs", not stream),
+                          ("nt_stream_group", stream), ("nt_stream_center", stream)):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, show=show)
+        if dpg.does_item_exist("nt_devlabel"):
+            if stream:
+                if self._nt_devlabel_grid is None:
+                    self._nt_devlabel_grid = dpg.get_value("nt_devlabel")
+                dpg.set_value("nt_devlabel", "Unsupervised stream: set the "
+                              "network on the left, then Train. Power profile "
+                              "and saved models belong to the other modes.")
+            elif getattr(self, "_nt_devlabel_grid", None) is not None:
+                dpg.set_value("nt_devlabel", self._nt_devlabel_grid)
+                self._nt_devlabel_grid = None
+        if dpg.does_item_exist("nt_btn_build"):
+            dpg.configure_item("nt_btn_build", label=" New network " if stream
+                               else " Build network ")
+        if not stream:
+            try:
+                self._on_nt_viz_tab()
+            except Exception:                           # noqa: BLE001
+                pass
+
+    def _on_nt_mode(self, *_):
+        """The mode combo changed. Not while a run is in flight."""
+        if self.trainer_running:
+            dpg.set_value("nt_mode", self._nt_mode_shown)
+            self._nt_status("stop the run before changing the mode", C_AMBER)
+            return
+        self._nt_mode_shown = dpg.get_value("nt_mode")
+        self._nt_apply_mode()
 
     def on_nt_stream_rule_defaults(self, *_):
         for tag, _label, _field, default, *_rest in RULE:
@@ -189,6 +226,7 @@ class NetworkStreamMixin:
                 dpg.set_value(tag, default)
 
     def _nt_stream_views(self):
+        """Centre views of the stream mode (inside ``nt_stream_center``)."""
         dpg.add_text("press Train", tag="nt_st_status", color=C_TEXT2, wrap=0)
         with dpg.tab_bar():
             with dpg.tab(label="  Learning  "):
@@ -225,6 +263,9 @@ class NetworkStreamMixin:
                     dpg.add_plot_axis(dpg.mvYAxis, label="synapses",
                                       tag="nt_st_wy")
             with dpg.tab(label="  Energy  "):
+                self._small("Uses the power profile chosen under Results > "
+                            "Power in a supervised / unsupervised mode.",
+                            color=C_TEXT2)
                 dpg.add_input_text(tag="nt_st_energy", multiline=True,
                                    readonly=True, width=-1, height=-1,
                                    default_value="Device synapses only: run "
@@ -293,7 +334,8 @@ class NetworkStreamMixin:
         self._nt_stream_session = self._nt_stream_key = None
         self._nt_stream_last = None
         self._nt_stream_clear()
-        self._nt_stream_say("network reset - press Train", C_TEXT2)
+        self._nt_stream_say("new network - press Train", C_TEXT2)
+        self._nt_status("stream network reset", C_GREEN)
 
     def _nt_stream_say(self, text, color=C_TEXT2):
         if dpg.does_item_exist("nt_st_status"):

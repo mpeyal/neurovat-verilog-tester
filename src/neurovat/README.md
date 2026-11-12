@@ -230,7 +230,7 @@ does not follow exactly, so device runs remain experiments. With calibrated
 pulses and 1000 afferents the built-in `softbound` synapse does not become
 selective in 60 s: its weights stay in the middle of the range. The
 benchmark takes `--device softbound --calibrate`. The GUI's Trainer exposes
-all of this as the **Stream** tab.
+all of this as the learning mode **unsupervised stream**.
 
 The MNIST benchmark trains and scores the pre-package engine
 (`benchmarks/legacy_neuro.py`) and this package on the same MNIST subset from

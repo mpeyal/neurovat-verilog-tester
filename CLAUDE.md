@@ -56,7 +56,9 @@ file mailbox appears in the workspace. Drive it with the CLI client:
     python tools/nvat_ctl.py shot results/x.png    # screenshot the live window
     python tools/nvat_ctl.py reload         # hot-reload twins after editing simulation_core/
     python tools/nvat_ctl.py nt_build | nt_train | nt_test
-    python tools/nvat_ctl.py nt_stream | nt_stream_test   # Stream tab (continuous-stream STDP)
+    python tools/nvat_ctl.py set nt_mode "unsupervised stream"   # the mode sets the whole Trainer window;
+                                            # nt_build / nt_train / nt_test then act on the stream network
+    python tools/nvat_ctl.py nt_stream | nt_stream_test   # same, and switch to that mode first
     python tools/nvat_ctl.py check_va       # twin <-> .va param consistency
     python tools/nvat_ctl.py openvaf        # compile enabled .va with OpenVAF
     python tools/nvat_ctl.py fit meas.csv   # fit LTP/LTD nonlinearity of a CSV

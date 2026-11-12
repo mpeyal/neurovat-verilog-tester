@@ -21,7 +21,7 @@ Then drive it from any shell (this is what the agent / Claude Code calls):
     python tools/nvat_ctl.py nt_build            # build the trainer crossbar
     python tools/nvat_ctl.py nt_train            # train (waits for completion)
     python tools/nvat_ctl.py nt_test
-    python tools/nvat_ctl.py nt_stream           # Stream tab: continuous-stream STDP run
+    python tools/nvat_ctl.py nt_stream           # switch to mode 'unsupervised stream' and train
     python tools/nvat_ctl.py nt_stream_test      # same patterns, new stream, STDP off
     python tools/nvat_ctl.py nt_power_save       # Power tab report -> results/energy_reports/
 

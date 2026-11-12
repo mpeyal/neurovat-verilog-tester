@@ -49,7 +49,7 @@ from .registry import (
 from .plot_interaction import PlotInteractionMixin
 from .network_visualization import NetworkVisualizationMixin
 from .network_data import NetworkDataMixin
-from .network_stream import NetworkStreamMixin, STREAM_CONTROLS
+from .network_stream import NetworkStreamMixin, STREAM_CONTROLS, STREAM_MODE
 from . import analysis, stdp_protocol
 from .stdp_panel import StdpControls
 
@@ -76,7 +76,8 @@ NT_CONTROLS = [
     ("nt_nout", "output neurons / classes"),
     ("nt_hidden", "hidden layer sizes, comma list e.g. '8' or '8,4' ('' = none)"),
     ("nt_hidden_gain", "extra drive on hidden layers (raise if hidden quiet)"),
-    ("nt_mode", "supervised | unsupervised"),
+    ("nt_mode", "supervised | unsupervised | unsupervised stream - sets the "
+                "whole Trainer window; the nt_st_* controls belong to the last"),
     ("nt_patset", "bars|letters|digits|random|nand|xor|<plugins>|custom|dataset"),
     ("nt_learnrule", "STDP (device-local) | Surrogate grad (BPTT)"),
     ("nt_sg_lr", "surrogate learning rate (0.05-0.2)"),
@@ -188,13 +189,15 @@ if you already raised epochs last round and it plateaued, move a different lever
 this round. Keep replies short and concrete; say what you changed and why.
 Use exact combo strings for nt_learnrule / nt_mode / nt_encoding / nt_patset.
 
-STREAM MODE (the "Stream" tab; Masquelier-style unsupervised learning): one
+STREAM MODE (nt_mode = "unsupervised stream"; Masquelier-style learning): one
 continuous spike stream, no epochs and no labels. Hidden 50 ms patterns recur
 in background activity; STDP acts at every spike and lateral inhibition lets
-each neuron take one pattern. It is a separate network set by the nt_st_*
-controls (it does not use the pixel grid or "build"). Actions: "stream" (run
-nt_st_seconds with STDP on, continuing from the current weights) and
-"stream_test" (same patterns, new stream, STDP off). Change nt_st_jitter /
+each neuron take one pattern. Setting nt_mode switches the whole Trainer
+window; in this mode the network is set by the nt_st_* controls (not the pixel
+grid), "build" starts a new network, "train" runs nt_st_seconds with STDP on,
+continuing from the current weights, and "test" plays a new stream around the
+same patterns with STDP off ("stream" / "stream_test" do the same and switch
+the mode for you). Change nt_st_jitter /
 nt_st_noise / nt_st_delete / nt_st_share between a stream and a stream_test to
 measure robustness; changing any other nt_st_* control or nt_seed starts a new
 network. nt_st_aplus / nt_st_aratio / nt_st_tplus / nt_st_tminus / nt_st_w0
@@ -4835,7 +4838,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         right-side Claude chat is the agent)."""
         with self._pad(left=8, top=6, bottom=0):
             with dpg.group(horizontal=True):
-                b = dpg.add_button(label=" Build network ",
+                b = dpg.add_button(label=" Build network ", tag="nt_btn_build",
                                    callback=self.on_nt_build)
                 b = dpg.add_button(label=" Train ", tag="nt_btn_train",
                                    callback=self.on_nt_train)
@@ -4893,8 +4896,6 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                                 self._nt_activity_tab()
                             with dpg.tab(label="  Out spikes  "):
                                 self._nt_output_tab()
-                    with dpg.tab(label="Stream", tag="nt_tab_stream"):
-                        self._nt_stream_tab()
                     with dpg.tab(label="Results", tag="nt_tab_results"):
                         self._nt_result_summary()
                         with dpg.tab_bar(tag="nt_results_tabs"):
@@ -4904,6 +4905,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                                 self._nt_metrics_tab()
                             with dpg.tab(label="  Power  ", tag="nt_tab_power"):
                                 self._nt_power_tab()
+                with dpg.group(tag="nt_stream_center", show=False):
+                    self._nt_stream_views()
+                self._nt_stream_clear()
                 dpg.set_item_callback("nt_viz_tabs", self._on_nt_viz_tab)
         # Data is the default tab - populate its live rasters right away
         self._nt_encoding_preview()
@@ -5312,6 +5316,21 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                              "cross-point (its conductance = the weight). ECFET = "
                              "current-driven, FeFET = voltage-driven.", wrap=300)
             with self._ctl_table():
+                self._ctl_row("mode", "nt_mode", "combo",
+                              items=["supervised", "unsupervised", STREAM_MODE],
+                              dv="supervised", callback=self._on_nt_mode, tip=(
+                    "Sets the whole window. supervised: a teacher current "
+                    "forces each pattern's neuron to fire. unsupervised: the "
+                    "same pattern-by-pattern presentations without a teacher "
+                    "(winner-take-all). unsupervised stream: one continuous "
+                    "spike stream with hidden recurring patterns and STDP at "
+                    "every spike (Masquelier)."))
+                self._ctl_row("seed", "nt_seed", "int", 1,
+                              "Random seed - fixes spike noise, weight init and "
+                              "sampling so a run repeats.")
+            with dpg.group(tag="nt_stream_group", show=False):
+                self._nt_stream_left()
+            with dpg.group(tag="nt_grid_net"), self._ctl_table():
                 with dpg.table_row():
                     cap = self._small("input grid", color=C_TEXT2)
                     with dpg.group(horizontal=True):
@@ -5334,11 +5353,6 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                 self._ctl_row("hidden gain", "nt_hidden_gain", "double", 1.7,
                               "Extra drive on hidden layers (no teacher). Raise "
                               "if hidden layers stay quiet.")
-                self._ctl_row("mode", "nt_mode", "combo",
-                              items=["supervised", "unsupervised"],
-                              dv="supervised", tip=(
-                    "supervised: a teacher current forces each pattern's neuron "
-                    "to fire. unsupervised: pure winner-take-all self-organising."))
                 self._ctl_row("learning rule", "nt_learnrule", "combo",
                               items=["STDP (device-local)",
                                      "Surrogate grad (BPTT)"],
@@ -5359,10 +5373,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                               unit="freq")
                 self._ctl_row("step", "nt_dt", "double", 1.0,
                               "Integration time-step.", unit="time")
-                self._ctl_row("seed", "nt_seed", "int", 1,
-                              "Random seed - fixes spike noise, weight init and "
-                              "sampling so a run repeats.")
-        with dpg.collapsing_header(label="Synapse learning (STDP)",
+        with dpg.collapsing_header(label="Synapse write pulses and STDP",
                                    default_open=True):
             self._small("the network rule sets the DIRECTION of each write; the "
                         "device twin sets the ACTUAL dG.", color=C_MUTED, wrap=340)
@@ -5375,6 +5386,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                               "Amplitude of a full depressing pulse.", unit="amp")
                 self._ctl_row("pulse", "nt_pwidth", "double", 10,
                               "Programming pulse width.", unit="time")
+            with dpg.group(tag="nt_grid_rule"), self._ctl_table():
                 self._ctl_row("A+ rate", "nt_aplus", "double", 1.0,
                               "Potentiation learning-rate scale.")
                 self._ctl_row("A- rate", "nt_aminus", "double", 1.0,
@@ -5384,7 +5396,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                               "post spike, below depress. Carves the RF.")
                 self._ctl_row("tau_pre", "nt_taupre", "double", 20,
                               "Pre-synaptic eligibility-trace decay.", unit="time")
-        with dpg.collapsing_header(label="Neuron (LIF)", default_open=False):
+        with dpg.collapsing_header(label="Neuron (LIF)", default_open=False,
+                                   tag="nt_grid_neuron"):
             self._small("the output/hidden LIF neuron - bench it live in the "
                         "Neuron tab.", color=C_MUTED, wrap=340)
             with self._ctl_table():
@@ -5960,8 +5973,11 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                    else "temporal (phase)" if _s.startswith("temp")
                    else "rate (Poisson)")
         elif tag == "nt_mode":
-            val = ("unsupervised" if str(val).lower().startswith("uns")
-                   else "supervised")
+            if self.trainer_running:
+                return False
+            _s = str(val).lower()
+            val = (STREAM_MODE if "stream" in _s else
+                   "unsupervised" if _s.startswith("uns") else "supervised")
         cur = dpg.get_value(tag)
         # tab bars store an int id but are switched by the tab's string alias
         if (isinstance(cur, int) and isinstance(val, str)
@@ -5986,6 +6002,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         dpg.set_value(tag, val)
         if tag == "nt_learnrule":
             self._nt_sync_rule()
+        elif tag == "nt_mode":
+            self._on_nt_mode()
         elif tag == "nt_device":
             self._on_nt_device_change()
         elif tag == "nt_va_source":
@@ -6041,19 +6059,18 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                 self.on_nt_build()
                 self.append_chat(
                     "sys", "built · " + dpg.get_value("nt_devlabel")[:140])
-            elif name == "train":
+            elif name in ("train", "test") and not self._nt_is_stream():
                 if not self.trainer_running:
                     self._nt_agent_run = True
-                    self.on_nt_train()
-                    self.append_chat("sys", "training started...")
-            elif name == "test":
+                    if name == "train":
+                        self.on_nt_train()
+                        self.append_chat("sys", "training started...")
+                    else:
+                        self.on_nt_test()
+            elif name in ("train", "test", "stream", "stream_test"):
                 if not self.trainer_running:
-                    self._nt_agent_run = True
-                    self.on_nt_test()
-            elif name in ("stream", "stream_test"):
-                if not self.trainer_running:
-                    dpg.set_value("nt_viz_tabs", "nt_tab_stream")
-                    self._nt_stream_start(name == "stream")
+                    self._nt_set_control("nt_mode", STREAM_MODE)
+                    self._nt_stream_start(name in ("train", "stream"))
                     self._nt_stream_agent = self.trainer_running
                     self.append_chat("sys", self._nt_stream_error
                                      or f"{name} started...")
@@ -6355,9 +6372,12 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
 
     def _nt_sync_rule(self):
         """Surrogate gradient is supervised - force the mode + hint it."""
+        if self._nt_is_stream():
+            return
         if self._nt_get("nt_learnrule", "STDP").startswith("Surrogate"):
             if dpg.does_item_exist("nt_mode"):
                 dpg.set_value("nt_mode", "supervised")
+                self._on_nt_mode()
             self._nt_status("surrogate gradient (BPTT) - supervised, in-situ; "
                             "trains deep nets", C_ACC)
 
@@ -6448,7 +6468,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         showing the old device: rebuild at once if nothing was learnt yet,
         otherwise say clearly that the views are those of the old device."""
         tr = self.trainer
-        if tr is None or self.trainer_running or self._nt_loading:
+        if (tr is None or self.trainer_running or self._nt_loading
+                or self._nt_is_stream()):
             return
         try:
             now = self.network_studio.binding()
@@ -6600,6 +6621,10 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         if self.trainer_running:
             self._nt_status("Stop training/evaluation before saving", C_AMBER)
             return
+        if self._nt_is_stream():
+            self._nt_status("stream networks cannot be saved yet - Save is "
+                            "for the supervised / unsupervised modes", C_AMBER)
+            return
         tr = self.trainer
         if tr is None:
             self._nt_status("build + train first, then Save", C_AMBER)
@@ -6709,6 +6734,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         if key in self.param_values and model.get("device_params"):
             self.param_values[key].update(model["device_params"])
         self._nt_loaded_patterns = (pats, tgts) if pats else None
+        if self._nt_is_stream():        # a saved model is a grid network
+            dpg.set_value("nt_mode", "supervised")
+        self._on_nt_mode()
         self.on_nt_build()
         self._nt_loaded_patterns = None
         self._nt_loaded_model = self.trainer is not None
@@ -6758,6 +6786,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
 
     def on_nt_build(self, *_):
         if self.trainer_running:
+            return
+        if self._nt_is_stream() and not self._nt_loading:
+            self.on_nt_stream_reset()
             return
         try:
             binding = self.network_studio.binding()
@@ -6856,6 +6887,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
     # ---- train / test / stop / reset --------------------------------
 
     def on_nt_train(self, *_):
+        if self._nt_is_stream():
+            self._nt_stream_start(True)
+            return
         try:
             self.network_studio.require_current()
         except (ValueError, OSError) as exc:
@@ -6954,6 +6988,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         self.on_nt_build()
 
     def on_nt_test(self, *_):
+        if self._nt_is_stream():
+            self._nt_stream_start(False)
+            return
         try:
             self.network_studio.require_current()
         except (ValueError, OSError) as exc:

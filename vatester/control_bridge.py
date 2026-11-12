@@ -319,6 +319,8 @@ class ControlBridge:
         if self.app.trainer_running:
             raise RuntimeError("Trainer is busy.")
         self.app.on_nt_build()
+        if self.app._nt_is_stream():
+            return {"stream_network": "new"}
         if self.app.trainer is None:
             raise RuntimeError(dpg.get_item_configuration('nt_status')['label'])
         return {"trainer_built": self.app.trainer is not None}
@@ -330,6 +332,8 @@ class ControlBridge:
     def _cmd_nt_train(self, args):
         if self.app.trainer_running:
             raise RuntimeError("Trainer is busy.")
+        if self.app._nt_is_stream():
+            return self._cmd_nt_stream(args)
         self.app.on_nt_train()
         if not self.app.trainer_running:
             raise RuntimeError(dpg.get_item_configuration('nt_status')['label'])
@@ -339,6 +343,8 @@ class ControlBridge:
     def _cmd_nt_test(self, args):
         if self.app.trainer_running:
             raise RuntimeError("Trainer is busy.")
+        if self.app._nt_is_stream():
+            return self._cmd_nt_stream(args, learn=False)
         self.app.on_nt_test()
         if not self.app.trainer_running:
             raise RuntimeError(dpg.get_item_configuration('nt_status')['label'])
@@ -349,6 +355,7 @@ class ControlBridge:
         app = self.app
         if app.trainer_running:
             raise RuntimeError("Trainer is busy.")
+        app._nt_set_control("nt_mode", "unsupervised stream")
         app._nt_stream_start(learn)
         if not app.trainer_running:
             raise RuntimeError(app._nt_stream_error or "stream did not start")
