@@ -13,9 +13,12 @@ NumPy only, seeded, and driven by config files so results can be regenerated.
   (spatio-temporal) codes, with input noise, spike-time jitter and background
   activity. Column scan (`encoding = "scan"`) sweeps the image left to right:
   one input per pixel row, one time bin of `scan_bin_ms` per pixel column, a
-  spike where the pixel is at or above `scan_threshold`. The crossbar's
-  neurons integrate over the whole presentation, so they see the ink per row
-  and not its order in time.
+  spike where the pixel is at or above `scan_threshold`. Patterns whose rows
+  hold the same amount of ink look alike to it once integrated (all vertical
+  bars and both diagonals of the `bars` set do). The crossbar trainer does
+  not yet learn scanned patterns well: over 15 epochs and 3 seeds, letters
+  and digits reach 25-42 % against 92-100 % with rate coding, although every
+  pattern there has a distinct per-row ink profile.
 - **Devices** — any model behind the `DeviceArray` interface. `softbound` is
   the built-in reference synapse; existing scalar device twins run unchanged
   through `ScalarTwinArray`.

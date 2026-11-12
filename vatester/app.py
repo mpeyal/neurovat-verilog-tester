@@ -6858,6 +6858,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         self.log(f"[neuro] power model: {power_note}")
         # the receptive-field montage shows crossbar 0's post-layer (first
         # hidden layer, or the output for a single crossbar)
+        if dpg.does_item_exist("nt_wm_x"):
+            dpg.configure_item("nt_wm_x", label="input row" if cfg.encoding == "scan"
+                               else "input pixel")
         # (column scan: one weight per pixel ROW, drawn as a column of cells)
         self._nt_setup_rf_texture(self.trainer.layer_sizes[1], cfg.grid_h,
                                   1 if cfg.encoding == "scan" else cfg.grid_w)
