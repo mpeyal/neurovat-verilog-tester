@@ -240,6 +240,21 @@ selective in 60 s: its weights stay in the middle of the range. The
 benchmark takes `--device softbound --calibrate`. The GUI's Trainer exposes
 all of this as the learning mode **unsupervised stream**.
 
+The stream can also hide scanned images (`make_event_stream`, with
+`encoding.scan_events`: one afferent per pixel row, pixel column c fires at
+c x bin ms). The GUI's image input sets the threshold to 0.85 x the lowest
+peak potential one clean presentation drives at the starting weights
+(`pattern_peak`; 0.85 is a free choice) and counts a window as answered when
+the neuron fires at least once in it, since it answers an image with several
+spikes. Measured with one MNIST digit (28 rows, 10 ms per column, 10 Hz
+background between presentations, no noise inside them, 1 ms jitter, even
+spacing, one neuron): after 40 s of training a 15 s test answered every
+image window and few or none of the empty ones (in the GUI: 9 of 9 and 0 of 9
+in the scored last 5 s, seed 1). Known limit: several images are not
+separated by several neurons (every image drives the same rows and one
+neuron takes them all), and a neuron trained on one image also answers other
+images shown as distractors.
+
 The MNIST benchmark trains and scores the pre-package engine
 (`benchmarks/legacy_neuro.py`) and this package on the same MNIST subset from
 the same seed, and reports wall time and the difference in the trained

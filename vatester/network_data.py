@@ -456,6 +456,8 @@ class NetworkDataMixin:
         except Exception:                                   # noqa: BLE001
             self._nt_ds_sample, self._nt_ds_label = None, None
         self._nt_dataset_preview(ds)
+        if self._nt_is_stream():          # stream image set 'dataset'
+            self._nt_st_changed("nt_st_imgset")
         self._nt_refresh_source()
         self._nt_encoding_preview()
         self._nt_status(f"dataset ready: {ds['n']} imgs / {nclass} classes",

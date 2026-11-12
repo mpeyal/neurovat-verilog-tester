@@ -216,6 +216,13 @@ class ControlBridge:
         name = args["name"]
         if not dpg.does_item_exist("center_tabs"):
             raise RuntimeError("center_tabs not built")
+        if name.startswith("nt_st_tab_"):         # a stream-mode view tab
+            if not dpg.does_item_exist(name):
+                raise KeyError(f"no tab '{name}'")
+            dpg.set_value("center_tabs", "tab_trainer")
+            self.app._on_center_tab()
+            self.app._nt_set_control("nt_st_tabs", name)
+            return {"center_tab": dpg.get_value("center_tabs"), "tab": name}
         dpg.set_value("center_tabs", name)
         try:
             self.app._on_center_tab()

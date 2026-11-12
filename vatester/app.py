@@ -196,9 +196,23 @@ this round. Keep replies short and concrete; say what you changed and why.
 Use exact combo strings for nt_learnrule / nt_mode / nt_encoding / nt_patset.
 
 STREAM MODE (nt_mode = "unsupervised stream"; Masquelier-style learning): one
-continuous spike stream, no epochs and no labels. Hidden 50 ms patterns recur
-in background activity; STDP acts at every spike and lateral inhibition lets
-each neuron take one pattern. Setting nt_mode switches the whole Trainer
+continuous spike stream, no epochs and no labels. Hidden patterns recur in
+background activity; STDP acts at every spike and lateral inhibition lets
+each neuron take one pattern. nt_st_input picks the input: "Poisson patterns
+(Masquelier)" (50 ms sections of frozen Poisson activity on nt_st_aff
+afferents) or "scanned images (spatio-temporal)" (one afferent per pixel row,
+column c fires at c x nt_st_bin ms, section = ceil(columns x bin) ms; images
+from nt_st_imgset, hidden ones nt_st_img_pick, distractors
+nt_st_img_distract, background nt_st_bg Hz between presentations; noise
+defaults to 0 for images because noise Hz also lands inside the image). For
+images a window counts as answered by at least one output spike (a neuron
+fires 3-6 times per image), for Poisson by exactly one; threshold 0 = auto
+(0.85 x the weakest clean image peak, or 0.25 x afferents). Known limit of
+the image input: several hidden images are not split over several neurons
+and a neuron trained on one image also answers distractor images. The view
+tabs are nt_st_tabs (nt_st_tab_raster live/replayed raster, nt_st_tab_net
+architecture, nt_st_tab_pat patterns, nt_st_tab_learn verdict with per-neuron
+TP/FN/FP/TN window counts). Setting nt_mode switches the whole Trainer
 window; in this mode the network is set by the nt_st_* controls (not the pixel
 grid), "build" starts a new network, "train" runs nt_st_seconds with STDP on,
 continuing from the current weights, and "test" plays a new stream around the
@@ -210,8 +224,9 @@ network. nt_st_aplus / nt_st_aratio / nt_st_tplus / nt_st_tminus / nt_st_w0
 (STDP), nt_st_taum / nt_st_taus / nt_st_refr (neuron) and nt_st_inh /
 nt_st_tinh (lateral inhibition) are the rule's constants; their defaults are
 the validated paper values, so change them only with a stated reason.
-A run is good when every pattern has its own neuron (about one spike
-per window of that pattern, none elsewhere) and false alarms are below 1 /s.
+A run is good when every pattern has its own neuron (it answers the windows of
+that pattern - one section long, see the result - and stays quiet elsewhere)
+and false alarms are below 1 /s.
 With nt_st_synapse = "selected device" the weights are device conductances.
 nt_st_pulse = "calibrated" searches the pulse amplitudes so that one pulse of
 width nt_pwidth moves a device by one STDP step; "as set" uses nt_potamp /
@@ -5986,11 +6001,21 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             _s = str(val).lower()
             val = (STREAM_MODE if "stream" in _s else
                    "unsupervised" if _s.startswith("uns") else "supervised")
+        elif tag == "nt_st_play":                 # a button: 1 = play, 0 = pause
+            return self._nt_st_set_play(
+                str(val).lower() in ("1", "true", "yes", "on", "play")) or True
+        elif tag in ("nt_st_input", "nt_st_spacing", "nt_st_speed",
+                     "nt_st_imgset", "nt_st_synapse", "nt_st_pulse"):
+            val = self._nt_st_set_combo(tag, val)
+            if val is None:
+                return False
         cur = dpg.get_value(tag)
         # tab bars store an int id but are switched by the tab's string alias
         if (isinstance(cur, int) and isinstance(val, str)
                 and dpg.does_item_exist(val)):
             dpg.set_value(tag, val)
+            if tag == "nt_st_tabs":
+                self._nt_st_on_tab()
             return True
         try:
             if isinstance(cur, bool):
@@ -6018,6 +6043,12 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             self.network_studio.select_source()
         elif tag == "nt_power_profile":
             self._on_nt_power_profile()
+        elif tag == "nt_st_tabs":
+            self._nt_st_on_tab()
+        elif tag in ("nt_st_view_t", "nt_st_view_win"):
+            self._nt_st_on_slider()
+        elif tag.startswith("nt_st_"):
+            self._nt_st_changed(tag)
         return True
 
     def _run_nt_actions(self, actions):
@@ -7375,6 +7406,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                     self._on_nt_metrics(item[1], item[2])
                 elif kind == "nt_stream":
                     self._on_nt_stream(item[1])
+                elif kind == "nt_stream_view":
+                    self._on_nt_stream_view(item[1])
                 elif kind == "nt_stream_done":
                     self._on_nt_stream_done(item[1])
                 elif kind == "nt_acc":
@@ -7521,6 +7554,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             self._nt_tick_layout()
             self._nt_tick_paint()
             self._nt_tick_cell_anim()
+            self._nt_tick_stream_view()
             self._chat_tick()
             self.noise_panel.tick()
             self._watch_code()

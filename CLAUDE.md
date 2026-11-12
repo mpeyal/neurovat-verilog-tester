@@ -23,6 +23,16 @@ Virtuoso** on a shared university host.
 - Shared plot controls: `vatester/plot_interaction.py` (zoom, probes, menus).
 - Network views: `vatester/network_visualization.py` (crossbar/cell/weight rendering).
 - Network data UI: `vatester/network_data.py` (datasets, patterns, spike previews).
+- Stream mode (Trainer "unsupervised stream"): `vatester/network_stream.py`
+  (controls, settings, worker), `vatester/network_stream_views.py` (Raster /
+  Network / Patterns views, replay tick) and the GUI-free
+  `vatester/stream_view.py` (image input, auto threshold, raster windows).
+  Live raster snapshots are extracted in the worker and posted as
+  `nt_stream_view`; the render thread only draws them.
+- Bridge note: the mailbox holds one command; while an async command
+  (`nt_train`, ...) is pending, a second command (e.g. `shot`) is not served
+  while it runs (a `shot` sent then came back black), so a mid-run screenshot
+  needs a driver script, not the bridge.
 - Registry and UI definitions: `vatester/registry.py`, `vatester/ui_constants.py`.
   Registry containers are shared mutable objects; update them in place so
   existing imports and live reload keep seeing the same model definitions.
@@ -59,6 +69,11 @@ file mailbox appears in the workspace. Drive it with the CLI client:
     python tools/nvat_ctl.py set nt_mode "unsupervised stream"   # the mode sets the whole Trainer window;
                                             # nt_build / nt_train / nt_test then act on the stream network
     python tools/nvat_ctl.py nt_stream | nt_stream_test   # same, and switch to that mode first
+    python tools/nvat_ctl.py set nt_st_input "scanned images"   # stream input: Poisson patterns |
+                                            # scanned images (one afferent per pixel row)
+    python tools/nvat_ctl.py tab nt_st_tab_raster   # stream views: nt_st_tab_raster / _net / _pat /
+                                            # _learn / _weights / _energy
+    python tools/nvat_ctl.py set nt_st_play 1       # replay the last run's raster (0 = pause)
     python tools/nvat_ctl.py check_va       # twin <-> .va param consistency
     python tools/nvat_ctl.py openvaf        # compile enabled .va with OpenVAF
     python tools/nvat_ctl.py fit meas.csv   # fit LTP/LTD nonlinearity of a CSV

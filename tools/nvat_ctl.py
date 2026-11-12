@@ -23,6 +23,11 @@ Then drive it from any shell (this is what the agent / Claude Code calls):
     python tools/nvat_ctl.py nt_test
     python tools/nvat_ctl.py nt_stream           # switch to mode 'unsupervised stream' and train
     python tools/nvat_ctl.py nt_stream_test      # same patterns, new stream, STDP off
+    python tools/nvat_ctl.py set nt_st_input "scanned images"   # or "Poisson"; image rows:
+                                                 # nt_st_imgset / _img_size / _img_pick / _img_distract
+    python tools/nvat_ctl.py tab nt_st_tab_raster  # stream views: _raster _net _pat _learn _weights _energy
+    python tools/nvat_ctl.py set nt_st_view_t 3  # replay position (s into the last run)
+    python tools/nvat_ctl.py set nt_st_play 1    # play the replay (0 = pause)
     python tools/nvat_ctl.py nt_power_save       # Power tab report -> results/energy_reports/
 
 Typical closed loop the driver runs:
