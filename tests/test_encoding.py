@@ -120,3 +120,89 @@ def test_column_scan_network_has_one_input_per_row():
                       _scan_cfg(n_out=2, pattern_set="bars"))
     assert net.n_in == 4 and net.layer_sizes == [4, 2]
     assert net.train_step(net.patterns[0][1], 0)["winner"] in (-1, 0, 1)
+
+
+# --- image codes of the event stream (stream_events) -------------------------
+
+def _img(seed=3, shape=(6, 9)):
+    return np.random.default_rng(seed).random(shape)
+
+
+def test_stream_column_scan_is_scan_events():
+    from neurovat.encoding import stream_events
+    img = _img()
+    ev = stream_events(img, "column scan", 7.3, 0.4)
+    rows, t = scan_events(img, 7.3, 0.4)
+    np.testing.assert_array_equal(ev["afferents"], rows)
+    np.testing.assert_array_equal(ev["times"], t)
+    assert ev["layout"] == "row" and ev["n_afferents"] == 6
+    assert ev["pattern_ms"] == np.ceil(9 * 7.3)
+
+
+def test_row_scan_is_the_column_scan_of_the_transpose():
+    from neurovat.encoding import stream_events
+    img = _img()
+    row = stream_events(img, "row scan", 10.0, 0.5)
+    col = stream_events(img.T, "column scan", 10.0, 0.5)
+    for k in ("afferents", "times", "n_afferents", "pattern_ms"):
+        np.testing.assert_array_equal(row[k], col[k])
+    assert row["layout"] == "col" and row["n_afferents"] == 9
+    assert row["pattern_ms"] == 60.0              # 6 rows x 10 ms
+    # line = pixel column c, time = pixel row r x bin
+    r, c = 4, 7
+    img2 = np.zeros((6, 9))
+    img2[r, c] = 1.0
+    ev = stream_events(img2, "row scan", 10.0, 0.5)
+    assert ev["afferents"].tolist() == [c] and ev["times"].tolist() == [40.0]
+
+
+def test_latency_brighter_fires_earlier_with_margins_and_pixel_lines():
+    from neurovat.encoding import STREAM_MARGIN_MS, stream_events
+    img = np.zeros((3, 4))
+    img[0, 1], img[2, 3], img[1, 0], img[1, 1] = 1.0, 0.75, 0.5, 0.2
+    ev = stream_events(img, "latency", 10.0, 0.5, window_ms=40.0)
+    assert ev["layout"] == "pixel" and ev["n_afferents"] == 12
+    t = dict(zip(ev["afferents"].tolist(), ev["times"].tolist()))
+    assert sorted(t) == [1, 4, 11]                 # r * W + c; 0.2 is below
+    m = STREAM_MARGIN_MS
+    assert t[1] == m                                # brightest at the margin
+    assert t[11] == m + 20.0                        # halfway to the threshold
+    assert t[4] == m + 40.0                         # the threshold fires last
+    assert ev["pattern_ms"] == 2 * m + 40.0 and max(t.values()) < ev["pattern_ms"]
+    # near-binary image: a volley one margin after the section start
+    ev = stream_events((_img() > 0.5).astype(float), "ttfs", 10.0, 0.5)
+    assert np.all(ev["times"] == m) and ev["pattern_ms"] == 2 * m + 50.0
+
+
+def test_frozen_poisson_is_frozen_per_seed_and_follows_intensity():
+    from neurovat.encoding import STREAM_MARGIN_MS, stream_events
+    img = np.zeros((10, 10))
+    img[:5] = 1.0
+    img[5:, :5] = 0.5
+    a = stream_events(img, "frozen Poisson", 10.0, 0.4, window_ms=200.0, rng=7)
+    b = stream_events(img, "frozen Poisson", 10.0, 0.4, window_ms=200.0,
+                      rng=np.random.default_rng(7))
+    c = stream_events(img, "frozen Poisson", 10.0, 0.4, window_ms=200.0, rng=8)
+    np.testing.assert_array_equal(a["afferents"], b["afferents"])
+    np.testing.assert_array_equal(a["times"], b["times"])
+    assert not np.array_equal(a["times"], c["times"])
+    d = stream_events(img, "frozen Poisson", 10.0, 0.4, window_ms=200.0)
+    e = stream_events(img, "frozen Poisson", 10.0, 0.4, window_ms=200.0)
+    np.testing.assert_array_equal(d["times"], e["times"])   # default seed 0
+    n = np.bincount(a["afferents"], minlength=100)
+    v = img.reshape(-1)
+    assert n[v == 0].sum() == 0                      # dark pixels are silent
+    full, half = n[v == 1].mean(), n[v == 0.5].mean()
+    assert 15 < full < 25                            # 100 Hz x 200 ms = 20
+    assert 0.3 < half / full < 0.7                   # rate ~ intensity
+    assert a["times"].min() >= STREAM_MARGIN_MS
+    assert a["times"].max() < STREAM_MARGIN_MS + 200.0 < a["pattern_ms"]
+    assert a["layout"] == "pixel" and a["n_afferents"] == 100
+
+
+def test_unknown_stream_code_is_rejected():
+    from neurovat.encoding import stream_code, stream_events
+    assert stream_code(None) == "column scan"
+    assert stream_code("Row") == "row scan"
+    with pytest.raises(ValueError, match="unknown stream encoding"):
+        stream_events(np.ones((3, 3)), "wavelet")

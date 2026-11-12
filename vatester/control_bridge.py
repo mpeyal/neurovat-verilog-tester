@@ -377,6 +377,62 @@ class ControlBridge:
     def _cmd_nt_stream_test(self, args):
         return self._cmd_nt_stream(args, learn=False)
 
+    def _cmd_nt_robust(self, args):
+        """Robustness sweep of the trained stream network (the Robustness
+        tab's Run sweep, with its level / seconds controls); waits."""
+        app = self.app
+        if app.trainer_running:
+            raise RuntimeError("Trainer is busy.")
+        app._nt_set_control("nt_mode", "unsupervised stream")
+        if args.get("seconds") not in (None, ""):
+            app._nt_set_control("nt_st_rb_seconds", float(args["seconds"]))
+        if not app._nt_rb_start():
+            raise RuntimeError(app._nt_rb_error or "sweep did not start")
+
+        def finalize():
+            if app._nt_rb_error:
+                raise RuntimeError(app._nt_rb_error)
+            res = app._nt_rb_compact()
+            return {"robust": res,
+                    "table": dpg.get_value("nt_st_rb_table")}
+        return _Async(lambda: not app.trainer_running, finalize,
+                      timeout_s=args.get("timeout_s", 7200))
+
+    def _cmd_nt_robust_raster(self, args):
+        """Show one swept level (nt_st_rb_pick: its text or index) in the
+        Raster tab: one keyed STDP-off run; waits."""
+        app = self.app
+        if app.trainer_running:
+            raise RuntimeError("Trainer is busy.")
+        if args.get("entry") not in (None, ""):
+            if not app._nt_set_control("nt_st_rb_pick", args["entry"]):
+                raise KeyError(f"no swept level {args['entry']!r}: "
+                               + ", ".join(e[0] for e in app._nt_rb_entries))
+        if not app._nt_rb_show_raster():
+            raise RuntimeError(app._nt_rb_error or "raster run did not start")
+
+        def finalize():
+            if app._nt_rb_error:
+                raise RuntimeError(app._nt_rb_error)
+            return {"level": dpg.get_value("nt_st_rb_pick"),
+                    "post_spikes": getattr(app, "_nt_rb_raster_last", None)}
+        return _Async(lambda: not app.trainer_running, finalize,
+                      timeout_s=args.get("timeout_s", 1200))
+
+    def _cmd_nt_load_mnist(self, args):
+        """Load <workspace>/datasets/mnist.npz with the Data-tab loader (it
+        downloads only when the file is missing); waits."""
+        app = self.app
+        app.on_nt_download_mnist()
+
+        def finalize():
+            ds = getattr(app, "_nt_ds", None)
+            if not ds:
+                raise RuntimeError("MNIST did not load (see the log)")
+            return {"dataset": ds.get("path"), "n": ds.get("n")}
+        return _Async(lambda: not app._nt_busy_load, finalize,
+                      timeout_s=args.get("timeout_s", 300))
+
     def _cmd_nt_power_save(self, args):
         # no caller-supplied path: always results/energy_reports/<timestamp>.txt
         path = self.app.on_nt_power_save()
@@ -434,6 +490,8 @@ class ControlBridge:
         "nt_build": _cmd_nt_build, "nt_load": _cmd_nt_load,
         "nt_train": _cmd_nt_train, "nt_test": _cmd_nt_test,
         "nt_stream": _cmd_nt_stream, "nt_stream_test": _cmd_nt_stream_test,
+        "nt_robust": _cmd_nt_robust, "nt_robust_raster": _cmd_nt_robust_raster,
+        "nt_load_mnist": _cmd_nt_load_mnist,
         "nt_power_save": _cmd_nt_power_save,
         "check_va": _cmd_check_va, "openvaf": _cmd_openvaf, "fit": _cmd_fit,
         "log": _cmd_log,

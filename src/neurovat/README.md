@@ -18,7 +18,9 @@ NumPy only, seeded, and driven by config files so results can be regenerated.
   bars and both diagonals of the `bars` set do). The crossbar trainer does
   not yet learn scanned patterns well: over 15 epochs and 3 seeds, letters
   and digits reach 25-42 % against 92-100 % with rate coding, although every
-  pattern there has a distinct per-row ink profile.
+  pattern there has a distinct per-row ink profile. The stream benchmark
+  has its own image codes in `encoding.stream_events`: column scan, row
+  scan, latency and frozen Poisson (see "Stream encodings" below).
 - **Devices** — any model behind the `DeviceArray` interface. `softbound` is
   the built-in reference synapse; existing scalar device twins run unchanged
   through `ScalarTwinArray`.
@@ -242,7 +244,9 @@ all of this as the learning mode **unsupervised stream**.
 
 The stream can also hide scanned images (`make_event_stream`, with
 `encoding.scan_events`: one afferent per pixel row, pixel column c fires at
-c x bin ms). The GUI's image input sets the threshold to 0.85 x the lowest
+c x bin ms). `encoding.stream_events` also has a row scan (one afferent per
+pixel column) and two codes with one afferent per pixel, latency and frozen
+Poisson (see "Stream encodings" below). The GUI's image input sets the threshold to 0.85 x the lowest
 peak potential one clean presentation drives at the STARTING weights
 (`pattern_peak`; 0.85 is a free choice) and counts a window as answered when
 the neuron fires at least once in it, since it answers an image with several
@@ -309,6 +313,77 @@ images shown as distractors. With the other
 MNIST digits 1-9 as distractors (`w_init` 1.0, `noise_hz` 0): untrained 13
 and 16 of 18 false windows, after 120 s of training 14 and 14 of 18 - no
 learning.
+
+#### Robustness sweep
+
+`vatester.stream_robust.sweep` (the GUI: the Trainer's stream mode,
+Robustness tab) tests a trained network while ONE input factor at a time
+departs from its nominal value: spike-time jitter, missing (deleted) pattern
+spikes, and extra (noise) spikes, at the levels of the 2008 paper's
+robustness panels (jitter 1 / 3 ms, 10 / 30 % deletion, 5 / 26 Hz) plus the
+value the network was trained with. It is recall: every level runs with
+STDP off and the threshold held, on one fixed keyed stream
+(`Session.run(stream_key=...)`), so the trained and untrained networks see
+the same stream, a repeat sweep gives identical numbers, and the session
+(weights, runs, stream, device) is left as it was. The untrained row is a
+fresh copy at the start weights with the same patterns. Every window of the
+whole run is counted (no learning, so no burn-in): a different denominator
+from Test's score over the last third, so the two do not compare directly.
+The extra-spike levels are the absolute noise rate, not added to the
+nominal.
+
+Measured: trained column scan of the first MNIST "0" (28 rows, `w_init`
+1.0, one neuron, seed 1, even spacing, share 0.5, `bg_hz` and `noise_hz`
+10, 1 ms jitter, 60 s of training with no Test before it), 30 s per level,
+53 image windows and 54 other windows per run; * = nominal. (With the
+untrained Test run first, the 60 s of training see a different stream; that
+network gave 0/54 false at every level except 26 Hz, and 44 and 9 hits at
+30 and 50 % missing spikes. The untrained column was the same.)
+
+| factor | level | trained hits | trained false | untrained hits | untrained false |
+|---|---|---|---|---|---|
+| jitter | 1* / 3 / 5 ms | 53 / 53 / 53 | 3 / 3 / 3 | 53 / 53 / 53 | 25 / 25 / 25 |
+| missing spikes | 0* / 10 / 30 / 50 % | 53 / 53 / 46 / 7 | 3 at each | 53 / 53 / 53 / 41 | 25 at each |
+| extra spikes | 5 / 10* / 26 Hz | 53 / 53 / 53 | 0 / 3 / 54 | 53 / 53 / 53 | 2 / 25 / 54 |
+
+- At 26 Hz both networks answer every window: the threshold is held and
+  there are only 28 inputs (the paper's neuron had 2000).
+- The trained network keeps its hits less well at 30 % deletion than the
+  untrained one, because STDP pruned its weights.
+- With 10 ms per column, jitter up to 5 ms does not change any window's
+  answer.
+
+#### Stream encodings
+
+How the image is turned into spikes decides what STDP can learn. Measured
+on the first MNIST "0", untrained -> trained (60 s of training), 30 s tests
+with STDP off, counted over the whole test run (not Test's last-third
+score); hits held unless stated.
+
+- Column scan (28 inputs = pixel rows), noise and background 10 Hz: false
+  windows 25-27 -> 2 of 54 (two seeds, even spacing). Random spacing at
+  share 0.4: 27/64 -> 5/61.
+- Row scan (28 inputs = pixel columns), 10 Hz: 40-44 -> 2 of 54. Random
+  spacing at 0.4: 53/64 -> 4/61.
+- Latency (784 inputs, one per pixel; a brighter pixel fires earlier within
+  a 50 ms window after a 15 ms lead margin): at 10 Hz the neuron fires in
+  every window (188/188 -> 188/188 false), nothing learnt; at 1 Hz it is
+  clean untrained (0 false), nothing to learn; at 3 Hz 188/188 -> 1/188 on
+  both seeds (random spacing at 0.4: 226/226 -> 1/228); at 5 Hz 188/188 ->
+  0-4/188. The GUI defaults pixel codes to 3 Hz noise and background. It
+  needs the longer training: 30 s of training in the GUI gave only
+  63/63 -> 39/63 false windows.
+- Frozen Poisson (784 inputs, one fixed draw at 100 Hz x intensity over 50
+  ms) is unreliable. At 1 Hz, at 5 Hz and on 1 of 2 seeds at 10 Hz the hits
+  collapse after training (e.g. 187 -> 9-15). At 3 Hz the one headless run
+  held its hits but learnt nothing, only because it was already clean
+  untrained; a GUI run at 3 Hz (30 s of training, a different frozen draw)
+  collapsed from 62 to 21 hits. Each line fires about 5 times per window, so
+  STDP depresses the image's own lines until the drive no longer reaches the
+  threshold (the auto threshold, 0.85 of the clean peak).
+
+Free parameters chosen here: the 50 ms window, the 15 ms margin,
+the 100 Hz rate, frozen seed 0, and the 3 Hz pixel-code noise default.
 
 The MNIST benchmark trains and scores the pre-package engine
 (`benchmarks/legacy_neuro.py`) and this package on the same MNIST subset from

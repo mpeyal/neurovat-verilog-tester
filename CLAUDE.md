@@ -40,10 +40,30 @@ Virtuoso** on a shared university host.
   *learnt* something. Image input starts at weight 1.0 (Poisson 0.475). The
   auto threshold scales with the start weight, so the untrained network was
   the same at either (measured on the MNIST "0"); at 1.0 STDP can only prune, at 0.475 it potentiated
-  the image rows and the false answers rose (MNIST "0"). Learning shows on
-  MNIST at 28 rows; the built-in images are clean untrained (detection
-  only). The Learning tab's "other windows answered (%)" line is the image
-  learning signal.
+  the image rows and the false answers rose (MNIST "0"). Image encodings
+  (combo `nt_st_code`: column scan, row scan, latency, frozen Poisson) are
+  in `neurovat.encoding.stream_events`; the GUI-free helpers (`CODES`,
+  `CODE_TIPS`, noise defaults) are in `stream_view`, and the input count
+  comes from `img["n_afferents"]` (size for the scans, size² for the pixel
+  codes). Learning shows on the MNIST "0" at size 28 with both scans (10 Hz
+  noise) and with latency at 3-5 Hz noise after 60 s of training (30 s gave
+  only a partial drop); frozen Poisson is unreliable (the hits collapsed
+  after training at 1, 3 (a GUI run) and 5 Hz). The built-in images are clean untrained
+  (detection only). The Learning tab's "other windows answered (%)" line is
+  the image learning signal.
+- Robustness tab (`vatester/network_stream_robust.py`, GUI-free core
+  `vatester/stream_robust.py`): after training, tests the network (STDP off,
+  threshold held) on ONE fixed keyed stream, one factor at a time (jitter,
+  missing spikes %, extra spikes Hz absolute), trained and untrained copy,
+  counted over the whole run (not Test's last third). Nominal = the stream
+  settings of the last Train (recorded in `_nt_stream_start` as
+  `_nt_stream_trained_with`). Refused without a trained network or after a
+  settings-key change. It shares `trainer_running` / `_trainer_stop`; the
+  worker calls `sweep()` once per level and posts `nt_robust_progress`
+  (partial result) and always `nt_robust_done`. The session, its runs, the
+  device and the energy meter are left unchanged. No untrained baseline for
+  device synapses. "Show in Raster" replays one keyed level through the
+  Raster tab.
 - Bridge note: the mailbox holds one command; while an async command
   (`nt_train`, ...) is pending, a second command (e.g. `shot`) is not served
   while it runs (a `shot` sent then came back black), so a mid-run screenshot
@@ -70,8 +90,9 @@ Virtuoso** on a shared university host.
 
 `vatester/control_bridge.py` lets an outside driver operate the *running* GUI -
 the local analog of the Virtuoso skillbridge, except here the app is the server.
-Start it with `python run_gui.py --bridge` (or `NVAT_BRIDGE=1`); a `control/`
-file mailbox appears in the workspace. Drive it with the CLI client:
+It is on by default: `python run_gui.py` starts it (`--no-bridge` starts with
+it off; toggle it live from the Tools menu), and a `control/` file mailbox
+appears in the workspace. Drive it with the CLI client:
 
     python tools/nvat_ctl.py ping | state
     python tools/nvat_ctl.py set nt_epochs 25 / get nt_epochs / tab tab_results
@@ -85,10 +106,19 @@ file mailbox appears in the workspace. Drive it with the CLI client:
                                             # nt_build / nt_train / nt_test then act on the stream network
     python tools/nvat_ctl.py nt_stream | nt_stream_test   # same, and switch to that mode first
     python tools/nvat_ctl.py set nt_st_input "scanned images"   # stream input: Poisson patterns |
-                                            # scanned images (one afferent per pixel row)
+                                            # scanned images (afferents per nt_st_code)
+    python tools/nvat_ctl.py set nt_st_code latency  # image encoding: column scan (one per pixel
+                                            # row) | row scan (per column) | latency |
+                                            # frozen Poisson (one per pixel)
     python tools/nvat_ctl.py tab nt_st_tab_raster   # stream views: nt_st_tab_raster / _net / _pat /
-                                            # _learn / _weights / _energy
+                                            # _learn / _weights / _energy / _robust
     python tools/nvat_ctl.py set nt_st_play 1       # replay the last run's raster (0 = pause)
+    python tools/nvat_ctl.py nt_load_mnist          # load <workspace>/datasets/mnist.npz
+    python tools/nvat_ctl.py nt_robust 30           # robustness sweep of the trained stream
+                                            # network, 30 s per level; waits, returns the table.
+                                            # Levels: set nt_st_rb_jitter / _delete / _noise
+                                            # ('' = paper levels + trained value), nt_st_rb_untrained
+    python tools/nvat_ctl.py nt_robust_raster 2     # show swept level #2 in the Raster tab
     python tools/nvat_ctl.py check_va       # twin <-> .va param consistency
     python tools/nvat_ctl.py openvaf        # compile enabled .va with OpenVAF
     python tools/nvat_ctl.py fit meas.csv   # fit LTP/LTD nonlinearity of a CSV

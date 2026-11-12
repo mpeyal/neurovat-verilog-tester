@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """nvat_ctl - command-line client for the running NeuroVAT GUI's control bridge.
 
-Launch the app with the bridge on:
-    python run_gui.py --bridge
+Launch the app (the bridge is on by default; --no-bridge starts it off, and the
+Tools menu toggles it live):
+    python run_gui.py
 
 Then drive it from any shell (this is what the agent / Claude Code calls):
     python tools/nvat_ctl.py ping
@@ -25,9 +26,19 @@ Then drive it from any shell (this is what the agent / Claude Code calls):
     python tools/nvat_ctl.py nt_stream_test      # same patterns, new stream, STDP off
     python tools/nvat_ctl.py set nt_st_input "scanned images"   # or "Poisson"; image rows:
                                                  # nt_st_imgset / _img_size / _img_pick / _img_distract
-    python tools/nvat_ctl.py tab nt_st_tab_raster  # stream views: _raster _net _pat _learn _weights _energy
+    python tools/nvat_ctl.py set nt_st_code latency  # image encoding: column scan | row scan |
+                                                 # latency | frozen Poisson (window: nt_st_code_win)
+    python tools/nvat_ctl.py tab nt_st_tab_raster  # stream views: _raster _net _pat _learn _weights _energy _robust
     python tools/nvat_ctl.py set nt_st_view_t 3  # replay position (s into the last run)
     python tools/nvat_ctl.py set nt_st_play 1    # play the replay (0 = pause)
+    python tools/nvat_ctl.py nt_load_mnist       # load <workspace>/datasets/mnist.npz (image set 'dataset')
+    python tools/nvat_ctl.py nt_robust           # robustness sweep of the TRAINED stream network
+                                                 # (STDP off, one fixed stream); waits, returns the table
+    python tools/nvat_ctl.py nt_robust 10        # ... 10 s per level (else nt_st_rb_seconds, default 30)
+    python tools/nvat_ctl.py set nt_st_rb_jitter "1,3,5"   # levels: _jitter ms, _delete %, _noise Hz
+                                                 # ('' = paper levels + trained value); nt_st_rb_untrained 0/1
+    python tools/nvat_ctl.py tab nt_st_tab_robust  # the Robustness tab (plots + table)
+    python tools/nvat_ctl.py nt_robust_raster 2  # show swept level #2 (or its text) in the Raster tab
     python tools/nvat_ctl.py nt_power_save       # Power tab report -> results/energy_reports/
 
 Typical closed loop the driver runs:
@@ -51,6 +62,7 @@ _ARG_SPECS = {
     "get": ["tag"], "set": ["tag", "value"], "tab": ["name"],
     "shot": ["path"], "nt_load": ["path"],
     "fit": ["path"], "openvaf": ["path"],       # openvaf path optional
+    "nt_robust": ["seconds"], "nt_robust_raster": ["entry"],
 }
 
 
@@ -62,7 +74,8 @@ def send(workspace, name, args, timeout=None, poll=0.05):
     d = _cmd_dir(workspace)
     if not os.path.isdir(d):
         raise SystemExit(f"[nvat_ctl] no control mailbox at {d}\n"
-                         f"  is the app running with:  python run_gui.py --bridge ?")
+                         f"  is the app running (python run_gui.py) with the "
+                         f"bridge on (not --no-bridge; Tools menu)?")
     cmd_path = os.path.join(d, "command.json")
     res_path = os.path.join(d, "result.json")
     cid = time.time_ns()

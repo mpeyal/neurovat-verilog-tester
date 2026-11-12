@@ -45,6 +45,13 @@ class NetworkStreamViewsMixin:
     _nt_st_net_w = None          # (n_out, shown) weights drawn in Network
     _nt_st_net_size = (0, 0)
     _nt_st_th = None
+    _nt_st_texs = None           # pixel-code thumbnails / heat maps
+    # Network / Patterns need a redraw; the guarded tick does it on the
+    # render thread (widget callbacks run on DPG's callback thread, and a
+    # tab callback drawing the network while the tick drew it too left two
+    # drawings in the drawlist)
+    _nt_st_dirty_net = False
+    _nt_st_dirty_pat = False
 
     # ---- themes -------------------------------------------------------
 
@@ -118,6 +125,8 @@ class NetworkStreamViewsMixin:
                                    default_value="Device synapses only: run "
                                    "Train or Test with Synapses = "
                                    f"'{DEVICE_LABEL}'.")
+            with dpg.tab(label="  Robustness  ", tag="nt_st_tab_robust"):
+                self._nt_st_robust_tab()
 
     def _nt_st_learning_tab(self):
         with dpg.plot(width=-1, height=185, no_menus=True):
@@ -320,12 +329,29 @@ class NetworkStreamViewsMixin:
 
     def _nt_st_setup_raster(self, arch):
         """Axis labels / direction for the input kind (on run start / end)."""
-        if arch["images"]:
+        layout = arch.get("layout", "row") if arch["images"] else None
+        if layout == "row":
             label = "afferent (pixel row, 0 = top)"
+        elif layout == "col":
+            label = "afferent (pixel column, 0 = left)"
+        elif layout == "pixel":
+            ni = int(arch.get("n_inked") or 0)
+            label = (f"afferent = pixel (r, c): {arch['n_shown']} of "
+                     f"{arch['n_aff']} shown, {ni} inked + "
+                     f"{arch['n_shown'] - ni} silent")
         else:
             label = (f"afferent ({arch['n_shown']} of {arch['n_aff']} "
                      "afferents shown)")
         dpg.configure_item("nt_st_ry", label=label, invert=bool(arch["images"]))
+        if layout == "pixel":
+            # y is the line's place in the shown sample: name a few by (r, c)
+            shown = np.asarray(arch["shown"], int)
+            pos = sv.shown_afferents(shown.size, 9)
+            dpg.set_axis_ticks("nt_st_ry", tuple(
+                (sv.line_label("pixel", shown[p], arch["size"]), float(p))
+                for p in pos.tolist()))
+        else:
+            dpg.reset_axis_ticks("nt_st_ry")
         n = int(arch["n_out"])
         for j in range(MAX_OUT):
             dpg.configure_item(f"nt_st_r_o{j}", show=j < n)
@@ -360,6 +386,7 @@ class NetworkStreamViewsMixin:
                             self._nt_st_draw_net()
                 return
             self._nt_st_fit_net()
+            self._nt_st_draw_dirty()
             if not self._nt_st_playing:
                 return
             rec = self._nt_st_rec
@@ -473,13 +500,22 @@ class NetworkStreamViewsMixin:
                               and cur == dpg.get_alias_id(tag))
 
     def _nt_st_on_tab(self, *_):
-        try:
-            if self._nt_st_tab_is("nt_st_tab_net"):
-                self._nt_st_draw_net()
-            elif self._nt_st_tab_is("nt_st_tab_pat"):
-                self._nt_st_draw_patterns()
-        except Exception as exc:                        # noqa: BLE001
-            self.log(f"[stream] view error: {exc!r}")
+        """Tab bar callback (DPG's callback thread) or bridge: only mark the
+        views; :meth:`_nt_st_draw_dirty` draws them on the render thread."""
+        self._nt_st_mark_dirty()
+
+    def _nt_st_mark_dirty(self):
+        self._nt_st_dirty_net = self._nt_st_dirty_pat = True
+
+    def _nt_st_draw_dirty(self):
+        """From the tick: redraw a marked view if its tab is the one shown
+        (a hidden one stays marked until it is)."""
+        if self._nt_st_dirty_net and self._nt_st_tab_is("nt_st_tab_net"):
+            self._nt_st_dirty_net = False
+            self._nt_st_draw_net()
+        if self._nt_st_dirty_pat and self._nt_st_tab_is("nt_st_tab_pat"):
+            self._nt_st_dirty_pat = False
+            self._nt_st_draw_patterns()
 
     def _nt_st_fit_net(self):
         """Keep the architecture drawlist as large as its scroll window."""
@@ -493,6 +529,7 @@ class NetworkStreamViewsMixin:
             self._nt_st_draw_net()
 
     def _nt_st_draw_net(self):
+        self._nt_st_dirty_net = False
         dl = "nt_st_net_dl"
         if not dpg.does_item_exist(dl):
             return
@@ -507,10 +544,26 @@ class NetworkStreamViewsMixin:
                           color=C_RED, parent=dl)
             return
         idx = np.asarray(arch["net_idx"], int)
-        k, n_out = idx.size, int(arch["n_out"])
-        W = self._nt_st_net_w
-        if W is None or np.shape(W) != (n_out, k):
-            W = np.full((n_out, k), float(arch["w_init"]))
+        n_out = int(arch["n_out"])
+        W_all = self._nt_st_net_w
+        if W_all is None or np.shape(W_all) != (n_out, idx.size):
+            W_all = np.full((n_out, idx.size), float(arch["w_init"]))
+        images = arch["images"]
+        layout = arch.get("layout", "row") if images else None
+        pixel = layout == "pixel"
+        if pixel:
+            # size x size lines: draw a sample of the hidden images' inked
+            # pixels; every weight still goes into the heat map
+            on = np.zeros(idx.size, bool)
+            for vec in arch["vecs"]:
+                on |= np.asarray(vec, float).reshape(-1)[:idx.size] >= float(
+                    arch.get("ink", 0.5))
+            src = idx[on] if on.any() else idx
+            draw = src[sv.shown_afferents(src.size, sv.NET_PIXELS)]
+            W = W_all[:, np.searchsorted(idx, draw)]
+        else:
+            draw, W = idx, W_all
+        k = draw.size
         avail_w, avail_h = self._nt_st_net_size or (900, 560)
         top = 112.0
         pitch = max(min(18.0, (max(avail_h, 420) - top - 70.0) / max(k, 1)), 9.0)
@@ -519,14 +572,25 @@ class NetworkStreamViewsMixin:
         ay = [top + (i + 0.5) * pitch for i in range(k)]
         npitch = span / max(n_out, 1)
         ny = [top + (j + 0.5) * npitch for j in range(n_out)]
-        images = arch["images"]
         need_w = nx + 220
         cell = pitch
+        low = top + span
         if images:
-            need_w = nx + 200 + (cell * arch["size"] + 18) * len(arch["vecs"]) \
-                + 80 * n_out + 40
+            if pixel:
+                # thumbnails + heat maps fit the visible width where they can
+                n_maps = len(arch["vecs"]) + n_out
+                fit = (avail_w - 16 - nx - 200 - 60 - 18 * n_maps) / max(
+                    int(arch["size"]) * n_maps, 1)
+                cell = max(min(span / max(int(arch["size"]), 1), 18.0, fit),
+                           4.0)
+                need_w = nx + 200 + (cell * arch["size"] + 18) * (
+                    len(arch["vecs"]) + n_out) + 40
+                low = top + max(span, cell * arch["size"])
+            else:
+                need_w = nx + 200 + (cell * arch["size"] + 18) * len(
+                    arch["vecs"]) + 80 * n_out + 40
         width = int(max(avail_w - 16, need_w, 640))
-        height = int(max(avail_h - 16, top + span + 70, 420))
+        height = int(max(avail_h - 16, low + 70, 420))
         dpg.configure_item(dl, width=width, height=height)
 
         # caption
@@ -567,11 +631,16 @@ class NetworkStreamViewsMixin:
                             parent=dl)
             if images or k <= 30:
                 dpg.draw_text((ax - 52, ay[i] - 7),
-                              (f"row {int(idx[i])}" if images
-                               else f"#{int(idx[i])}"),
+                              (sv.line_label(layout, draw[i], arch["size"])
+                               if images else f"#{int(draw[i])}"),
                               size=12, color=C_MUTED, parent=dl)
-        cap = (f"{arch['n_aff']} pixel rows" if images else
-               f"{k} of {arch['n_aff']} afferents drawn ...")
+        if pixel:
+            cap = f"{k} of {arch['n_aff']} pixel lines drawn (inked)"
+        elif images:
+            cap = (f"{arch['n_aff']} pixel "
+                   f"{'columns' if layout == 'col' else 'rows'}")
+        else:
+            cap = f"{k} of {arch['n_aff']} afferents drawn ..."
         dpg.draw_text((ax - 52, top + span + 8), cap, size=13, color=C_TEXT2,
                       parent=dl)
         dpg.draw_text((ax - 30, top - 22), "afferents", size=13,
@@ -601,11 +670,24 @@ class NetworkStreamViewsMixin:
         if not images:
             return
         # hidden images aligned with the afferent rows, then per-row weights
+        # (row scan: the image transposed, so its row i = pixel column i sits
+        # beside input i; pixel codes: the image, then per-pixel heat maps)
         size = int(arch["size"])
         x0 = nx + 200
+        if pixel:
+            # textures, not size x size rectangles each: an image and a heat
+            # map per neuron as rectangles overflow the window's vertex
+            # buffer (the heat map came out cut off)
+            cell = float(max(int(cell), 1))
         for p, vec in enumerate(arch["vecs"]):
             v = np.asarray(vec, float).reshape(size, size)
-            for r in range(size):
+            if layout == "col":
+                v = v.T
+            if pixel:
+                tex = self._nt_st_texture(("img", p), v, int(cell), False)
+                dpg.draw_image(tex, (x0, top), (x0 + cell * size,
+                                                top + cell * size), parent=dl)
+            for r in range(0 if pixel else size):
                 for c in range(size):
                     val = float(v[r, c])
                     g = int(30 + 215 * val) if val > 0 else 26
@@ -618,6 +700,9 @@ class NetworkStreamViewsMixin:
                           else f"pattern {p + 1}", size=13,
                           color=PAT_COL[p % len(PAT_COL)], parent=dl)
             x0 += cell * size + 18
+        if pixel:
+            self._nt_st_draw_heat(dl, W_all, n_out, size, cell, x0, top, low)
+            return
         bw = 70.0
         for j in range(n_out):
             col = OUT_COL[j % len(OUT_COL)]
@@ -632,8 +717,77 @@ class NetworkStreamViewsMixin:
                                    fill=_blend(col, 210), color=(0, 0, 0, 0),
                                    parent=dl)
             x0 += bw + 10
-        dpg.draw_text((nx + 200, top + span + 8), "hidden image(s), and each "
-                      "neuron's weight per pixel row (bar length = weight, 0 to 1)", size=13,
+        if layout == "col":
+            note = ("image(s) transposed (row i = pixel column i), and each "
+                    "neuron's weight per pixel column (bar = weight, 0 to 1)")
+        else:
+            note = ("hidden image(s), and each neuron's weight per pixel row "
+                    "(bar length = weight, 0 to 1)")
+        dpg.draw_text((nx + 200, top + span + 8), note, size=13,
+                      color=C_TEXT2, parent=dl)
+
+    def _nt_st_texture(self, slot, img, k, cmap):
+        """A raw texture (in nt_tex_reg) holding the 2-D 0-1 array ``img``,
+        each pixel a k x k block (crisp when drawn at k px per pixel), in
+        the weight colour map (``cmap``) or the thumbnail greys. Created
+        once per slot and size, updated in place after that."""
+        img = np.clip(np.asarray(img, float), 0.0, 1.0)
+        if cmap:
+            rgb = self._cmap_lut()[np.clip((img * 255).astype(int), 0, 255)]
+        else:                       # the greys of the thumbnail rectangles
+            g = np.where(img > 0, (30 + 215 * img).astype(int), 26) / 255.0
+            rgb = np.stack([g, g, np.minimum(g + 20 / 255.0, 1.0)], -1)
+        block = np.repeat(np.repeat(rgb, k, 0), k, 1)
+        h, w = block.shape[:2]
+        data = np.ones((h, w, 4), np.float32)
+        data[..., :3] = block
+        data = data.reshape(-1)
+        if self._nt_st_texs is None:
+            self._nt_st_texs = {}
+        old = self._nt_st_texs.get(slot)
+        if old and old[1] == (w, h) and dpg.does_item_exist(old[0]):
+            dpg.set_value(old[0], data)
+            tag = old[0]
+        else:
+            if old and dpg.does_item_exist(old[0]):
+                dpg.delete_item(old[0])
+            tag = dpg.add_raw_texture(w, h, data, format=dpg.mvFormat_Float_rgba,
+                                      parent="nt_tex_reg")
+        self._nt_st_texs[slot] = (tag, (w, h), data)  # keep the buffer alive
+        return tag
+
+    def _nt_st_draw_heat(self, dl, W, n_out, size, cell, x0, top, low):
+        """Pixel codes: each neuron's weights as a size x size heat map in
+        the colours of the synapse lines, with a 0-1 colour bar."""
+        n = size * size
+        for j in range(n_out):
+            col = OUT_COL[j % len(OUT_COL)]
+            dpg.draw_text((x0, top - 22), f"n{j + 1} w", size=13, color=col,
+                          parent=dl)
+            w = np.clip(np.asarray(W[j], float)[:n], 0.0, 1.0)
+            if w.size == n:
+                tex = self._nt_st_texture(("w", j), w.reshape(size, size),
+                                          int(cell), True)
+                dpg.draw_image(tex, (x0, top), (x0 + cell * size,
+                                                top + cell * size), parent=dl)
+            dpg.draw_rectangle((x0 - 1, top - 1),
+                               (x0 + cell * size + 1, top + cell * size + 1),
+                               color=_blend(col, 160), parent=dl)
+            x0 += cell * size + 18
+        # colour bar
+        bar_h = max(cell * size, 60.0)
+        for i in range(20):
+            dpg.draw_rectangle((x0, top + bar_h * (1 - (i + 1) / 20)),
+                               (x0 + 10, top + bar_h * (1 - i / 20)),
+                               fill=self._cmap_color((i + 0.5) / 20),
+                               color=(0, 0, 0, 0), parent=dl)
+        dpg.draw_text((x0 + 14, top - 6), "1", size=12, color=C_MUTED,
+                      parent=dl)
+        dpg.draw_text((x0 + 14, top + bar_h - 8), "0", size=12,
+                      color=C_MUTED, parent=dl)
+        dpg.draw_text((330.0 + 200, low + 8), "hidden image(s), and each "
+                      "neuron's weight per pixel as a heat map (colour = "
+                      "weight, 0 to 1, as on the lines)", size=13,
                       color=C_TEXT2, parent=dl)
 
     # ---- patterns tab -----------------------------------------------------
@@ -653,11 +807,11 @@ class NetworkStreamViewsMixin:
 
     def _nt_st_pat_block(self, parent, title, col, xs, ys, n_rows, t_ms,
                          vec=None, size=0, invert=True, ylabel="pixel row",
-                         where=""):
+                         where="", height=None):
         with dpg.group(parent=parent):
             dpg.add_text(f"{title}  -  {len(xs)} spikes over {t_ms:g} ms"
                          f"{where}", color=col)
-            h = int(max(150, 6 * n_rows + 70))
+            h = int(height or max(150, 6 * n_rows + 70))
             with dpg.group(horizontal=True):
                 if vec is not None:
                     self._nt_st_thumb(vec, size, px=min(h - 20, 180))
@@ -686,10 +840,17 @@ class NetworkStreamViewsMixin:
             return
         if arch["images"]:
             size = int(arch["size"])
-            self._small(f"Column scan: one afferent per pixel row; pixel (r, c) "
-                        f"at or above the ink threshold fires afferent r at "
-                        f"c x {arch['bin_ms']:g} ms. Section {arch['pattern_ms']:g} "
-                        "ms.", color=C_TEXT2, parent=holder, wrap=0)
+            layout = arch.get("layout", "row")
+            self._small(sv.code_explainer(
+                arch.get("code", sv.CODES[0]), size, arch["bin_ms"],
+                arch.get("window_ms") or 0.0, arch["pattern_ms"],
+                arch.get("seed", 0)), color=C_TEXT2, parent=holder, wrap=900)
+            if layout == "pixel":
+                n_rows, height = size * size, 330
+                ylabel = f"pixel line r x {size} + c (0 = top left)"
+            else:
+                n_rows, height = size, None
+                ylabel = sv.LINE_NAME[layout]
             groups = [("hidden", arch["patterns"], arch["names"], arch["vecs"]),
                       ("distractor", arch["distractors"], arch["dnames"],
                        arch["dvecs"])]
@@ -700,8 +861,9 @@ class NetworkStreamViewsMixin:
                     self._nt_st_pat_block(
                         holder, f"{what} {p + 1}: {names[p]}", col,
                         np.asarray(t, float).tolist(),
-                        np.asarray(a, float).tolist(), size,
-                        arch["pattern_ms"], vecs[p], size)
+                        np.asarray(a, float).tolist(), n_rows,
+                        arch["pattern_ms"], vecs[p], size, ylabel=ylabel,
+                        height=height)
             if not arch["distractors"]:
                 self._small("No distractors: between presentations the "
                             f"afferents carry {arch['bg']:g} Hz background "

@@ -7,9 +7,10 @@ One uninterrupted spike stream instead of epochs: hidden patterns recur in
 background activity, STDP acts at every spike, and lateral inhibition lets
 each neuron take one pattern. Two inputs: the Poisson patterns of the papers
 (50 ms sections of frozen background on a set of afferents), or scanned
-images (spatio-temporal: one afferent per pixel row, one time bin per pixel
-column; the section is columns x bin ms) shown between background noise or
-distractor images. Train runs with STDP on; Test freezes the weights and
+images in one of the codes of ``neurovat.encoding.stream_events`` (column
+scan: one afferent per pixel row, one time bin per pixel column; row scan:
+per pixel column; latency and frozen Poisson: one afferent per pixel) shown
+between background noise or distractor images. Train runs with STDP on; Test freezes the weights and
 plays a fresh stream around the same patterns. Test before any Train is the
 untrained baseline (a fresh network at its start weights, STDP off); a later
 Train continues that same network, and the verdict of a later Test shows
@@ -36,6 +37,7 @@ import numpy as np
 
 from . import neuro
 from . import stream_view as sv
+from .network_stream_robust import NetworkStreamRobustMixin
 from .network_stream_views import NetworkStreamViewsMixin
 from .ui_constants import C_AMBER, C_GREEN, C_MUTED, C_RED, C_TEXT2
 
@@ -67,7 +69,8 @@ RULE = [
      "threshold (scaled to the start weight) the untrained network answered "
      "the same at 0.475 and 1 (MNIST '0', 1 and 3 neurons); at 1 STDP can "
      "only lower weights, so it "
-     "prunes the answers to noise. Measured on the MNIST '0' at 28 rows, "
+     "prunes the answers to noise. Measured on the MNIST '0' (column scan, "
+     "size 28), "
      "noise 10 Hz: at 0.475, 60 s of training raised the false answers "
      "(STDP potentiated the digit's rows under a fixed threshold); at 1 it "
      "removed them"),
@@ -93,13 +96,21 @@ STREAM_CONTROLS = [
                          "each pattern"),
     ("nt_st_imgset", "stream (image input): digits | letters | bars | dataset "
                      "(one image per class of the loaded dataset)"),
-    ("nt_st_img_size", "stream (image input): image rows = columns = "
-                       "afferents (5-28)"),
+    ("nt_st_img_size", "stream (image input): image rows = columns (5-28); "
+                       "afferents = size for the scans, size x size for the "
+                       "pixel codes"),
+    ("nt_st_code", "stream (image input): encoding, column scan (one input "
+                   "per pixel row) | row scan (per pixel column) | latency "
+                   "(per pixel, brighter = earlier) | frozen Poisson (per "
+                   "pixel, unreliable)"),
+    ("nt_st_code_win", "stream (image input, latency / frozen Poisson): "
+                       "window ms the code spreads the spikes over"),
     ("nt_st_img_pick", "stream (image input): indices of the hidden images, "
                        "e.g. '0' or '0,3'"),
     ("nt_st_img_distract", "stream (image input): indices of distractor images "
                            "shown between presentations ('' = none, 'all')"),
-    ("nt_st_bin", "stream (image input): ms per pixel column"),
+    ("nt_st_bin", "stream (image input): ms per pixel column (column scan) "
+                  "or per pixel row (row scan)"),
     ("nt_st_ink", "stream (image input): ink threshold 0-1"),
     ("nt_st_bg", "stream (image input): background Hz between presentations "
                  "(unused with distractors)"),
@@ -109,7 +120,9 @@ STREAM_CONTROLS = [
     ("nt_st_jitter", "stream: spike jitter ms"),
     ("nt_st_noise", "stream: extra noise spikes Hz on every afferent, inside "
                     "the patterns too (image input: on top of nt_st_bg in "
-                    "the empty windows, which are the ones answered falsely)"),
+                    "the empty windows, which are the ones answered falsely; "
+                    f"default {sv.NOISE_HZ:g}, {sv.PIXEL_NOISE_HZ:g} for the "
+                    "pixel codes, as is nt_st_bg)"),
     ("nt_st_delete", "stream: fraction of pattern spikes deleted 0-1"),
     ("nt_st_thr", "stream: neuron threshold (0 = auto: 0.25 x afferents for "
                   "Poisson, 0.85 x weakest clean image peak for images)"),
@@ -119,7 +132,7 @@ STREAM_CONTROLS = [
                     f"one STDP step) | {AS_SET} (nt_potamp / nt_depamp)"),
     ("nt_st_tabs", "stream view tab: nt_st_tab_raster | nt_st_tab_net | "
                    "nt_st_tab_pat | nt_st_tab_learn | nt_st_tab_weights | "
-                   "nt_st_tab_energy"),
+                   "nt_st_tab_energy | nt_st_tab_robust"),
     ("nt_st_view_win", "stream raster: seconds shown (0 = auto)"),
     ("nt_st_view_t", "stream raster: replay position, s into the last run"),
     ("nt_st_speed", "stream raster: replay speed 0.25x | 1x | 4x"),
@@ -128,8 +141,12 @@ STREAM_CONTROLS = [
      for tag, _label, _field, default, lo, hi, tip in RULE]
 
 POISSON_TAGS = ("nt_st_aff", "nt_st_patterns", "nt_st_in_pattern")
-IMAGE_TAGS = ("nt_st_imgset", "nt_st_img_size", "nt_st_img_pick",
-              "nt_st_img_distract", "nt_st_bin", "nt_st_ink", "nt_st_bg")
+IMAGE_TAGS = ("nt_st_imgset", "nt_st_img_size", "nt_st_code",
+              "nt_st_code_win", "nt_st_img_pick", "nt_st_img_distract",
+              "nt_st_bin", "nt_st_ink", "nt_st_bg")
+SCAN_TAGS = ("nt_st_bin",)              # image rows of the scans only
+PIXEL_TAGS = ("nt_st_code_win",)        # ... of the pixel codes only
+BIN_LABEL = {"row": "ms / column", "col": "ms / row"}
 # controls whose change redraws the Patterns / Network previews
 PREVIEW_TAGS = set(POISSON_TAGS + IMAGE_TAGS) | {
     "nt_st_input", "nt_st_neurons", "nt_st_thr", "nt_st_synapse", "nt_st_share"
@@ -153,7 +170,7 @@ def _clean(x):
     return x
 
 
-class NetworkStreamMixin(NetworkStreamViewsMixin):
+class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
     _nt_stream_session = None       # neurovat.masquelier.Session
     _nt_stream_key = None           # settings the session was built for
     _nt_stream_last = None          # JSON-safe result of the last run
@@ -165,6 +182,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
     _nt_mode_shown = "supervised"   # the mode the window currently shows
     _nt_devlabel_grid = None        # the grid network's label, while hidden
     _nt_st_input_shown = sv.POISSON
+    _nt_st_code_shown = sv.CODES[0]     # the encoding combo, normalised
+    _nt_st_noise_layout = "row"         # layout the noise defaults are set for
 
     # ---- layout -----------------------------------------------------
 
@@ -192,11 +211,11 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                           tip="Poisson patterns: the papers' input - 50 ms "
                               "sections of frozen variable-rate Poisson "
                               "activity hidden on a set of afferents. Scanned "
-                              "images: spatio-temporal code, one afferent per "
-                              "pixel row, pixel column c fires at c x bin ms; "
-                              "a presentation is columns x bin ms long and "
-                              "sits between background noise or distractor "
-                              "images.")
+                              "images: an image turned into spikes by the "
+                              "'encoding' below (column scan by default: one "
+                              "afferent per pixel row, pixel column c fires "
+                              "at c x bin ms); a presentation sits between "
+                              "background noise or distractor images.")
             self._ctl_row("afferents", "nt_st_aff", "int", 1000,
                           "Input lines (100-4000).")
             self._ctl_row("neurons", "nt_st_neurons", "int", 3,
@@ -215,14 +234,32 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                               "(the first of each class, in class order; "
                               "Invert from the Data tab applies).")
             self._ctl_row("image size", "nt_st_img_size", "int", 14,
-                          "Rows = columns (5-28). Rows are the afferents.",
+                          "Rows = columns (5-28). Afferents: one per pixel "
+                          "row (column scan) or column (row scan), one per "
+                          "pixel (latency, frozen Poisson: size x size).",
                           callback=changed)
+            self._ctl_row("encoding", "nt_st_code", "combo", items=sv.CODES,
+                          dv=sv.CODES[0], callback=changed,
+                          tip="How an image becomes spikes:\n"
+                              + "\n".join(sv.CODE_TIPS[c] for c in sv.CODES)
+                              + f"\nThe pixel codes set noise and background "
+                              f"Hz to {sv.PIXEL_NOISE_HZ:g} (back to "
+                              f"{sv.NOISE_HZ:g} for the scans) unless you "
+                              "changed them.")
+            from neurovat.encoding import STREAM_MARGIN_MS, STREAM_WINDOW_MS
+            self._ctl_row("window ms", "nt_st_code_win",
+                          default=STREAM_WINDOW_MS, callback=changed,
+                          tip="Latency / frozen Poisson only: the span the "
+                              "spikes are spread over (default "
+                              f"{STREAM_WINDOW_MS:g} ms). The section is "
+                              f"window + 2 x {STREAM_MARGIN_MS:g} ms of "
+                              "silence before and after.")
             self._ctl_row("hidden", "nt_st_img_pick", "text", hint="0",
                           callback=changed,
                           tip="Indices of the hidden images, comma-separated "
                               "(0 = the first of the set). Each is one "
                               "pattern. Several images all drive the same "
-                              "rows, so they are not split one per neuron "
+                              "inputs, so they are not split one per neuron "
                               "(MNIST '0', '1', '2', 3 neurons: two took the "
                               "'0', none the '1').")
             self._ctl_row("distractors", "nt_st_img_distract", "text",
@@ -233,15 +270,19 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                               "'all' = every image not hidden.")
             self._ctl_row("ms / column", "nt_st_bin", default=10.0,
                           callback=changed,
-                          tip="Scan time per pixel column (min 1). The "
-                              "section is ceil(columns x this) ms.")
+                          tip="Scans only. Time per pixel column (column "
+                              "scan) or per pixel row (row scan), min 1. The "
+                              "section is ceil(size x this) ms.")
             self._ctl_row("ink", "nt_st_ink", default=0.5, callback=changed,
                           tip="A pixel at or above this (0-1) fires.")
-            self._ctl_row("background Hz", "nt_st_bg", default=10.0,
+            self._ctl_row("background Hz", "nt_st_bg", default=sv.NOISE_HZ,
                           callback=changed,
                           tip="Poisson rate per afferent in the sections "
                               "that show no image. Unused when there are "
-                              "distractors.")
+                              f"distractors. Default {sv.NOISE_HZ:g}; "
+                              f"{sv.PIXEL_NOISE_HZ:g} for the pixel codes "
+                              "(set when you pick one, unless you changed "
+                              "it).")
             self._ctl_row("threshold", "nt_st_thr", default=0.0,
                           callback=changed,
                           tip="Neuron threshold in units of weight. 0 = auto: "
@@ -293,16 +334,29 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                         "before Train gives the untrained baseline; only a "
                         "trained Test with fewer false windows says it learnt.",
                         color=C_MUTED, wrap=340)
-            self._small("Learning shows on MNIST at 28 rows (image set "
-                        "'dataset', Load MNIST). Measured, 1 neuron, noise and "
-                        "background 10 Hz, even spacing, share 0.5, 30 s "
-                        "Tests: the first '0' answered 7-11 of 18 empty "
-                        "windows untrained and 0-2 after 60 s of training, "
-                        "17/17 hits (seeds 1-3); the first '1' 18 and 16 -> "
-                        "1 and 2 (seeds 1, 2). The built-in 28 x 28 digits and "
-                        "letters are already clean untrained (their peak sits "
-                        "far above the noise): they show detection, not "
-                        "learning.",
+            self._small("Learning shows on MNIST at size 28 (image set "
+                        "'dataset', Load MNIST). Measured on the first '0', "
+                        "2 seeds, 30 s Tests, false = empty windows "
+                        "answered over the whole run:",
+                        color=C_MUTED, wrap=340)
+            for line in (
+                    "column scan: untrained 25-27 of 54 false -> 2-5 "
+                    "trained, hits held.",
+                    "row scan: 40-53 of 54 -> 2-4, hits held.",
+                    "latency: learns at 3-5 Hz noise after 60 s of training "
+                    "(188 of 188 false -> 0-4 of 188, hits held; the default "
+                    "3 Hz is set for the pixel codes); 30 s of training gave "
+                    "only a partial drop (63 -> 39 of 63); clean untrained "
+                    "at 1 Hz; at 10 Hz it fires in every window.",
+                    "frozen Poisson (unreliable): the hits collapsed after "
+                    "training at 1, 3 (a GUI run) and 5 Hz, and on one of "
+                    "two seeds at 10 Hz. Each line fires about 5 times per "
+                    "window, so STDP depresses the image's own lines until "
+                    "their drive no longer reaches the threshold."):
+                self._small("  - " + line, color=C_MUTED, wrap=340)
+            self._small("The built-in 28 x 28 digits and letters are already "
+                        "clean untrained (their peak sits far above the "
+                        "noise): they show detection, not learning.",
                         color=C_MUTED, wrap=340)
             self._small("Known limit: several hidden images are not split "
                         "one per neuron. MNIST '0', '1', '2' with 3 neurons, "
@@ -329,12 +383,17 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                                   "(never two in a row). even: every k-th "
                                   "section, k = max(2, round(1 / share)).")
                 self._ctl_row("jitter ms", "nt_st_jitter", default=1.0)
-                self._ctl_row("noise Hz", "nt_st_noise", default=10.0,
+                self._ctl_row("noise Hz", "nt_st_noise", default=sv.NOISE_HZ,
                               tip="Extra random spikes on every afferent, "
                                   "everywhere, inside the patterns too. With "
                                   "image input it adds to 'background Hz' in "
                                   "the empty windows, which are the windows "
-                                  "a neuron answers falsely.")
+                                  "a neuron answers falsely. Default "
+                                  f"{sv.NOISE_HZ:g}; {sv.PIXEL_NOISE_HZ:g} for "
+                                  "the pixel codes (latency, frozen Poisson: "
+                                  "size x size afferents instead of size), "
+                                  "set when you pick one unless you changed "
+                                  "it.")
                 self._ctl_row("spike deletion", "nt_st_delete", default=0.0,
                               tip="Fraction of the pattern's spikes dropped "
                                   "at each presentation.")
@@ -368,6 +427,23 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                     row = dpg.get_item_parent(tag)
                     if "TableRow" in dpg.get_item_type(row):
                         dpg.configure_item(row, show=show)
+        try:
+            layout = sv.code_layout(self._nt_get("nt_st_code", sv.CODES[0]))
+        except ValueError:
+            layout = "row"
+        for tags, show in ((SCAN_TAGS, images and layout != "pixel"),
+                           (PIXEL_TAGS, images and layout == "pixel")):
+            for tag in tags:
+                if dpg.does_item_exist(tag):
+                    row = dpg.get_item_parent(tag)
+                    if "TableRow" in dpg.get_item_type(row):
+                        dpg.configure_item(row, show=show)
+        if dpg.does_item_exist("nt_st_bin") and layout in BIN_LABEL:
+            # the row's label is the first item of the row (no tag of its own)
+            cap = (dpg.get_item_children(dpg.get_item_parent("nt_st_bin"), 1)
+                   or [None])[0]
+            if cap is not None and dpg.get_item_type(cap).endswith("Text"):
+                dpg.set_value(cap, BIN_LABEL[layout])
         if dpg.does_item_exist("nt_st_img_extra"):
             dpg.configure_item("nt_st_img_extra", show=images)
         if dpg.does_item_exist("nt_st_load_mnist"):
@@ -395,12 +471,62 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                                else "the paper value")
                         self.log(f"[stream] input: {kind}; start weight set "
                                  f"to {sv.W0_DEFAULT[kind]:g} ({why})")
-            if tag in ("nt_st_input", "nt_st_imgset"):
+            if tag == "nt_st_code" and dpg.does_item_exist("nt_st_code"):
+                # a bridge / agent value ('row', 'ttfs', ...) -> the item name
+                raw = dpg.get_value("nt_st_code")
+                try:
+                    code = sv.code_name(raw)
+                except ValueError as exc:
+                    code = self._nt_st_code_shown
+                    self.log(f"[stream] {exc}; encoding kept: {code}")
+                if code != raw:
+                    dpg.set_value("nt_st_code", code)
+                self._nt_st_code_shown = code
+            if tag in ("nt_st_input", "nt_st_code", ""):
+                self._nt_st_swap_noise()
+            if tag in ("nt_st_input", "nt_st_imgset", "nt_st_code"):
                 self._nt_st_show_input_rows()
             if tag in PREVIEW_TAGS or not tag:
                 self._nt_st_refresh_previews()
         except Exception as exc:                        # noqa: BLE001
             self.log(f"[stream] preview error: {exc!r}")
+
+    def _nt_st_noise_layout_now(self):
+        """'pixel' when the input is images in a pixel code, else 'row' (the
+        layout class the noise defaults follow; Poisson input counts as a
+        scan)."""
+        if not self._nt_st_is_images():
+            return "row"
+        try:
+            return ("pixel" if sv.code_layout(self._nt_get(
+                "nt_st_code", sv.CODES[0])) == "pixel" else "row")
+        except ValueError:
+            return self._nt_st_noise_layout
+
+    def _nt_st_swap_noise(self):
+        """Noise Hz and background Hz follow the layout (PIXEL_NOISE_HZ for
+        the pixel codes, NOISE_HZ otherwise), as the start weight follows
+        the input: only a control that still holds the old default moves."""
+        new, old = self._nt_st_noise_layout_now(), self._nt_st_noise_layout
+        if new == old:
+            return
+        self._nt_st_noise_layout = new
+        moved = []
+        for tag in ("nt_st_noise", "nt_st_bg"):
+            if not dpg.does_item_exist(tag):
+                continue
+            cur = float(dpg.get_value(tag))
+            val = sv.swapped_default(cur, old, new)
+            if val != cur:
+                dpg.set_value(tag, val)
+                moved.append(tag)
+        if moved:
+            names = {"nt_st_noise": "noise Hz", "nt_st_bg": "background Hz"}
+            why = ("the pixel codes have size x size afferents, so the same "
+                   "rate per afferent is far more noise per window"
+                   if new == "pixel" else "the scan default")
+            self.log(f"[stream] {' and '.join(names[t] for t in moved)} set "
+                     f"to {sv.noise_default(new):g} ({why})")
 
     def _nt_st_refresh_previews(self):
         """Rebuild the architecture from the controls (no run) and redraw
@@ -418,8 +544,9 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             w = self._nt_stream_session.weights
             if w is not None:
                 self._nt_st_net_w = np.atleast_2d(w)[:, self._nt_st_arch["net_idx"]]
-        self._nt_st_draw_net()
-        self._nt_st_draw_patterns()
+        # drawn by the guarded tick on the render thread: this runs from
+        # widget callbacks too, which DPG calls on its callback thread
+        self._nt_st_mark_dirty()
 
     def _nt_st_same_net(self, arch):
         """Is ``arch`` the network of the current session (its key a prefix
@@ -482,6 +609,11 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         s = str(val).strip().lower()
         if tag == "nt_st_input":
             return sv.input_kind(val)
+        if tag == "nt_st_code":
+            try:
+                return sv.code_name(val)
+            except ValueError:
+                return None
         if tag == "nt_st_spacing":
             return "even" if s.startswith("e") else "random" if s.startswith(
                 "r") else None
@@ -539,16 +671,24 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         ink = min(max(float(g("nt_st_ink", 0.5)), 0.0), 1.0)
         invert = bool(g("nt_ds_invert", False)) if name == "dataset" else False
         ds = getattr(self, "_nt_ds", None) if name == "dataset" else None
+        code = sv.code_name(g("nt_st_code", sv.CODES[0]))
+        win = min(max(float(g("nt_st_code_win", 50.0)), 1.0), 1000.0)
         bank = sv.image_bank(name, size, ds, invert)
+        # the frozen Poisson spikes are drawn from the network seed (nt_seed,
+        # already part of the key), so a new seed draws new spikes
         img = sv.build_image_input(bank, g("nt_st_img_pick", "0"),
-                                   g("nt_st_img_distract", ""), size, bin_ms, ink)
+                                   g("nt_st_img_distract", ""), size, bin_ms,
+                                   ink, code=code, window_ms=win,
+                                   seed=int(g("nt_seed", 1)))
         if len(img["patterns"]) > 8:
             raise ValueError("at most 8 hidden images")
+        n_aff = img["n_afferents"]
         if thr > 0:
             how = "as set"
         else:
             from neurovat.masquelier import MasquelierParams
-            P = MasquelierParams(n_afferents=size, n_pattern=size, threshold=1.0,
+            P = MasquelierParams(n_afferents=n_aff, n_pattern=n_aff,
+                                 threshold=1.0,
                                  pattern_ms=img["pattern_ms"], n_out=n_out,
                                  **rule)
             thr = sv.auto_threshold(img["patterns"], P)
@@ -557,7 +697,7 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         ds_id = ((ds.get("path"), ds.get("n")) if ds else None)
         img.update(set=name, invert=invert, ink=ink, ds_id=ds_id,
                    bg=max(float(g("nt_st_bg", 10.0)), 0.0))
-        inp.update(aff=size, n_pat=len(img["patterns"]), n_pattern=size,
+        inp.update(aff=n_aff, n_pat=len(img["patterns"]), n_pattern=n_aff,
                    pattern_ms=img["pattern_ms"], threshold=thr, thr_how=how,
                    image=img)
         return inp
@@ -568,10 +708,16 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             return [inp[k] for k in ("aff", "n_out", "n_pat", "n_pattern",
                                      "threshold")] + [seed] + rule
         img = inp["image"]
+        pixel = img.get("layout") == "pixel"
+        # the code, its window (pixel codes) and the frozen-Poisson seed are
+        # part of the key: a code change is a settings change; the bin only
+        # matters to the scans
         return ["images", img["set"], img["size"], tuple(img["picks"]),
-                tuple(img["distract"]), img["bin_ms"], img["ink"],
-                img["invert"], img["ds_id"],
-                sv.events_digest(img["patterns"] + img["distractors"]),
+                tuple(img["distract"]), None if pixel else img["bin_ms"],
+                img["ink"], img["invert"], img["ds_id"],
+                img.get("code"), img.get("window_ms"), img.get("seed"),
+                sv.events_digest(img["patterns"] + img["distractors"],
+                                 img.get("code")),
                 inp["n_out"], inp["threshold"], seed] + rule
 
     def _nt_stream_settings(self):
@@ -623,8 +769,18 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         the draw code never reads controls)."""
         images = inp["image"] is not None
         aff = inp["aff"]
-        shown = (np.arange(aff) if images
-                 else sv.shown_afferents(aff, sv.RASTER_SHOWN))
+        layout = inp["image"].get("layout", "row") if images else None
+        n_inked = None
+        if layout == "pixel":
+            # size x size lines: the raster draws the hidden images' inked
+            # pixels plus a sample of silent ones; the network keeps every
+            # weight (the heat map) and draws a sample of the lines itself
+            img = inp["image"]
+            shown, n_inked = sv.pixel_lines(img["vecs"], img.get("ink", 0.5),
+                                            aff)
+        else:
+            shown = (np.arange(aff) if images
+                     else sv.shown_afferents(aff, sv.RASTER_SHOWN))
         net_idx = (np.arange(aff) if images
                    else sv.shown_afferents(aff, sv.NET_SHOWN))
         dev = cfg["device"] if cfg else None
@@ -643,6 +799,10 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         if images:
             img = inp["image"]
             arch.update(size=img["size"], bin_ms=img["bin_ms"], bg=img["bg"],
+                        layout=layout, code=img.get("code", sv.CODES[0]),
+                        window_ms=img.get("window_ms"),
+                        seed=img.get("seed", 0), ink=img.get("ink", 0.5),
+                        n_inked=n_inked,
                         names=[f"image {i} '{lab}'" for i, lab in
                                zip(img["picks"], img["labels"])],
                         dnames=[f"image {i} '{lab}'" for i, lab in
@@ -709,7 +869,10 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             self._nt_stream_key = key
             self._nt_stream_baseline = None
             self._nt_stream_trained_s = 0.0
+            self._nt_stream_trained_with = None
             self._nt_stream_clear()
+        if learn:       # the nominal of a robustness sweep (Robustness tab)
+            self._nt_stream_trained_with = self._nt_rb_changes(cfg)
         # Test on a network that has not been trained: the untrained baseline
         # (a fresh session, STDP off, at its start weights); the session and
         # its frozen patterns are kept, so a later Train continues it. (Train
@@ -756,7 +919,7 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         if images:
             img = cfg["image"]
             src = (f"images {img['picks']} of '{img['set']}' ({img['size']} x "
-                   f"{img['size']}, {img['bin_ms']:g} ms / column, section "
+                   f"{img['size']}, {sv.code_timing(img)}, section "
                    f"{cfg['pattern_ms']:g} ms), distractors "
                    f"{img['distract'] or 'none'}")
         else:
@@ -937,10 +1100,10 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                 "first_spike_latency_ms": first,
                 "stopped": bool(self._trainer_stop),
                 "input": cfg["input"],
-                "images": ({k: img[k] for k in ("set", "size", "picks",
-                                                "distract", "labels",
-                                                "bin_ms", "ink", "bg")}
-                           if img else None),
+                "images": ({k: img.get(k) for k in (
+                    "set", "size", "picks", "distract", "labels", "bin_ms",
+                    "ink", "bg", "code", "layout", "n_afferents",
+                    "window_ms", "seed")} if img else None),
                 "synapses": d["label"] if d else IDEAL,
                 "write_pulse": getattr(session, "pulse", None),
                 "afferents": cfg["aff"], "neurons": cfg["n_out"],
@@ -1075,7 +1238,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                 + ("detects it" if row["detects"] else "does NOT detect it")
                 + ("" if l is None else
                    f"; first-spike latency {l:.0f} ms after onset"))
-        text = (f"{self._nt_st_phase_text(r)}: hit = {r['hit_rule']} "
+        text = (f"{self._nt_st_phase_text(r)}, encoding "
+                f"{img.get('code') or sv.CODES[0]}: hit = {r['hit_rule']} "
                 f"({r['pattern_ms']:g} ms windows). " + "; ".join(parts) + ".")
         good = (not r.get("untrained")) and all(x["detects"] for x in rows)
         if base is not None:
@@ -1191,9 +1355,12 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         r = self._nt_stream_last
         if not r:
             return ["stream mode: no run yet."]
-        src = (f"images {r['images']['picks']} of '{r['images']['set']}' "
-               f"({r['images']['size']} rows), distractors "
-               f"{r['images']['distract'] or 'none'}"
+        ri = r.get("images") or {}
+        src = (f"images {ri.get('picks')} of '{ri.get('set')}' "
+               f"({ri.get('size')} x {ri.get('size')}, encoding "
+               f"{ri.get('code') or sv.CODES[0]}: {r['afferents']} afferents, "
+               f"one per {sv.LINE_NAME.get(ri.get('layout') or 'row')}), "
+               f"distractors {ri.get('distract') or 'none'}"
                if r.get("images") else f"{r['afferents']} afferents, "
                f"{r['patterns']} Poisson pattern(s)")
         images = bool(r.get("images"))

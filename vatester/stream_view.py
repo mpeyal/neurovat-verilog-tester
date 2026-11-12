@@ -12,6 +12,9 @@ IMAGES = "scanned images (spatio-temporal)"
 INPUTS = [POISSON, IMAGES]
 IMAGE_SETS = ["digits", "letters", "bars", "dataset"]
 SPACINGS = ["random", "even"]
+# image stream codes, as neurovat.encoding.STREAM_CODES names them (the
+# first is the default: one input per pixel row, columns swept in time)
+CODES = ["column scan", "row scan", "latency", "frozen Poisson"]
 SPEEDS = ["0.25x", "1x", "4x"]
 AUTO_THR = 0.85              # image threshold = AUTO_THR x weakest clean peak
 RASTER_SHOWN = 60            # Poisson: afferents drawn in the raster
@@ -25,12 +28,145 @@ U_BUDGET = 2400.0            # record u only when seconds x neurons <= this
 # the fixed threshold and the false answers rose (MNIST '0', 60 s).
 W0_DEFAULT = {POISSON: 0.475, IMAGES: 1.0}
 DETECT_HIT, DETECT_FALSE = 0.9, 0.1   # image verdict: >= 90 % hits, <= 10 % others
+# nt_st_noise / nt_st_bg defaults per input layout: 10 Hz for the scans (and
+# Poisson input); the pixel codes (latency, frozen Poisson) have 28 x 28 = 784
+# lines instead of 28, so the same rate per line is 28 times the noise
+# spikes per second on the network.
+NOISE_HZ = 10.0
+# free parameter; measured on MNIST '0', 2 seeds: latency learns at 3-5 Hz
+# (untrained 188/188 false windows -> 0-4/188, hits held); at 1 Hz it is
+# clean untrained; at 10 Hz it fires in every window
+PIXEL_NOISE_HZ = 3.0
+# pixel codes: input lines drawn in the raster (room for every inked pixel
+# of one image: the built-in 28 x 28 '0' has 454, an MNIST digit ~100-200)
+PIXEL_SHOWN = 480
+PIXEL_OTHERS = 24            # ... of which silent (un-inked) lines, sampled
+NET_PIXELS = 28              # pixel codes: input lines drawn in the network
+# what one input line is, per layout (neurovat.encoding.STREAM_LAYOUT)
+LINE_NAME = {"row": "pixel row", "col": "pixel column", "pixel": "pixel (r, c)"}
 
 
 def input_kind(value):
     """Normalise a value of the input combo (bridge / agent strings too)."""
     s = str(value or "").lower()
     return IMAGES if s.startswith(("scan", "image", "spat", "img")) else POISSON
+
+
+def code_name(value):
+    """Normalise a value of the encoding combo (bridge / agent strings too,
+    e.g. 'row', 'ttfs', 'poisson'); ValueError for an unknown one."""
+    from neurovat.encoding import stream_code
+    return stream_code(value)
+
+
+def code_layout(value):
+    """What one input line of the code is: 'row', 'col' or 'pixel'."""
+    from neurovat.encoding import STREAM_LAYOUT
+    return STREAM_LAYOUT[code_name(value)]
+
+
+def noise_default(layout):
+    """Default noise Hz / background Hz for an input layout (None = Poisson
+    input): PIXEL_NOISE_HZ for the pixel codes, NOISE_HZ otherwise."""
+    return PIXEL_NOISE_HZ if layout == "pixel" else NOISE_HZ
+
+
+def swapped_default(value, old_layout, new_layout):
+    """The value a noise control takes when the layout changes: the new
+    layout's default if it still holds the old layout's default (the user
+    has not edited it), else ``value`` unchanged."""
+    v = float(value)
+    if abs(v - noise_default(old_layout)) < 1e-6:
+        return noise_default(new_layout)
+    return v
+
+
+def line_label(layout, i, size):
+    """Short name of input line ``i``: 'row 3', 'col 3' or '(r,c)'."""
+    if layout == "pixel":
+        r, c = divmod(int(i), int(size))
+        return f"({r},{c})"
+    return f"{'col' if layout == 'col' else 'row'} {int(i)}"
+
+
+def pixel_lines(vecs, ink, n, cap=PIXEL_SHOWN, others=PIXEL_OTHERS):
+    """Input lines of a pixel code that the raster draws: every pixel inked
+    (>= ``ink``) in any of the hidden images ``vecs`` (an even sample of them
+    when there are more than ``cap - others``), plus an even sample of
+    ``others`` silent pixels so the noise on them shows. Returns (sorted
+    line indices, how many of them are inked)."""
+    on = np.zeros(int(n), bool)
+    for v in vecs:
+        on |= np.asarray(v, float).reshape(-1)[:int(n)] >= float(ink)
+    inked = np.nonzero(on)[0]
+    room = max(int(cap) - int(others), 1)
+    if inked.size > room:
+        inked = inked[shown_afferents(inked.size, room)]
+    rest = np.nonzero(~on)[0]
+    k = min(int(others), int(cap) - inked.size, rest.size)
+    rest = rest[shown_afferents(rest.size, k)] if k > 0 else rest[:0]
+    return np.union1d(inked, rest).astype(int), int(inked.size)
+
+
+def code_timing(img):
+    """The code and its timing in a few words (for the log): 'column scan,
+    10 ms / column', 'row scan, 10 ms / row' or 'latency, 50 ms window'."""
+    layout = img.get("layout", "row")
+    if layout == "row":
+        return f"{img.get('code', 'column scan')}, {img['bin_ms']:g} ms / column"
+    if layout == "col":
+        return f"{img.get('code', 'row scan')}, {img['bin_ms']:g} ms / row"
+    return f"{img.get('code')}, {img['window_ms']:g} ms window"
+
+
+# one line per code: the encoding combo's tooltip
+CODE_TIPS = {
+    "column scan": "column scan: one input per pixel row; pixel (r, c) fires "
+                   "once at c x bin ms (a left-to-right sweep).",
+    "row scan": "row scan: one input per pixel column; pixel (r, c) fires once "
+                "at r x bin ms (a top-to-bottom sweep).",
+    "latency": "latency: one input per pixel (r x W + c); a pixel fires once, "
+               "the brighter the earlier, within the window. Learns at 3-5 "
+               "Hz noise with 60 s of training (default 3 Hz for the pixel "
+               "codes).",
+    "frozen Poisson": "frozen Poisson (unreliable): one input per pixel; "
+                      "Poisson spikes at 100 Hz x brightness over the window, "
+                      "drawn once and repeated unchanged. The hits collapsed "
+                      "after training at 1, 3 (a GUI run) and 5 Hz and on 1 of "
+                      "2 seeds at "
+                      "10 Hz: about 5 spikes per line per window, so STDP "
+                      "depresses the image's own lines below the threshold.",
+}
+
+
+def code_explainer(code, size, bin_ms, window_ms, pattern_ms, seed=0):
+    """One paragraph for the Patterns tab: how the code turns an image into
+    spikes, with the numbers of this network."""
+    from neurovat.encoding import STREAM_MARGIN_MS, STREAM_RATE_HZ
+    code = code_name(code)
+    tail = f" Section {pattern_ms:g} ms."
+    if code == "column scan":
+        return ("Column scan: one afferent per pixel row; pixel (r, c) at or "
+                "above the ink threshold fires afferent r at c x "
+                f"{bin_ms:g} ms." + tail)
+    if code == "row scan":
+        return ("Row scan: one afferent per pixel column; pixel (r, c) at or "
+                "above the ink threshold fires afferent c at r x "
+                f"{bin_ms:g} ms." + tail)
+    n = int(size) * int(size)
+    head = (f"one afferent per pixel ({n} lines, pixel (r, c) = line r x "
+            f"{int(size)} + c)")
+    if code == "latency":
+        return (f"Latency: {head}; a pixel at or above the ink threshold "
+                "fires once, the brighter the earlier, within "
+                f"{window_ms:g} ms after a {STREAM_MARGIN_MS:g} ms lead (the "
+                "brightest at the lead, one at the threshold at the end)."
+                + tail)
+    return (f"Frozen Poisson: {head}; a pixel at or above the ink threshold "
+            f"fires Poisson spikes at {STREAM_RATE_HZ:g} Hz x its brightness "
+            f"over {window_ms:g} ms after a {STREAM_MARGIN_MS:g} ms lead, "
+            f"drawn once (seed {int(seed)}) and repeated unchanged at every "
+            "presentation." + tail)
 
 
 def parse_indices(text, n, exclude=(), what="image"):
@@ -101,15 +237,40 @@ def image_bank(name, size, ds=None, invert=False):
             for lab, v in make_patterns(name, size, size)]
 
 
-def image_events(vec, size, bin_ms, ink):
-    """Column scan of one flat image: (rows, times in ms)."""
-    from neurovat.encoding import scan_events
-    return scan_events(np.asarray(vec, float).reshape(size, size), bin_ms, ink)
+def image_code(vec, size, bin_ms, ink, code=None, window_ms=None, seed=0):
+    """One flat image in the stream code ``code`` (default the column scan):
+    the dict of :func:`neurovat.encoding.stream_events` (afferents, times,
+    n_afferents, pattern_ms, layout, code). ``seed`` (an int or a list of
+    ints) draws the frozen Poisson spikes: fixed, so pressing Train again
+    gives the same image; :func:`build_image_input` uses [seed, index]."""
+    from neurovat.encoding import stream_events
+    return stream_events(np.asarray(vec, float).reshape(size, size), code,
+                         bin_ms, ink, window_ms=window_ms, rng=seed)
 
 
-def build_image_input(bank, picks_text, distract_text, size, bin_ms, ink):
-    """Hidden images and distractors as event lists for ``Session``.
-    ``pattern_ms`` = ceil(columns x bin): whole ms, at least the scan."""
+def image_events(vec, size, bin_ms, ink, code=None, window_ms=None, seed=0):
+    """One flat image as events (input lines, times in ms); the column scan
+    (one line per pixel row) unless ``code`` names another stream code."""
+    if code is None:
+        from neurovat.encoding import scan_events
+        return scan_events(np.asarray(vec, float).reshape(size, size), bin_ms,
+                           ink)
+    ev = image_code(vec, size, bin_ms, ink, code, window_ms, seed)
+    return ev["afferents"], ev["times"]
+
+
+def build_image_input(bank, picks_text, distract_text, size, bin_ms, ink,
+                      code=None, window_ms=None, seed=0):
+    """Hidden images and distractors as event lists for ``Session``, in the
+    stream code ``code`` (default: column scan, one input per pixel row).
+    ``pattern_ms`` comes from the code (column scan: ceil(columns x bin),
+    whole ms, at least the scan); ``n_afferents`` is the code's input count
+    (size for the scans, size x size for the pixel codes) and ``layout`` what
+    one input is ("row", "col" or "pixel", see
+    ``neurovat.encoding.STREAM_LAYOUT``). Frozen Poisson spikes are drawn
+    once per image from (``seed``, bank index)."""
+    from neurovat.encoding import STREAM_WINDOW_MS, stream_code
+    code = stream_code(code)
     picks = parse_indices(picks_text, len(bank))
     if not picks:
         raise ValueError("pick at least one image to hide (comma-separated "
@@ -120,29 +281,45 @@ def build_image_input(bank, picks_text, distract_text, size, bin_ms, ink):
     if both:
         raise ValueError(f"image(s) {both} are both hidden and distractors")
 
+    info = {}
+
     def events(i):
         label, vec = bank[i]
-        ev = image_events(vec, size, bin_ms, ink)
-        if not ev[0].size:
+        ev = image_code(vec, size, bin_ms, ink, code, window_ms,
+                        [int(seed), int(i)])
+        info.update(ev)
+        if not ev["afferents"].size:
             raise ValueError(f"image {i} ('{label}') has no pixel at or above "
-                             f"the ink threshold {ink:g}")
-        return ev
+                             f"the ink threshold {ink:g}" + (
+                                 " (or its frozen Poisson draw has no spike)"
+                                 if ev["code"] == "frozen Poisson" else ""))
+        return ev["afferents"], ev["times"]
+    patterns = [events(i) for i in picks]
+    distractors = [events(i) for i in distract]
     return {
-        "patterns": [events(i) for i in picks],
-        "distractors": [events(i) for i in distract],
+        "patterns": patterns,
+        "distractors": distractors,
         "picks": picks, "distract": distract,
         "labels": [bank[i][0] for i in picks],
         "dlabels": [bank[i][0] for i in distract],
         "vecs": [bank[i][1] for i in picks],
         "dvecs": [bank[i][1] for i in distract],
         "size": size, "bin_ms": float(bin_ms),
-        "pattern_ms": float(max(math.ceil(size * bin_ms - 1e-9), 1)),
+        "pattern_ms": float(info["pattern_ms"]),
+        "code": code, "layout": info["layout"],
+        "n_afferents": int(info["n_afferents"]),
+        "window_ms": (None if info["layout"] != "pixel" else float(
+            window_ms if window_ms is not None else STREAM_WINDOW_MS)),
+        "seed": int(seed),
     }
 
 
-def events_digest(events):
-    """Stable checksum of a list of (afferents, times) event lists."""
-    h = 0
+def events_digest(events, code=None):
+    """Stable checksum of a list of (afferents, times) event lists; with
+    ``code`` (a stream code name) the code is part of it, so two codes that
+    happen to give the same events still differ. ``code=None`` is the
+    checksum as before (column-scan networks keep their key)."""
+    h = 0 if code is None else zlib.crc32(str(code).encode("utf-8"))
     for a, t in events:
         h = zlib.crc32(np.asarray(a, np.int64).tobytes(), h)
         h = zlib.crc32(np.round(np.asarray(t, float), 6).tobytes(), h)
@@ -151,8 +328,13 @@ def events_digest(events):
 
 def auto_threshold(patterns, P, frac=AUTO_THR):
     """``frac`` x the lowest peak potential that one clean presentation of a
-    hidden pattern drives at the starting weights."""
+    hidden pattern drives at the starting weights. ``patterns`` is a list of
+    (afferents, times) event lists in any stream code, or the dict of
+    :func:`build_image_input` (its ``patterns``). Only the spike times and
+    ``P.w_init`` matter, so the same rule serves every code."""
     from neurovat.masquelier import pattern_peak
+    if isinstance(patterns, dict):
+        patterns = patterns["patterns"]
     return frac * min(pattern_peak(p, P) for p in patterns)
 
 

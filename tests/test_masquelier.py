@@ -457,3 +457,70 @@ def test_a_session_hides_the_given_patterns_in_each_new_stream():
     n1, n2 = first.t[first.kind == 0], second.t[second.kind == 0]
     assert n1.size and n2.size
     assert not np.array_equal(n1[:min(n1.size, n2.size)], n2[:min(n1.size, n2.size)])
+
+
+# --- keyed streams (Session.run(stream_key=...)) -----------------------------
+
+def _keyed_session():
+    P = MasquelierParams(n_afferents=40, n_pattern=20, threshold=20.0,
+                         pattern_frac=0.4, seed=4)
+    return Session(P)
+
+
+def test_a_keyed_run_is_repeatable_and_leaves_the_session_as_it_was():
+    a, b = _keyed_session(), _keyed_session()
+    for s in (a, b):
+        s.run(2.0)
+    runs, w, stream = a.runs, a.weights.copy(), a.stream
+    k1 = a.run(1.0, learn=False, stream_key=5, jitter_ms=2.0)
+    k2 = a.run(1.0, learn=False, stream_key=5, jitter_ms=2.0)
+    np.testing.assert_array_equal(k1["post_t_ms"], k2["post_t_ms"])
+    assert k1["input_rate_hz"] == k2["input_rate_hz"]
+    assert a.runs == runs and a.stream is stream
+    np.testing.assert_array_equal(a.weights, w)
+    other = a.run(1.0, learn=False, stream_key=(5, 1), jitter_ms=2.0)
+    assert other["input_rate_hz"] != k1["input_rate_hz"]
+    # the next ordinary run is the one it would have been without the probes
+    ra, rb = a.run(1.0, learn=False), b.run(1.0, learn=False)
+    np.testing.assert_array_equal(ra["post_t_ms"], rb["post_t_ms"])
+    assert ra["input_rate_hz"] == rb["input_rate_hz"] and a.runs == b.runs
+
+
+def test_a_keyed_stream_is_not_the_stream_of_a_numbered_run():
+    def stream_of(**kw):
+        seen = {}
+
+        def grab(_t, info):
+            seen["S"] = info["stream"]
+        _keyed_session().run(1.0, learn=False, on_section=grab, **kw)
+        return seen["S"]
+    numbered, keyed = stream_of(), stream_of(stream_key=0)
+    assert numbered.t.size != keyed.t.size or not np.array_equal(
+        numbered.t, keyed.t)
+    again = stream_of()                  # the default stream is unchanged
+    np.testing.assert_array_equal(again.t, numbered.t)
+
+
+@pytest.mark.parametrize("given", [False, True])
+def test_keyed_runs_keep_the_background_whatever_the_deletion_and_jitter(given):
+    """Only the pattern presentations change between sweep levels: the
+    sections, background and noise of a keyed stream stay the same."""
+    P = MasquelierParams(n_afferents=40, n_pattern=20, threshold=20.0,
+                         pattern_frac=0.4, seed=4, bg_hz=5.0, pattern_ms=50.0)
+    ev = (np.arange(20, dtype=np.int32), np.linspace(2.0, 40.0, 20))
+
+    def stream(**kw):
+        s = Session(P, patterns=[ev]) if given else Session(P)
+        seen = {}
+
+        def grab(_t, info):
+            seen["S"] = info["stream"]
+        s.run(1.0, learn=False, stream_key=3, on_section=grab, **kw)
+        return seen["S"]
+    ref = stream()
+    for kw in ({"spike_deletion": 0.5}, {"jitter_ms": 4.0}):
+        S = stream(**kw)
+        np.testing.assert_array_equal(S.label, ref.label)
+        np.testing.assert_array_equal(S.t[S.kind == 0], ref.t[ref.kind == 0])
+        np.testing.assert_array_equal(S.aff[S.kind == 0], ref.aff[ref.kind == 0])
+        assert not np.array_equal(S.t[S.kind == 1], ref.t[ref.kind == 1])

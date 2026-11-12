@@ -176,7 +176,7 @@ def random_members(n_patterns, P, rng):
     return members
 
 
-def make_pattern_stream(members, P, rng, copies=None):
+def make_pattern_stream(members, P, rng, copies=None, paste_rng=None):
     """The paper's input with one pattern per row of ``members`` (a boolean
     (n_patterns, n_afferents) array: the afferents that carry it). Each
     pattern is a frozen 50 ms section of its afferents' own background
@@ -184,7 +184,10 @@ def make_pattern_stream(members, P, rng, copies=None):
     picked uniformly; pattern sections fill ``pattern_frac`` of the time and
     are never consecutive. ``copies`` (the ``copies`` of an earlier stream)
     hides those same patterns in fresh background activity, jitter and noise
-    instead of freezing new ones: a test stream."""
+    instead of freezing new ones: a test stream. ``paste_rng`` (default
+    ``rng``) draws the per-paste deletion and jitter; a separate one keeps
+    the background and noise the same whatever the deletion / jitter."""
+    prng = rng if paste_rng is None else paste_rng
     members = np.asarray(members, bool)
     n_pats, n = members.shape
     if n != P.n_afferents:
@@ -248,9 +251,9 @@ def make_pattern_stream(members, P, rng, copies=None):
     for k in on_idx:
         p_aff, p_t = copies[label[k]]
         if P.spike_deletion > 0.0:
-            kept = rng.random(p_t.size) >= P.spike_deletion
+            kept = prng.random(p_t.size) >= P.spike_deletion
             p_aff, p_t = p_aff[kept], p_t[kept]
-        jt = p_t + rng.normal(0.0, P.jitter_ms, p_t.size)
+        jt = p_t + prng.normal(0.0, P.jitter_ms, p_t.size)
         jt = np.clip(jt, 0.0, P.pattern_ms - 1e-6) + k * P.pattern_ms
         pa.append(p_aff)
         pt.append(jt)
@@ -303,7 +306,7 @@ def pattern_peak(events, P):
     return float(P.w_init * K * u.max())
 
 
-def make_event_stream(copies, P, rng, distractors=()):
+def make_event_stream(copies, P, rng, distractors=(), paste_rng=None):
     """A stream around GIVEN patterns. ``copies`` is one (afferents, times in
     ms) pair per pattern, times within ``P.pattern_ms`` - for images,
     :func:`neurovat.encoding.scan_events`. Sections are ``pattern_ms`` long.
@@ -313,7 +316,11 @@ def make_event_stream(copies, P, rng, distractors=()):
     otherwise it carries Poisson noise at ``bg_hz`` per afferent, or nothing.
     Each presentation of a pattern or a distractor loses ``spike_deletion``
     of its spikes and is jittered by ``jitter_ms``; ``noise_hz`` adds spikes
-    on every afferent everywhere, inside the patterns too."""
+    on every afferent everywhere, inside the patterns too. ``paste_rng``
+    (default ``rng``) draws the per-paste deletion and jitter; a separate one
+    keeps the sections, background and noise the same whatever the deletion
+    and jitter (the robustness sweep's keyed runs)."""
+    prng = rng if paste_rng is None else paste_rng
     n = P.n_afferents
     dt = P.dt_ms
     sec = int(round(P.pattern_ms / dt))
@@ -349,11 +356,11 @@ def make_event_stream(copies, P, rng, distractors=()):
     def paste(k, events, kind):
         p_aff, p_t = events
         if P.spike_deletion > 0.0:
-            kept = rng.random(p_t.size) >= P.spike_deletion
+            kept = prng.random(p_t.size) >= P.spike_deletion
             p_aff, p_t = p_aff[kept], p_t[kept]
         jt = p_t
         if P.jitter_ms > 0.0:
-            jt = p_t + rng.normal(0.0, P.jitter_ms, p_t.size)
+            jt = p_t + prng.normal(0.0, P.jitter_ms, p_t.size)
         pa.append(p_aff)
         pt.append(np.clip(jt, 0.0, P.pattern_ms - 1e-6) + k * P.pattern_ms)
         pk.append(np.full(p_aff.size, kind, np.int8))
@@ -733,21 +740,45 @@ class Session:
                                            lo + P.w_init * (hi - lo)))
 
     def run(self, seconds, learn=True, on_section=None, record_u=False,
-            **changes):
+            stream_key=None, **changes):
         """Simulate ``seconds`` of stream; ``changes`` override input
-        parameters for this run only. Returns the dict of :func:`run`."""
+        parameters for this run only. Returns the dict of :func:`run`.
+
+        The stream of an ordinary run is seeded by (seed, number of runs so
+        far), so every run sees new input. ``stream_key`` (an int or a
+        tuple of ints) seeds it by (seed, key) instead, on a separate seed
+        tag, so the same key and settings give the same stream every time
+        and never the stream of a numbered run. A keyed run is a probe: it
+        does not count as a run and leaves ``stream`` as it was (the
+        weights still follow ``learn``), so the session's next ordinary run
+        is the one it would have been without it. On a fresh session a
+        keyed run still freezes the patterns. A keyed run draws the
+        per-presentation deletion and jitter from a second generator, so
+        its sections, background and noise are the same at any
+        ``spike_deletion`` / ``jitter_ms``."""
         P = replace(self.P, base_s=float(seconds), n_repeats=1, **changes)
-        rng = np.random.default_rng([P.seed, 11, self.runs])
-        if self.given:
-            S = make_event_stream(self.copies, P, rng, self.distractors)
+        if stream_key is None:
+            rng = np.random.default_rng([P.seed, 11, self.runs])
+            prng = None
         else:
-            S = make_pattern_stream(self.members, P, rng, self.copies)
-        self.stream = S
+            key = np.atleast_1d(np.asarray(stream_key, np.int64)).tolist()
+            rng = np.random.default_rng([P.seed, 12, *key])
+            prng = np.random.default_rng([P.seed, 13, *key])
+        if self.given:
+            S = make_event_stream(self.copies, P, rng, self.distractors,
+                                  paste_rng=prng)
+        else:
+            S = make_pattern_stream(self.members, P, rng, self.copies,
+                                    paste_rng=prng)
+        if stream_key is None:
+            self.stream = S
         res = run(P, device=self.device, stream=S, learn=learn,
                   weights=self.weights, on_section=on_section,
                   phase="train" if learn else "eval", record_u=record_u,
                   **self.kw)
-        self.copies, self.runs = S.copies, self.runs + 1
+        self.copies = S.copies
+        if stream_key is None:
+            self.runs += 1
         if self.device is None:
             self.weights = np.array(res["weights"], float)
         return res

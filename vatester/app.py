@@ -50,6 +50,7 @@ from .plot_interaction import PlotInteractionMixin
 from .network_visualization import NetworkVisualizationMixin
 from .network_data import NetworkDataMixin
 from .network_stream import NetworkStreamMixin, STREAM_CONTROLS, STREAM_MODE
+from .network_stream_robust import ROBUST_CONTROLS
 from . import analysis, stdp_protocol
 from .stdp_panel import StdpControls
 
@@ -106,7 +107,7 @@ NT_CONTROLS = [
     ("nt_refrac", "refractory period ms"), ("nt_tausyn", "synaptic time constant ms"),
     ("nt_aplus", "potentiation scale"), ("nt_aminus", "depression scale"),
     ("nt_taupre", "pre-synaptic trace time constant ms"),
-] + STREAM_CONTROLS
+] + STREAM_CONTROLS + ROBUST_CONTROLS
 
 
 NT_AGENT_SYSTEM = """
@@ -184,8 +185,8 @@ rotate through them instead of repeating one:
     high accuracy) - switching rule is often the biggest single lever.
   * ENCODING / FRONT-END: nt_encoding (rate / latency / temporal / column
     scan, where each pixel row is one input and each pixel column one time bin
-    of nt_scan_bin ms: a spatio-temporal pattern with far fewer inputs), nt_rate,
-    nt_present,
+    of nt_scan_bin ms: a spatio-temporal pattern with far fewer inputs; stream
+    mode has its own nt_st_code, see below), nt_rate, nt_present,
     nt_signal_frac, nt_jitter, nt_input_noise.
   * DEVICE PROGRAMMING: nt_potamp / nt_depamp / nt_pwidth (write strength), or
     edit the .va / twin physics itself.
@@ -200,12 +201,20 @@ continuous spike stream, no epochs and no labels. Hidden patterns recur in
 background activity; STDP acts at every spike and lateral inhibition lets
 each neuron take one pattern. nt_st_input picks the input: "Poisson patterns
 (Masquelier)" (50 ms sections of frozen Poisson activity on nt_st_aff
-afferents) or "scanned images (spatio-temporal)" (one afferent per pixel row,
-column c fires at c x nt_st_bin ms, section = ceil(columns x bin) ms; images
-from nt_st_imgset, hidden ones nt_st_img_pick, distractors
-nt_st_img_distract, background nt_st_bg Hz between presentations; nt_st_noise
-adds to that background in the empty windows, which are the windows answered
-falsely). For images a window counts as answered by at least one output
+afferents) or "scanned images (spatio-temporal)": an image turned into spikes
+by nt_st_code, one of "column scan" (default; one afferent per pixel row,
+column c fires at c x nt_st_bin ms), "row scan" (one per pixel column, row r
+at r x nt_st_bin ms), "latency" (one per pixel; a pixel fires once, the
+brighter the earlier, within nt_st_code_win ms, default 50, after a 15 ms
+lead) or "frozen Poisson" (one per pixel; a fixed draw at 100 Hz x intensity
+over nt_st_code_win ms). Inputs = nt_st_img_size for the scans, size x size
+for the pixel codes (784 at 28); section = ceil(size x bin) ms for the scans,
+window + 2 x 15 ms for the pixel codes. Images from nt_st_imgset, hidden ones
+nt_st_img_pick, distractors nt_st_img_distract, background nt_st_bg Hz
+between presentations; nt_st_noise adds to that background in the empty
+windows, which are the windows answered falsely. Both default to 10 Hz for
+the scans and 3 Hz for the pixel codes (swapped when the code changes,
+unless edited). For images a window counts as answered by at least one output
 spike (measured on MNIST: about 1-5 spikes per answered image), for Poisson
 by exactly one; threshold 0 = auto (0.85 x the weakest clean image peak AT
 THE START WEIGHTS, or 0.25 x afferents), so the untrained network answered
@@ -221,10 +230,18 @@ patterns), and a test after training reports both. Once a network exists,
 this network was built"): "build", or restore the settings. With images say
 the neuron "detects" / "answers" an image; say it LEARNT only when the
 trained test has fewer false windows than the untrained baseline with the
-hits held - so run the baseline first. Learning shows on MNIST at 28 rows
-(nt_st_imgset "dataset", nt_st_img_size 28; 1 neuron, noise and background
-10 Hz, even spacing, share 0.5: the first "0" answered 7-11 of 18 empty
-windows untrained, 0-2 after 60 s of training, hits 17/17); the built-in
+hits held - so run the baseline first. Learning shows on the first MNIST
+"0" (nt_st_imgset "dataset", nt_st_img_size 28; 1 neuron, even spacing,
+share 0.5). Column scan, noise and background 10 Hz: 7-11 of 18 empty
+windows answered untrained, 0-2 after 60 s of training, hits 17/17 (Test's
+last third). Counted over the whole 30 s test (60 s of training, untrained
+-> trained false windows, hits held): column scan 25-27 -> 2 of 54, row scan
+40-44 -> 2 of 54, latency at 3-5 Hz 188 -> 0-4 of 188 (2 seeds; at 10 Hz it
+fires in every window and learns nothing; 30 s of training gave only 63 ->
+39 of 63). Frozen Poisson is unreliable: the hits collapsed after training
+at 1, 3 (a GUI run) and 5 Hz and on 1 of 2 seeds at 10 Hz (each line fires about 5
+times per window, so STDP depresses the image's own lines below the
+threshold's reach). The built-in
 28 x 28 digits and letters are already clean untrained, so they show
 detection, not learning. Known limit of the image input: several hidden
 images are not split one per neuron (MNIST "0", "1", "2" with 3 neurons:
@@ -255,8 +272,23 @@ width nt_pwidth moves a device by one STDP step; "as set" uses nt_potamp /
 nt_depamp as they are (at start weight 1.0 the pulse is sized at weight 0.5,
 since at a bound one direction cannot move). Whether a given device learns
 is an open question: report what you see (one run, ECFET v2, calibrated,
-MNIST "0" at 28 rows, settings above, seed 1: empty windows answered 8 -> 1
+MNIST "0", column scan at size 28, settings above, seed 1: empty windows answered 8 -> 1
 of 18 after 60 s of training, hits 17/17). After a stream run you started, its result is sent to you.
+ROBUSTNESS (view tab nt_st_tab_robust): after training, {"type":"nt_action",
+"action":"robust"} tests the TRAINED network (STDP off, threshold held) on
+one fixed keyed test stream, one factor changed at a time: jitter
+(nt_st_rb_jitter, ms), missing spikes (nt_st_rb_delete, %) and extra spikes
+(nt_st_rb_noise, the ABSOLUTE noise Hz, not added to the trained value);
+comma lists, '' = the Masquelier 2008 levels plus the trained value.
+nt_st_rb_seconds per level (default 30), nt_st_rb_untrained also runs an
+untrained copy (ideal synapses only; not available for device synapses).
+The other settings stay at the values of the last Train. It is counted over
+the WHOLE run (hits = pattern windows answered, false = other windows with
+an output spike), a different denominator from Test's last-third verdict,
+so do not compare the two numbers directly. A repeat sweep gives identical
+numbers and leaves the network, its runs and the device unchanged. It is
+refused without a trained network or after a network setting changed. The
+result is in your context below once it finishes.
 """
 
 
@@ -6030,10 +6062,23 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             return self._nt_st_set_play(
                 str(val).lower() in ("1", "true", "yes", "on", "play")) or True
         elif tag in ("nt_st_input", "nt_st_spacing", "nt_st_speed",
-                     "nt_st_imgset", "nt_st_synapse", "nt_st_pulse"):
+                     "nt_st_imgset", "nt_st_synapse", "nt_st_pulse",
+                     "nt_st_code"):
             val = self._nt_st_set_combo(tag, val)
             if val is None:
                 return False
+        elif tag == "nt_st_rb_pick":              # a swept level: text or index
+            items = [e[0] for e in self._nt_rb_entries]
+            s = str(val).strip()
+            if s.lstrip("-").isdigit() and -len(items) <= int(s) < len(items):
+                val = items[int(s)]
+            else:
+                val = next((it for it in items if it == s), None) or next(
+                    (it for it in items if it.startswith(s)), None) if s else None
+            if val is None:
+                return False
+            dpg.set_value(tag, val)
+            return True
         cur = dpg.get_value(tag)
         # tab bars store an int id but are switched by the tab's string alias
         if (isinstance(cur, int) and isinstance(val, str)
@@ -6138,6 +6183,14 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                     self._nt_stream_agent = self.trainer_running
                     self.append_chat("sys", self._nt_stream_error
                                      or f"{name} started...")
+            elif name == "robust":
+                if not self.trainer_running:
+                    self._nt_set_control("nt_mode", STREAM_MODE)
+                    started = self._nt_rb_start()
+                    self._nt_rb_agent = started
+                    self.append_chat("sys", "robustness sweep started..."
+                                     if started else "robustness sweep "
+                                     "refused: " + str(self._nt_rb_error))
 
     # ---- agent context + snapshot -----------------------------------
 
@@ -6218,6 +6271,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             L.append("last evaluation:")
             L.append(self._nt_metrics_text())
         L.extend(self._nt_stream_context())
+        L.extend(self._nt_rb_context())
         L.append("")
         L.append("=== CONTROLS (current values) ===")
         for tag, desc in NT_CONTROLS:
@@ -7435,6 +7489,10 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                     self._on_nt_stream_view(item[1])
                 elif kind == "nt_stream_done":
                     self._on_nt_stream_done(item[1])
+                elif kind == "nt_robust_progress":
+                    self._on_nt_robust_progress(item[1])
+                elif kind == "nt_robust_done":
+                    self._on_nt_robust_done(item[1])
                 elif kind == "nt_acc":
                     self._on_nt_acc(item[1], item[2], item[3])
                 elif kind == "nt_spk":

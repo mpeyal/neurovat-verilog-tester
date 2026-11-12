@@ -214,3 +214,99 @@ def test_detection_and_training_effect_wording():
 def test_image_input_starts_at_weight_one():
     assert sv.W0_DEFAULT[sv.POISSON] == 0.475       # the paper value, unchanged
     assert sv.W0_DEFAULT[sv.IMAGES] == 1.0
+
+
+def test_code_names_layouts_and_noise_defaults():
+    assert sv.code_name("row") == "row scan"
+    assert sv.code_name("ttfs") == "latency"
+    assert sv.code_name(None) == "column scan"
+    with pytest.raises(ValueError):
+        sv.code_name("morse")
+    assert [sv.code_layout(c) for c in sv.CODES] == ["row", "col", "pixel",
+                                                     "pixel"]
+    assert sv.PIXEL_NOISE_HZ == 3.0 and sv.NOISE_HZ == 10.0
+    assert sv.noise_default("pixel") == sv.PIXEL_NOISE_HZ
+    assert sv.noise_default("row") == sv.noise_default(None) == sv.NOISE_HZ
+    # the default follows the layout; a value the user edited stays
+    assert sv.swapped_default(10.0, "row", "pixel") == 3.0
+    assert sv.swapped_default(3.0, "pixel", "col") == 10.0
+    assert sv.swapped_default(7.0, "row", "pixel") == 7.0
+    assert sv.swapped_default(10.0, "pixel", "row") == 10.0   # edited to 10
+    assert set(sv.CODE_TIPS) == set(sv.CODES)
+    assert "unreliable" in sv.CODE_TIPS["frozen Poisson"]
+
+
+def test_line_labels_timing_and_explainer():
+    assert sv.line_label("row", 3, 28) == "row 3"
+    assert sv.line_label("col", 3, 28) == "col 3"
+    assert sv.line_label("pixel", 2 * 28 + 5, 28) == "(2,5)"
+    assert sv.LINE_NAME == {"row": "pixel row", "col": "pixel column",
+                            "pixel": "pixel (r, c)"}
+    assert sv.code_timing({"layout": "row", "bin_ms": 10.0,
+                           "code": "column scan"}) == \
+        "column scan, 10 ms / column"
+    assert sv.code_timing({"layout": "col", "bin_ms": 5.0,
+                           "code": "row scan"}) == "row scan, 5 ms / row"
+    assert sv.code_timing({"layout": "pixel", "window_ms": 50.0,
+                           "code": "latency"}) == "latency, 50 ms window"
+    for code in sv.CODES:
+        text = sv.code_explainer(code, 28, 10.0, 50.0, 80.0, 1)
+        assert "Section 80 ms" in text
+    assert "pixel row" in sv.code_explainer("column scan", 28, 10, 0, 280)
+    assert "pixel column" in sv.code_explainer("row scan", 28, 10, 0, 280)
+    assert "784 lines" in sv.code_explainer("latency", 28, 10, 50, 80)
+    assert "seed 4" in sv.code_explainer("frozen Poisson", 28, 10, 50, 80, 4)
+
+
+def test_pixel_lines_hold_every_inked_pixel():
+    bank = sv.image_bank("digits", 28)
+    vec = bank[0][1]
+    inked = np.nonzero(vec >= 0.5)[0]
+    shown, n_inked = sv.pixel_lines([vec], 0.5, 784)
+    assert n_inked == inked.size and set(inked) <= set(shown.tolist())
+    assert shown.size == inked.size + sv.PIXEL_OTHERS
+    assert (np.diff(shown) > 0).all() and shown.max() < 784
+    # the inked pixels are the only lines a latency pattern drives
+    lat = sv.build_image_input(bank, "0", "", 28, 10.0, 0.5, code="latency")
+    assert set(lat["patterns"][0][0].tolist()) <= set(shown.tolist())
+    # more inked pixels than room: an even sample, still capped
+    full = np.ones(784)
+    shown, n_inked = sv.pixel_lines([full], 0.5, 784, cap=100, others=10)
+    assert shown.size == n_inked == 90
+    blank, n0 = sv.pixel_lines([np.zeros(784)], 0.5, 784)
+    assert n0 == 0 and blank.size == sv.PIXEL_OTHERS
+
+
+def test_build_image_input_codes_keep_the_column_scan_default():
+    bank = sv.image_bank("digits", 14)
+    old = sv.build_image_input(bank, "0", "1", 14, 10.0, 0.5)
+    same = sv.build_image_input(bank, "0", "1", 14, 10.0, 0.5,
+                                code="column scan")
+    assert old["code"] == "column scan" and old["layout"] == "row"
+    assert old["n_afferents"] == 14 and old["pattern_ms"] == 140.0
+    assert sv.events_digest(old["patterns"]) == sv.events_digest(same["patterns"])
+    for key in ("patterns", "distractors", "picks", "distract", "labels",
+                "dlabels", "vecs", "dvecs", "size", "bin_ms", "pattern_ms"):
+        assert key in old
+    row = sv.build_image_input(bank, "0", "", 14, 10.0, 0.5, code="row scan")
+    assert row["layout"] == "col" and row["n_afferents"] == 14
+    lat = sv.build_image_input(bank, "0", "", 14, 10.0, 0.5, code="latency")
+    assert lat["layout"] == "pixel" and lat["n_afferents"] == 196
+    assert lat["patterns"][0][0].max() < 196 and lat["window_ms"] == 50.0
+    poi = sv.build_image_input(bank, "0", "1", 14, 10.0, 0.5,
+                               code="frozen Poisson")
+    again = sv.build_image_input(bank, "0", "1", 14, 10.0, 0.5,
+                                 code="frozen Poisson")
+    assert sv.events_digest(poi["patterns"] + poi["distractors"]) == \
+        sv.events_digest(again["patterns"] + again["distractors"])
+    assert sv.events_digest(old["patterns"], "column scan") != \
+        sv.events_digest(old["patterns"])
+    assert sv.CODES == list(__import__("neurovat.encoding", fromlist=["x"])
+                            .STREAM_CODES)
+    # every code's events fit the engine, and auto_threshold takes the dict
+    for img in (old, row, lat, poi):
+        P = MasquelierParams(n_afferents=img["n_afferents"],
+                             n_pattern=img["n_afferents"], w_init=1.0,
+                             pattern_ms=img["pattern_ms"], threshold=1.0)
+        assert sv.auto_threshold(img, P) == sv.auto_threshold(img["patterns"], P)
+        Session(P, patterns=img["patterns"]).run(1.0, learn=False)

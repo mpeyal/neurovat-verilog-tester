@@ -7,6 +7,7 @@ import tempfile
 import time
 
 import dearpygui.dearpygui as dpg
+import numpy as np
 
 from vatester.app import App
 from vatester import stream_view as sv
@@ -39,6 +40,134 @@ def errors(app):
     return [s for s in app._log_lines
             if "[ui] error" in s or "[stream] error" in s
             or "view error" in s or "preview error" in s]
+
+
+def row_shown(tag):
+    return dpg.get_item_configuration(dpg.get_item_parent(tag))["show"]
+
+
+def row_label(tag):
+    return dpg.get_value(dpg.get_item_children(dpg.get_item_parent(tag), 1)[0])
+
+
+def check_codes(app, set_):
+    """The encoding combo: input count, rows, noise default, key, views."""
+    assert dpg.get_value("nt_st_code") == "column scan"
+    assert set_("nt_st_img_size", 28)
+    assert dpg.get_value("nt_st_noise") == dpg.get_value("nt_st_bg") == 10.0
+    want = {"column scan": (28, "row", "ms / column"),
+            "row scan": (28, "col", "ms / row"),
+            "latency": (784, "pixel", None),
+            "frozen Poisson": (784, "pixel", None)}
+    for code, (n, layout, label) in want.items():
+        assert set_("nt_st_code", code)
+        assert dpg.get_value("nt_st_code") == code
+        inp = app._nt_st_input_cfg()
+        assert inp["aff"] == inp["n_pattern"] == n, (code, inp["aff"])
+        assert inp["image"]["layout"] == layout
+        arch = app._nt_st_arch
+        assert not arch.get("error"), arch
+        assert arch["n_aff"] == n and arch["layout"] == layout
+        assert len(arch["net_idx"]) == n
+        assert row_shown("nt_st_bin") == (layout != "pixel")
+        assert row_shown("nt_st_code_win") == (layout == "pixel")
+        if label:
+            assert row_label("nt_st_bin") == label
+        noise = sv.PIXEL_NOISE_HZ if layout == "pixel" else 10.0
+        assert dpg.get_value("nt_st_noise") == noise, code
+        assert dpg.get_value("nt_st_bg") == noise, code
+        if layout == "pixel":
+            assert arch["n_shown"] < n and arch["n_inked"] > 0
+            vec = arch["vecs"][0]
+            inked = {i for i, v in enumerate(vec) if v >= 0.5}
+            assert inked <= set(arch["shown"].tolist())
+        else:
+            assert arch["n_shown"] == 28
+        for tab in ("nt_st_tab_net", "nt_st_tab_pat"):
+            assert set_("nt_st_tabs", tab)
+            frames(app, 2)
+    # a bridge / agent name is normalised, a bad one refused
+    assert set_("nt_st_code", "row")
+    assert dpg.get_value("nt_st_code") == "row scan"
+    set_("nt_st_code", "morse")
+    assert dpg.get_value("nt_st_code") == "row scan"
+    # a noise value the user changed is not swapped; the untouched bg is
+    set_("nt_st_noise", 7.0)
+    assert set_("nt_st_code", "ttfs")
+    assert dpg.get_value("nt_st_code") == "latency"
+    assert dpg.get_value("nt_st_noise") == 7.0
+    assert dpg.get_value("nt_st_bg") == sv.PIXEL_NOISE_HZ
+    assert set_("nt_st_code", "column scan")
+    assert dpg.get_value("nt_st_noise") == 7.0
+    assert dpg.get_value("nt_st_bg") == 10.0
+    set_("nt_st_noise", 10.0)
+    # Poisson input counts as a scan: back to 10
+    assert set_("nt_st_code", "latency")
+    assert dpg.get_value("nt_st_noise") == sv.PIXEL_NOISE_HZ
+    assert set_("nt_st_input", "Poisson")
+    assert dpg.get_value("nt_st_noise") == 10.0
+    assert set_("nt_st_input", "images")
+    assert dpg.get_value("nt_st_noise") == sv.PIXEL_NOISE_HZ
+    # a latency network: baseline, train, test; the pixel views
+    set_("nt_st_seconds", 3)
+    app.on_nt_stream_reset()
+    for learn in (False, True, False):
+        app._nt_stream_start(learn)
+        assert app.trainer_running, app._nt_stream_error
+        pump(app)
+    r = app._nt_stream_last
+    assert r["phase"] == "test" and r["afferents"] == 784
+    assert r["images"]["code"] == "latency" and r["pattern_ms"] == 80.0
+    assert app._nt_stream_session.P.n_afferents == 784
+    verdict = dpg.get_value("nt_st_verdict")
+    assert "encoding latency" in verdict and "trained TP" in verdict
+    assert dpg.get_value("nt_st_r_p0")[0], "no latency spikes drawn"
+    ys = dpg.get_value("nt_st_r_p0")[1]
+    assert max(ys) < app._nt_st_arch["n_shown"]
+    assert "pixel (r, c)" in dpg.get_item_configuration("nt_st_ry")["label"]
+    assert np.shape(app._nt_st_net_w) == (1, 784)
+    assert set_("nt_st_tabs", "nt_st_tab_net")
+    frames(app, 2)
+    # the heat map: the image and one texture per neuron, drawn once
+    kids = dpg.get_item_children("nt_st_net_dl", 2)
+    images = [i for i in kids if "DrawImage" in dpg.get_item_type(i)]
+    assert len(images) == 2, len(images)
+    texts = [dpg.get_item_configuration(i).get("text") for i in kids]
+    assert texts.count("n1 w") == 1 and texts.count("afferents") == 1
+    assert ("w", 0) in app._nt_st_texs
+    assert set_("nt_st_tabs", "nt_st_tab_pat")
+    frames(app, 2)
+    # the code changes on a trained network: Test refuses
+    session = app._nt_stream_session
+    for code in ("frozen Poisson", "column scan"):
+        assert set_("nt_st_code", code)
+        app._nt_stream_start(False)
+        assert not app.trainer_running
+        assert "settings changed" in app._nt_stream_error
+        assert app._nt_stream_session is session
+    # so does a window change of a pixel code
+    assert set_("nt_st_code", "latency")
+    set_("nt_st_code_win", 40.0)
+    app._nt_stream_start(False)
+    assert not app.trainer_running and "settings changed" in \
+        app._nt_stream_error
+    set_("nt_st_code_win", 50.0)
+    # frozen Poisson and row scan run end to end (fresh networks)
+    for code in ("frozen Poisson", "row scan"):
+        assert set_("nt_st_code", code)
+        app.on_nt_stream_reset()
+        app._nt_stream_start(False)
+        assert app.trainer_running, app._nt_stream_error
+        pump(app)
+        assert app._nt_stream_last["images"]["code"] == code
+        for tab in ("nt_st_tab_net", "nt_st_tab_pat", "nt_st_tab_raster"):
+            assert set_("nt_st_tabs", tab)
+            frames(app, 2)
+    assert "pixel column" in dpg.get_item_configuration("nt_st_ry")["label"]
+    assert set_("nt_st_code", "column scan")
+    assert dpg.get_value("nt_st_noise") == 10.0
+    set_("nt_st_img_size", 14)
+    app.on_nt_stream_reset()
 
 
 def main():
@@ -219,6 +348,7 @@ def main():
                 assert app._nt_stream_last["afferents"] == 28
                 set_("nt_st_img_size", 14)
             set_("nt_st_imgset", "digits")
+            check_codes(app, set_)
             # switch input back and mode out and in
             assert set_("nt_st_input", "Poisson")
             assert dpg.get_value("nt_st_noise") == 10.0
@@ -239,7 +369,9 @@ def main():
             print("PASS: stream Poisson + image input, untrained baseline -> "
                   "train -> test, Test refused after a setting change, "
                   "start-weight swap, live raster, replay, "
-                  "distractors, errors in place, input / mode switches")
+                  "distractors, errors in place, input / mode switches, "
+                  "the four encodings (input count, noise default, Test "
+                  "refused after a code change, pixel views)")
         finally:
             app.virtuoso.disconnect()
             dpg.destroy_context()

@@ -32,6 +32,112 @@ def scan_events(image, bin_ms, threshold=0.5):
     return rows.astype(np.int32), cols * float(bin_ms)
 
 
+# ---- image codes for the event stream (neurovat.masquelier.Session) --------
+COLUMN_SCAN = "column scan"
+ROW_SCAN = "row scan"
+LATENCY = "latency"
+FROZEN_POISSON = "frozen Poisson"
+STREAM_CODES = (COLUMN_SCAN, ROW_SCAN, LATENCY, FROZEN_POISSON)
+# What one input line is: "row" = pixel row r, "col" = pixel column c,
+# "pixel" = one line per pixel, index r * W + c (silent pixels included).
+STREAM_LAYOUT = {COLUMN_SCAN: "row", ROW_SCAN: "col", LATENCY: "pixel",
+                 FROZEN_POISSON: "pixel"}
+# Free parameters of the two pixel codes (not from any paper):
+#   window_ms  the span the code uses: 50 ms (the Masquelier pattern length)
+#   margin_ms  silence before AND after that span, 15 ms = 3 sigma of the
+#              largest jitter of the robustness figure (5 ms). The stream
+#              clips jittered spikes into [0, pattern_ms); without a margin
+#              a near-binary image's volley (all spikes at t = 0) would lose
+#              half its jitter onto the section start.
+#   rate_hz    frozen Poisson: rate of a pixel of intensity 1 (100 Hz, so a
+#              full pixel fires 5 spikes on average in 50 ms)
+#   seed       frozen Poisson: the spikes are drawn ONCE (default seed 0) and
+#              the stream pastes that fixed copy at every presentation
+STREAM_WINDOW_MS = 50.0
+STREAM_MARGIN_MS = 15.0
+STREAM_RATE_HZ = 100.0
+
+
+def stream_code(name):
+    """Normalise an encoding name ('column', 'row', 'latency' / 'ttfs',
+    'poisson' / 'rate'); ValueError for anything else."""
+    s = str(name or COLUMN_SCAN).strip().lower()
+    for code, keys in ((COLUMN_SCAN, ("column", "col", "scan")),
+                       (ROW_SCAN, ("row",)),
+                       (LATENCY, ("latency", "ttfs", "time-to-first")),
+                       (FROZEN_POISSON, ("frozen", "poisson", "rate"))):
+        if s == code.lower() or s.startswith(keys):
+            return code
+    raise ValueError(f"unknown stream encoding {name!r}: use one of "
+                     f"{', '.join(STREAM_CODES)}")
+
+
+def stream_events(image, code=COLUMN_SCAN, bin_ms=10.0, threshold=0.5,
+                  window_ms=None, rng=None, margin_ms=STREAM_MARGIN_MS,
+                  rate_hz=STREAM_RATE_HZ):
+    """One 2-D image (intensities 0..1) as the event list of one pattern for
+    :func:`neurovat.masquelier.make_event_stream`. Returns a dict:
+    ``afferents`` (int32), ``times`` (ms, all in [0, pattern_ms)),
+    ``n_afferents`` (input lines of the code), ``pattern_ms`` (section length,
+    whole ms), ``layout`` (what one line is, see ``STREAM_LAYOUT``) and
+    ``code``.
+
+    * column scan: :func:`scan_events` - line = pixel row, pixel (r, c) at or
+      above ``threshold`` spikes once at c x ``bin_ms``; pattern_ms =
+      ceil(W x bin_ms).
+    * row scan: the same sweep top to bottom - line = pixel column, time =
+      r x ``bin_ms``; equal to the column scan of the transpose.
+    * latency (time to first spike): one line per pixel; a pixel at or above
+      ``threshold`` spikes once at margin + ``window_ms`` x (1 - v) / (1 -
+      threshold): the brightest first, one at the threshold last. pattern_ms
+      = ceil(2 x margin + window).
+    * frozen Poisson: one line per pixel; a pixel at or above ``threshold``
+      fires Poisson spikes at ``rate_hz`` x v over ``window_ms`` (after the
+      margin), drawn ONCE from ``rng`` (a Generator or a seed; None = seed 0).
+      pattern_ms as for latency.
+    ``bin_ms`` only matters to the scans, ``window_ms`` (default
+    ``STREAM_WINDOW_MS``), ``margin_ms`` and ``rng`` only to the pixel codes."""
+    code = stream_code(code)
+    img = np.asarray(image, float)
+    if img.ndim != 2:
+        raise ValueError(f"image must be 2-D, got shape {img.shape}")
+    H, W = img.shape
+    thr = float(threshold)
+    if code in (COLUMN_SCAN, ROW_SCAN):
+        src = img if code == COLUMN_SCAN else img.T
+        aff, t = scan_events(src, bin_ms, thr)
+        n_in, n_bins = src.shape
+        pattern_ms = float(max(np.ceil(n_bins * float(bin_ms) - 1e-9), 1))
+        return {"afferents": aff, "times": np.asarray(t, float),
+                "n_afferents": int(n_in), "pattern_ms": pattern_ms,
+                "layout": STREAM_LAYOUT[code], "code": code}
+    win = float(STREAM_WINDOW_MS if window_ms is None else window_ms)
+    margin = float(margin_ms)
+    if win <= 0.0 or margin < 0.0:
+        raise ValueError(f"window_ms must be > 0 and margin_ms >= 0 (got "
+                         f"{win:g}, {margin:g})")
+    pattern_ms = float(max(np.ceil(2.0 * margin + win - 1e-9), 1))
+    v = np.clip(img.reshape(-1), 0.0, 1.0)
+    on = np.nonzero(v >= thr)[0]
+    if code == LATENCY:
+        span = 1.0 - thr
+        frac = ((1.0 - v[on]) / span) if span > 0.0 else np.zeros(on.size)
+        t = margin + win * np.clip(frac, 0.0, 1.0)
+        aff = on
+    else:
+        if not isinstance(rng, np.random.Generator):
+            rng = np.random.default_rng(0 if rng is None else rng)
+        counts = rng.poisson(float(rate_hz) * v[on] * win * 1e-3)
+        aff = np.repeat(on, counts)
+        t = margin + rng.random(aff.size) * win
+        order = np.lexsort((aff, t))
+        aff, t = aff[order], t[order]
+    t = np.minimum(t, np.nextafter(pattern_ms, 0.0))
+    return {"afferents": aff.astype(np.int32), "times": t.astype(float),
+            "n_afferents": int(H * W), "pattern_ms": pattern_ms,
+            "layout": STREAM_LAYOUT[code], "code": code}
+
+
 def _scan(vec01, cfg, rng, signal_mask, noise):
     """Column-scan code: the image is swept left to right, one pixel column
     per time bin. Input line r is pixel row r; it fires once, at the start of
