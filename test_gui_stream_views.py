@@ -89,7 +89,7 @@ def check_codes(app, set_):
     # a bridge / agent name is normalised, a bad one refused
     assert set_("nt_st_code", "row")
     assert dpg.get_value("nt_st_code") == "row scan"
-    set_("nt_st_code", "morse")
+    assert not set_("nt_st_code", "morse")
     assert dpg.get_value("nt_st_code") == "row scan"
     # a noise value the user changed is not swapped; the untouched bg is
     set_("nt_st_noise", 7.0)

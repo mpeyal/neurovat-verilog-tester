@@ -383,7 +383,9 @@ score); hits held unless stated.
   threshold (the auto threshold, 0.85 of the clean peak).
 
 Free parameters chosen here: the 50 ms window, the 15 ms margin,
-the 100 Hz rate, frozen seed 0, and the 3 Hz pixel-code noise default.
+the 100 Hz rate, the frozen draw's seed (0 in `stream_events` when no rng is
+given; the GUI draws from the app seed, per image), and the 3 Hz pixel-code
+noise default.
 
 The MNIST benchmark trains and scores the pre-package engine
 (`benchmarks/legacy_neuro.py`) and this package on the same MNIST subset from
