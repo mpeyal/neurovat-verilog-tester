@@ -9,8 +9,13 @@ NumPy only, seeded, and driven by config files so results can be regenerated.
 - **Learning** — device-local STDP (pre-synaptic eligibility trace, one
   consolidated write pulse per synapse per presentation) or surrogate-gradient
   BPTT applied through the devices.
-- **Encoding** — rate (Poisson), temporal and latency codes, with input noise,
-  spike-time jitter and background activity.
+- **Encoding** — rate (Poisson), temporal, latency and column-scan
+  (spatio-temporal) codes, with input noise, spike-time jitter and background
+  activity. Column scan (`encoding = "scan"`) sweeps the image left to right:
+  one input per pixel row, one time bin of `scan_bin_ms` per pixel column, a
+  spike where the pixel is at or above `scan_threshold`. The crossbar's
+  neurons integrate over the whole presentation, so they see the ink per row
+  and not its order in time.
 - **Devices** — any model behind the `DeviceArray` interface. `softbound` is
   the built-in reference synapse; existing scalar device twins run unchanged
   through `ScalarTwinArray`.

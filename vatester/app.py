@@ -90,7 +90,11 @@ NT_CONTROLS = [
     ("nt_potamp", "potentiation pulse amp (device unit)"),
     ("nt_depamp", "depression pulse amp"), ("nt_pwidth", "pulse width ms"),
     ("nt_offset", "LTP/LTD pre-trace split"),
-    ("nt_encoding", "rate (Poisson) | latency (TTFS) | temporal (phase)"),
+    ("nt_encoding", "rate (Poisson) | latency (TTFS) | temporal (phase) | "
+                    "column scan (spatio-temporal): inputs = pixel rows, time "
+                    "bins = pixel columns; needs a rebuild"),
+    ("nt_scan_bin", "column scan: ms per pixel column (columns x bin <= nt_present)"),
+    ("nt_scan_thr", "column scan: a pixel at or above this is inked (0-1)"),
     ("nt_bg_rate", "background firing Hz"), ("nt_input_noise", "sensor noise 0-1"),
     ("nt_signal_frac", "fraction of afferents carrying the pattern 0-1"),
     ("nt_jitter", "spike jitter ms"), ("nt_vnoise", "membrane noise sigma"),
@@ -178,7 +182,9 @@ rotate through them instead of repeating one:
     Changing input size needs a rebuild.
   * LEARNING RULE: STDP (hardware-faithful, shallow) vs Surrogate grad (deep,
     high accuracy) - switching rule is often the biggest single lever.
-  * ENCODING / FRONT-END: nt_encoding (rate / latency / temporal), nt_rate,
+  * ENCODING / FRONT-END: nt_encoding (rate / latency / temporal / column
+    scan, where each pixel row is one input and each pixel column one time bin
+    of nt_scan_bin ms: a spatio-temporal pattern with far fewer inputs), nt_rate,
     nt_present,
     nt_signal_frac, nt_jitter, nt_input_noise.
   * DEVICE PROGRAMMING: nt_potamp / nt_depamp / nt_pwidth (write strength), or
@@ -5971,6 +5977,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             _s = str(val).lower()
             val = ("latency (TTFS)" if _s.startswith("lat")
                    else "temporal (phase)" if _s.startswith("temp")
+                   else "column scan (spatio-temporal)"
+                   if _s.startswith(("col", "scan", "spat"))
                    else "rate (Poisson)")
         elif tag == "nt_mode":
             if self.trainer_running:
@@ -6577,8 +6585,12 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             learn_rule=("surrogate" if self._nt_get(
                 "nt_learnrule", "STDP").startswith("Surrogate") else "stdp"),
             encoding=(lambda e: "latency" if e.startswith("lat")
-                      else "temporal" if e.startswith("temp") else "rate")(
+                      else "temporal" if e.startswith("temp")
+                      else "scan" if e.startswith("col") else "rate")(
                       self._nt_get("nt_encoding", "rate").lower()),
+            scan_bin_ms=max(float(self._nt_get("nt_scan_bin", 10.0)), 0.01),
+            scan_threshold=min(max(float(self._nt_get("nt_scan_thr", 0.5)),
+                                   0.0), 1.0),
             bg_rate_hz=max(self._nt_getu("nt_bg_rate", 0.0), 0.0),
             input_noise=min(max(self._nt_get("nt_input_noise", 0.0), 0.0), 1.0),
             signal_frac=min(max(self._nt_get("nt_signal_frac", 1.0), 0.0), 1.0),
@@ -6846,8 +6858,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         self.log(f"[neuro] power model: {power_note}")
         # the receptive-field montage shows crossbar 0's post-layer (first
         # hidden layer, or the output for a single crossbar)
+        # (column scan: one weight per pixel ROW, drawn as a column of cells)
         self._nt_setup_rf_texture(self.trainer.layer_sizes[1], cfg.grid_h,
-                                  cfg.grid_w)
+                                  1 if cfg.encoding == "scan" else cfg.grid_w)
         # crossbar selector for the Weights tab
         sizes = self.trainer.layer_sizes
         self._nt_xbar_labels = [f"crossbar {c}: {sizes[c]}x{sizes[c + 1]}"

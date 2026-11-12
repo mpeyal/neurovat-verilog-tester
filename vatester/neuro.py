@@ -30,6 +30,7 @@ from neurovat.devices import (ScalarTwinArray, device_weight,
 from neurovat.lif import (probe_lif, probe_lif_wave, fi_curve, probe_lif_psp,
                           fi_curve_psp)
 from neurovat.network import CrossbarSNN
+from neurovat.encoding import input_size
 from neurovat.power import PowerParams, format_report, _eng as fmt_si
 
 POWER_DIR = "power_profiles"          # optional, in the workspace (data only)

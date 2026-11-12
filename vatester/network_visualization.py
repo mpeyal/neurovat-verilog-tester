@@ -599,7 +599,8 @@ class NetworkVisualizationMixin:
         g_uS = float(tr.weights_uS(c)[j][int(i)])
         kind = (self._nt_dev or {}).get("kind", "current")
         unit = "pA gate current" if kind == "current" else "V gate voltage"
-        pre_name = "input pixel" if c == 0 else f"layer-{c} neuron"
+        pre_name = (("input row" if self.trainer.cfg.encoding == "scan"
+                     else "input pixel") if c == 0 else f"layer-{c} neuron")
         vec = self._last_present[1] if self._last_present else None
         inten = (float(vec[int(i)]) if (vec is not None and c == 0
                  and int(i) < len(vec)) else 0.7)

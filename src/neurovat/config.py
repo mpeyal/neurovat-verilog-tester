@@ -78,6 +78,11 @@ class NetConfig:
     #                            spike: brighter pixel fires earlier) | "temporal"
     #                            (phase code: one precisely-timed spike per cycle,
     #                            phase set by intensity - repeating spike times)
+    #                            | "scan" (column scan: one input per pixel ROW,
+    #                            one time bin per pixel COLUMN, a spike where
+    #                            the pixel is inked - a spatio-temporal pattern)
+    scan_bin_ms: float = 10.0  # "scan": duration of one column
+    scan_threshold: float = 0.5  # "scan": a pixel at or above this is inked
     bg_rate_hz: float = 0.0    # spontaneous background rate on EVERY input (Hz)
     input_noise: float = 0.0   # per-presentation pixel noise (Gaussian + salt
     #                            & pepper), as a fraction in [0, 1]

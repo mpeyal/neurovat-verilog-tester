@@ -29,7 +29,7 @@ from . import stdp as _stdp
 from . import surrogate as _sg
 from .crossbar import input_drive, normalize, trace_matrix
 from .devices import device_factory
-from .encoding import encode_spikes as _encode_spikes
+from .encoding import encode_spikes as _encode_spikes, input_size, scan_bin_steps
 from .patterns import make_patterns
 from .power import EnergyMeter
 from .state import pack, unpack
@@ -52,7 +52,9 @@ class CrossbarSNN:
         self.N = neuron
         self.S = stdp
         self.cfg = cfg
-        self.n_in = cfg.grid_h * cfg.grid_w
+        self.n_in = input_size(cfg)
+        if cfg.encoding == "scan":
+            scan_bin_steps(cfg)               # the sweep must fit the window
         self.n_out = cfg.n_out
         self.rng = np.random.default_rng(cfg.seed)
         self._t_dev = 0.0                     # shared device wall-clock (s)

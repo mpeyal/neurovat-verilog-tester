@@ -134,8 +134,27 @@ class NetworkDataMixin:
                     with dpg.table_row():
                         dpg.add_combo(self._patset_items(), tag="nt_patset", default_value="bars", width=-1,
                                       callback=lambda *_: (self._nt_refresh_source(), self._nt_encoding_preview()))
-                        dpg.add_combo(["rate (Poisson)", "latency (TTFS)", "temporal (phase)"], tag="nt_encoding",
+                        dpg.add_combo(["rate (Poisson)", "latency (TTFS)", "temporal (phase)",
+                                       "column scan (spatio-temporal)"], tag="nt_encoding",
                                       default_value="rate (Poisson)", width=-1, callback=_pre)
+                        with dpg.tooltip("nt_encoding"):
+                            dpg.add_text(
+                                "rate: brighter pixel = more spikes. latency: brighter = earlier. "
+                                "temporal: one timed spike per cycle. column scan: the image is "
+                                "swept left to right, one pixel column per time bin; each pixel ROW "
+                                "is one input line, which spikes in a bin if its pixel there is "
+                                "inked. Inputs = rows (not rows x columns), so changing to or from "
+                                "it needs Build network.", wrap=420)
+            with dpg.group(horizontal=True, tag="nt_scan_row", show=False):
+                self._small("column scan:", color=C_TEXT2)
+                self._small("bin (ms)", color=C_MUTED)
+                dpg.add_input_double(tag="nt_scan_bin", default_value=10.0, width=70, step=0,
+                                     format="%.4g", callback=_pre)
+                self._small("ink threshold", color=C_MUTED)
+                dpg.add_input_double(tag="nt_scan_thr", default_value=0.5, width=70, step=0,
+                                     format="%.4g", callback=_pre)
+                self._small("columns x bin must fit in 'present'; 'rate' and 'pattern' "
+                            "are not used by this code", color=C_MUTED)
             with dpg.subplots(1, 2, tag="nt_data_plots", width=-1, height=-1):
                 with dpg.plot(label="Clean encoding", tag="nt_enc_clean", no_menus=True):
                     dpg.add_plot_axis(dpg.mvXAxis, label="time (ms)", tag="nt_enc_clean_x")
@@ -183,6 +202,9 @@ class NetworkDataMixin:
         """Encode one pattern clean + noisy and draw the two rasters + status."""
         if not dpg.does_item_exist("nt_enc_clean_y"):
             return
+        if dpg.does_item_exist("nt_scan_row"):
+            dpg.configure_item("nt_scan_row", show=str(
+                self._nt_get("nt_encoding", "")).lower().startswith("col"))
         try:
             N, S, cfg = self._nt_read_params()
             cfg.n_out, cfg.hidden_layers = 1, ()      # cheap: encoding only
@@ -192,9 +214,12 @@ class NetworkDataMixin:
             clean, noisy = tr.compare_spikes(vec)
         except Exception as e:                              # noqa: BLE001
             self.log(f"[neuro] encoding preview failed: {e}")
+            if dpg.does_item_exist("nt_enc_status"):
+                dpg.set_value("nt_enc_status", f"preview failed: {e}")
             return
         dt = cfg.dt_ms
-        n_in = cfg.grid_h * cfg.grid_w
+        n_in = neuro.input_size(cfg)
+        scan = cfg.encoding == "scan"
         for mat, yax, attr, theme in (
                 (clean, "nt_enc_clean_y", "_nt_enc_clean_ser", "dot_clean"),
                 (noisy, "nt_enc_noisy_y", "_nt_enc_noisy_ser", "dot_noise")):
@@ -210,10 +235,15 @@ class NetworkDataMixin:
                          ("nt_enc_noisy_x", "nt_enc_noisy_y")):
             dpg.set_axis_limits(xax, 0.0, cfg.present_ms)
             dpg.set_axis_limits(yax, -0.5, n_in - 0.5)
+            # row 0 is the top of the image: draw it at the top for the scan
+            dpg.configure_item(yax, invert=scan,
+                               label="pixel row" if scan else "afferent #")
         dpg.configure_item("nt_enc_clean", label=f"Clean encoding - {int(clean.sum())} spikes")
         dpg.configure_item("nt_enc_noisy", label=f"After noise + jitter - {int(noisy.sum())} spikes")
         enc = {"rate": "rate-encoded", "latency": "latency-encoded",
-               "temporal": "temporal phase-encoded"}.get(cfg.encoding, cfg.encoding)
+               "temporal": "temporal phase-encoded",
+               "scan": f"column scan, {cfg.grid_h} input rows x {cfg.grid_w} bins of "
+                       f"{cfg.scan_bin_ms:g} ms"}.get(cfg.encoding, cfg.encoding)
         dpg.set_value("nt_enc_status",
                       f"Active: {cfg.pattern_set} pattern set  -  {enc}  -  "
                       f"noise {int(round(cfg.input_noise * 100))}%  -  jitter "

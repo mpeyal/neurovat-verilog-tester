@@ -1,7 +1,9 @@
 """Spike encoding: rate/Poisson statistics, noise, jitter, determinism."""
 import numpy as np
+import pytest
 
-from neurovat import NetConfig
+from neurovat import (CrossbarSNN, NetConfig, NeuronParams, STDPParams,
+                      device_factory)
 from neurovat.encoding import encode_spikes
 
 
@@ -66,3 +68,43 @@ def test_latency_code_brighter_pixels_fire_first():
     first = np.array([np.nonzero(S[:, i])[0][0] for i in range(16)])
     assert first[-1] < first[0]
     assert np.all(first >= ((1 - vec) * 0.6 * 1000).astype(int))
+
+
+def _scan_cfg(**kw):
+    kw = {"present_ms": 80.0, "scan_bin_ms": 10.0, **kw}
+    return NetConfig(grid_h=4, grid_w=6, encoding="scan", **kw)
+
+
+def test_column_scan_rows_are_inputs_and_columns_are_time_bins():
+    cfg = _scan_cfg()
+    img = np.zeros((4, 6))
+    img[:, 2] = 1.0                                 # a vertical bar, column 2
+    S = encode_spikes(img.reshape(-1), cfg, np.random.default_rng(0), noise=False)
+    assert S.shape == (80, 4)                       # 4 input lines, not 24
+    assert np.nonzero(S.any(1))[0].tolist() == [20]  # all rows, in bin 2 only
+    assert S[20].all()
+    img = np.zeros((4, 6))
+    img[1, :] = 1.0                                 # a horizontal bar, row 1
+    S = encode_spikes(img.reshape(-1), cfg, np.random.default_rng(0), noise=False)
+    assert np.nonzero(S[:, 1])[0].tolist() == [0, 10, 20, 30, 40, 50]
+    assert S[:, [0, 2, 3]].sum() == 0               # only that row's line
+
+
+def test_column_scan_fires_once_per_inked_pixel():
+    cfg = _scan_cfg(scan_threshold=0.5)
+    img = np.random.default_rng(3).random((4, 6))
+    S = encode_spikes(img.reshape(-1), cfg, np.random.default_rng(0), noise=False)
+    assert S.sum() == (img >= 0.5).sum()
+
+
+def test_column_scan_must_fit_the_presentation():
+    cfg = _scan_cfg(present_ms=50.0)                # 6 columns x 10 ms = 60 ms
+    with pytest.raises(ValueError, match="does not fit"):
+        encode_spikes(np.zeros(24), cfg, np.random.default_rng(0), noise=False)
+
+
+def test_column_scan_network_has_one_input_per_row():
+    net = CrossbarSNN(device_factory("softbound"), NeuronParams(), STDPParams(),
+                      _scan_cfg(n_out=2, pattern_set="bars"))
+    assert net.n_in == 4 and net.layer_sizes == [4, 2]
+    assert net.train_step(net.patterns[0][1], 0)["winner"] in (-1, 0, 1)
