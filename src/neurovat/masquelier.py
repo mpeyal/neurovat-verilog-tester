@@ -42,6 +42,13 @@ inhibition constants (0.4 x threshold, 20 ms, a 40 % pattern share and
 patterns on random halves of the afferents for three neurons) are NOT taken
 from that paper, which is not open access; they are free parameters.
 
+:func:`make_event_stream` hides GIVEN patterns instead of frozen background:
+any (afferent, time) event lists, for instance column-scanned images
+(:func:`neurovat.encoding.scan_events`: one afferent per pixel row). Between
+presentations the afferents are silent, carry Poisson noise (``bg_hz``) or
+show other, unlabelled patterns (distractors). Nothing about that input is
+from Masquelier's papers; the neuron and the learning rule are unchanged.
+
 Synapses are either ideal weights (``device=None``: the paper's additive rule
 clipped to [0, 1]) or a :class:`neurovat.devices.DeviceArray` of shape
 (n_out, n_afferents) programmed by the requested weight changes.
@@ -69,6 +76,10 @@ class MasquelierParams:
     max_silence_ms: float = 50.0   # force a spike after this much silence
     pattern_ms: float = 50.0
     pattern_frac: float = 0.25     # share of 50 ms sections holding a pattern
+    spacing: str = "random"        # "random" | "even" (every k-th section,
+    #                                k = round(1 / pattern_frac), at least 2)
+    bg_hz: float = 0.0             # make_event_stream: Poisson rate of every
+    #                                afferent in the sections that show nothing
     jitter_ms: float = 1.0         # Gaussian sigma, applied at each paste
     spike_deletion: float = 0.0    # share of pattern spikes dropped per paste
     noise_hz: float = 10.0         # spontaneous activity on every afferent
@@ -107,6 +118,9 @@ class Stream:
     sources: tuple = ()            # section each pattern was copied from
     members: np.ndarray = None     # (n_patterns, n_afferents) afferent sets
     copies: tuple = ()             # (afferents, times in ms) of each pattern
+    kind: np.ndarray = None        # per spike: 0 background / noise,
+    #                                1 pattern, 2 distractor
+    extra: np.ndarray = None       # (n_sections,) distractor id, -1 = none
 
     @property
     def pattern_on(self):
@@ -129,6 +143,18 @@ def _pattern_sections(n, frac, rng):
     for k in range(n):
         on[k] = (not (k and on[k - 1])) and rng.random() < p
     return on
+
+
+def _sections(n, P, rng):
+    """Which of n sections hold a pattern: ``P.spacing``."""
+    if P.spacing == "even":
+        period = max(int(round(1.0 / max(P.pattern_frac, 1e-6))), 2)
+        on = np.zeros(n, bool)
+        on[period - 1::period] = True
+        return on
+    if P.spacing != "random":
+        raise ValueError(f"spacing must be 'random' or 'even', not {P.spacing!r}")
+    return _pattern_sections(n, P.pattern_frac, rng)
 
 
 def make_stream(P, rng):
@@ -190,7 +216,7 @@ def make_pattern_stream(members, P, rng, copies=None):
     t = np.concatenate(times)
     sec_of = step // sec
 
-    on = _pattern_sections(n_sec, P.pattern_frac, rng)
+    on = _sections(n_sec, P, rng)
     label = np.full(n_sec, -1)
     on_idx = np.nonzero(on)[0]
     label[on_idx] = 0 if n_pats == 1 else rng.integers(0, n_pats, on_idx.size)
@@ -229,20 +255,134 @@ def make_pattern_stream(members, P, rng, copies=None):
         pa.append(p_aff)
         pt.append(jt)
     aff, t = np.concatenate(pa), np.concatenate(pt)
+    kind = np.ones(aff.size, np.int8)
+    kind[:pa[0].size] = 0
 
     # spontaneous activity, everywhere
     n_noise = rng.poisson(P.noise_hz * n * P.base_s)
     aff = np.concatenate([aff, rng.integers(0, n, n_noise).astype(np.int32)])
     t = np.concatenate([t, rng.random(n_noise) * n_steps * dt])
+    kind = np.concatenate([kind, np.zeros(n_noise, np.int8)])
 
     order = np.argsort(t, kind="stable")
-    aff, t = aff[order], t[order]
+    aff, t, kind = aff[order], t[order], kind[order]
     step = np.minimum((t // dt).astype(np.int64), n_steps - 1)
     ptr = np.searchsorted(step, np.arange(n_steps + 1))
     return Stream(ptr=ptr, aff=aff, t=t, label=label, section_steps=sec,
                   duration_ms=n_steps * dt,
                   rate_hz=aff.size / (n * P.base_s), sources=tuple(sources),
-                  members=members, copies=tuple(copies))
+                  members=members, copies=tuple(copies), kind=kind,
+                  extra=np.full(n_sec, -1))
+
+
+def event_members(copies, n_afferents):
+    """Boolean (n_patterns, n_afferents): the afferents each pattern uses."""
+    members = np.zeros((len(copies), n_afferents), bool)
+    for p, (p_aff, _t) in enumerate(copies):
+        members[p, np.asarray(p_aff, int)] = True
+    return members
+
+
+def pattern_peak(events, P):
+    """Highest potential that one clean presentation of a pattern ((afferents,
+    times in ms)) drives in a neuron whose weights are all ``P.w_init`` and
+    that does not fire."""
+    t = np.sort(np.asarray(events[1], float))
+    if not t.size:
+        return 0.0
+    tm, ts = P.tau_m, P.tau_s
+    s_pk = tm * ts / (tm - ts) * math.log(tm / ts)
+    K = 1.0 / (math.exp(-s_pk / tm) - math.exp(-s_pk / ts))
+    grid = np.arange(t[0], t[-1] + 3.0 * tm, P.sim_dt_ms)
+    u = np.zeros(grid.size)
+    for lo in range(0, t.size, 256):               # bounded memory
+        s = grid[:, None] - t[None, lo:lo + 256]
+        on = s >= 0.0
+        s = np.where(on, s, 0.0)
+        u += (on * (np.exp(-s / tm) - np.exp(-s / ts))).sum(1)
+    return float(P.w_init * K * u.max())
+
+
+def make_event_stream(copies, P, rng, distractors=()):
+    """A stream around GIVEN patterns. ``copies`` is one (afferents, times in
+    ms) pair per pattern, times within ``P.pattern_ms`` - for images,
+    :func:`neurovat.encoding.scan_events`. Sections are ``pattern_ms`` long.
+    A pattern section shows one pattern, picked uniformly (``pattern_frac``,
+    ``spacing``; never two in a row). Every other section shows one of the
+    ``distractors`` (same format, never labelled) when there are any;
+    otherwise it carries Poisson noise at ``bg_hz`` per afferent, or nothing.
+    Each presentation of a pattern or a distractor loses ``spike_deletion``
+    of its spikes and is jittered by ``jitter_ms``; ``noise_hz`` adds spikes
+    on every afferent everywhere, inside the patterns too."""
+    n = P.n_afferents
+    dt = P.dt_ms
+    sec = int(round(P.pattern_ms / dt))
+    if abs(sec * dt - P.pattern_ms) > 1e-9:
+        raise ValueError(f"pattern_ms {P.pattern_ms:g} is not a multiple of "
+                         f"the {dt:g} ms input step")
+    n_sec = max(int(round(P.base_s * 1000.0 / P.pattern_ms)), 1)
+    n_steps = n_sec * sec
+    copies = tuple((np.asarray(a, np.int32), np.asarray(t, float))
+                   for a, t in copies)
+    distractors = tuple((np.asarray(a, np.int32), np.asarray(t, float))
+                        for a, t in distractors)
+    for a, t in copies + distractors:
+        if a.size and (a.min() < 0 or a.max() >= n):
+            raise ValueError(f"pattern uses afferent {int(a.max())}, the "
+                             f"network has {n}")
+        if t.size and (t.min() < 0.0 or t.max() >= P.pattern_ms):
+            raise ValueError(f"pattern lasts {float(t.max()):g} ms, the "
+                             f"section {P.pattern_ms:g} ms")
+    n_pats = len(copies)
+
+    on = _sections(n_sec, P, rng)
+    label = np.full(n_sec, -1)
+    on_idx = np.nonzero(on)[0]
+    label[on_idx] = 0 if n_pats == 1 else rng.integers(0, n_pats, on_idx.size)
+    extra = np.full(n_sec, -1)
+    off_idx = np.nonzero(~on)[0]
+    if distractors:
+        extra[off_idx] = rng.integers(0, len(distractors), off_idx.size)
+
+    pa, pt, pk = [], [], []
+
+    def paste(k, events, kind):
+        p_aff, p_t = events
+        if P.spike_deletion > 0.0:
+            kept = rng.random(p_t.size) >= P.spike_deletion
+            p_aff, p_t = p_aff[kept], p_t[kept]
+        jt = p_t
+        if P.jitter_ms > 0.0:
+            jt = p_t + rng.normal(0.0, P.jitter_ms, p_t.size)
+        pa.append(p_aff)
+        pt.append(np.clip(jt, 0.0, P.pattern_ms - 1e-6) + k * P.pattern_ms)
+        pk.append(np.full(p_aff.size, kind, np.int8))
+
+    for k in on_idx:
+        paste(k, copies[label[k]], 1)
+    if distractors:
+        for k in off_idx:
+            paste(k, distractors[extra[k]], 2)
+    elif P.bg_hz > 0.0 and off_idx.size:
+        n_bg = rng.poisson(P.bg_hz * n * off_idx.size * P.pattern_ms * 1e-3)
+        pa.append(rng.integers(0, n, n_bg).astype(np.int32))
+        pt.append((rng.choice(off_idx, n_bg) + rng.random(n_bg)) * P.pattern_ms)
+        pk.append(np.zeros(n_bg, np.int8))
+    n_noise = rng.poisson(P.noise_hz * n * n_steps * dt * 1e-3)
+    pa.append(rng.integers(0, n, n_noise).astype(np.int32))
+    pt.append(rng.random(n_noise) * n_steps * dt)
+    pk.append(np.zeros(n_noise, np.int8))
+
+    aff, t, kind = np.concatenate(pa), np.concatenate(pt), np.concatenate(pk)
+    order = np.argsort(t, kind="stable")
+    aff, t, kind = aff[order], t[order], kind[order]
+    step = np.minimum((t // dt).astype(np.int64), n_steps - 1)
+    ptr = np.searchsorted(step, np.arange(n_steps + 1))
+    return Stream(ptr=ptr, aff=aff, t=t, label=label, section_steps=sec,
+                  duration_ms=n_steps * dt,
+                  rate_hz=aff.size / (n * n_steps * dt * 1e-3),
+                  sources=(-1,) * n_pats, members=event_members(copies, n),
+                  copies=copies, kind=kind, extra=extra)
 
 
 class Synapses:
@@ -337,7 +477,7 @@ def _section_rasters(S, a, b, off_in, n_bins, bin_ms, posts, n_out):
 def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
         stream=None, progress=None, members=None, dep_gain=None, pot_sign=1.0,
         pulse_width=None, energy=None, phase="train", on_section=None,
-        learn=True, weights=None):
+        learn=True, weights=None, record_u=False):
     """Simulate one run. Returns a dict with every postsynaptic spike (time,
     neuron, pattern it fell in or -1, latency after that pattern's onset),
     the final weights and the success metrics of the paper.
@@ -350,7 +490,9 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
     returning False stops the run early (the result then covers the time
     simulated). ``energy`` records reads, neuron spikes and writes per
     section and needs a ``device``. ``learn=False`` freezes the weights
-    (evaluation); ``weights`` sets the initial ideal weights."""
+    (evaluation); ``weights`` sets the initial ideal weights. ``record_u``
+    adds ``u_ms`` to the result: the membrane potential of every neuron, its
+    maximum in each millisecond (NaN while refractory)."""
     P = P or MasquelierParams()
     rng = np.random.default_rng(P.seed)
     if stream is not None:
@@ -392,6 +534,9 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
     post_t, post_j, post_lab, post_lat = [], [], [], []
     sec_posts = []
     stopped = False
+    u_per = max(int(round(1.0 / dt)), 1)   # sim steps per recorded ms
+    u_rec = (np.full((-(-n_base * P.n_repeats // u_per), m), -np.inf, np.float32)
+             if record_u else None)
     for rep in range(P.n_repeats):
         off = rep * S.duration_ms
         for k in range(n_base):
@@ -429,6 +574,9 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
                 if near.any():
                     em, es = np.exp(-sp[near] / tm), np.exp(-sp[near] / ts)
                     u[near] += thr * (P.K1 * em - P.K2 * (em - es))
+                if u_rec is not None:
+                    row = u_rec[(rep * n_base + k) // u_per]
+                    np.maximum(row, np.where(ready, u, -np.inf), out=row)
                 cand = ready & (u >= thr)
                 if cand.any():
                     j = int(np.argmax(np.where(cand, u, -np.inf)))
@@ -471,7 +619,7 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
                 if on_section is not None and on_section(t_end, {
                         "rep": rep, "section": sk, "label": int(S.label[sk]),
                         "spikes": spikes, "post_spikes": len(post_t),
-                        "weights": syn.w}) is False:
+                        "weights": syn.w, "stream": S, "u_ms": u_rec}) is False:
                     stopped = True
                     break
         if progress:
@@ -485,6 +633,10 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
                  np.array(post_lab, int), np.array(post_lat, float), syn,
                  t_done)
     res["stopped"] = stopped
+    if u_rec is not None:
+        u_rec = u_rec[:int(math.ceil(t_done / (u_per * dt) - 1e-9))]
+        u_rec[~np.isfinite(u_rec)] = np.nan
+        res["u_ms"] = u_rec
     return res
 
 
@@ -545,38 +697,56 @@ class Session:
     activity, jitter and noise) around the patterns frozen by the first one
     and carries the weights over, so ``run(learn=False)`` after training is a
     test on unseen input. ``jitter_ms``, ``noise_hz``, ``spike_deletion`` and
-    ``pattern_frac`` may differ from run to run.
+    ``pattern_frac`` (and ``spacing``, ``bg_hz``) may differ from run to run.
 
     With one pattern its afferents are the first ``n_pattern`` (the 2008
-    layout), otherwise an independent random set per pattern. A ``device`` is
+    layout), otherwise an independent random set per pattern. ``patterns``
+    (and ``distractors``) hide GIVEN patterns instead, as
+    :func:`make_event_stream` takes them; ``n_patterns`` is then ignored.
+    ``stream`` is the input of the last run. A ``device`` is
     placed at ``w_init`` of its conductance range first; that raises
     ValueError for a device that cannot be set by conductance. ``synapse_kw``
     goes to :func:`run` (``write_window_ms``, ``write_gain``, ``dep_gain``,
     ``pot_sign``, ``pulse_width``, ``energy``)."""
 
-    def __init__(self, P, n_patterns=1, device=None, **synapse_kw):
+    def __init__(self, P, n_patterns=1, device=None, patterns=None,
+                 distractors=(), **synapse_kw):
         self.P, self.device, self.kw = P, device, synapse_kw
-        if n_patterns == 1:
+        self.given, self.distractors = patterns is not None, tuple(distractors)
+        self.stream = None
+        if self.given:
+            if not len(patterns):
+                raise ValueError("no pattern given")
+            self.members = event_members(patterns, P.n_afferents)
+        elif n_patterns == 1:
             self.members = np.zeros((1, P.n_afferents), bool)
             self.members[0, :P.n_pattern] = True
         else:
             self.members = random_members(n_patterns, P,
                                           np.random.default_rng([P.seed, 7]))
         self.copies, self.weights, self.runs = None, None, 0
+        if self.given:
+            self.copies = tuple(patterns)
         if device is not None:
             lo, hi = float(device.g_min), float(device.g_max)
             device.set_conductance(np.full(device.shape,
                                            lo + P.w_init * (hi - lo)))
 
-    def run(self, seconds, learn=True, on_section=None, **changes):
+    def run(self, seconds, learn=True, on_section=None, record_u=False,
+            **changes):
         """Simulate ``seconds`` of stream; ``changes`` override input
         parameters for this run only. Returns the dict of :func:`run`."""
         P = replace(self.P, base_s=float(seconds), n_repeats=1, **changes)
-        S = make_pattern_stream(self.members, P, np.random.default_rng(
-            [P.seed, 11, self.runs]), self.copies)
+        rng = np.random.default_rng([P.seed, 11, self.runs])
+        if self.given:
+            S = make_event_stream(self.copies, P, rng, self.distractors)
+        else:
+            S = make_pattern_stream(self.members, P, rng, self.copies)
+        self.stream = S
         res = run(P, device=self.device, stream=S, learn=learn,
                   weights=self.weights, on_section=on_section,
-                  phase="train" if learn else "eval", **self.kw)
+                  phase="train" if learn else "eval", record_u=record_u,
+                  **self.kw)
         self.copies, self.runs = S.copies, self.runs + 1
         if self.device is None:
             self.weights = np.array(res["weights"], float)
@@ -603,6 +773,11 @@ def _score(P, S, post_t, post_j, post_lab, lat, syn, t_done, last_s=150.0):
     late = post_t >= t0
     n_pats = max(S.n_patterns, 1)
 
+    # every whole section of the scored window, for the window-level counts
+    g0 = int(math.ceil(t0 / P.pattern_ms - 1e-9))
+    g1 = max(int(math.floor(t_done / P.pattern_ms + 1e-9)), g0)
+    g_lab = S.label[np.arange(g0, g1) % S.label.size]
+
     per = []
     for j in range(P.n_out):
         mine = late & (post_j == j)
@@ -627,7 +802,21 @@ def _score(P, S, post_t, post_j, post_lab, lat, syn, t_done, last_s=150.0):
                   else np.zeros(P.n_afferents, bool))
         ok = (best["hit_rate"] > 0.98 and fa == 0
               and best["mean_latency_ms"] < 10.0)
+        # window level: a window counts as answered when the neuron fires in
+        # it at least once; positives are the windows of its best pattern
+        fired = np.zeros(g1 - g0, bool)
+        gs = (post_t[mine] // P.pattern_ms).astype(int) - g0
+        fired[gs[(gs >= 0) & (gs < g1 - g0)]] = True
+        pos = g_lab == best["pattern"]
+        tp, fn = int((fired & pos).sum()), int((~fired & pos).sum())
+        fp, tn = int((fired & ~pos).sum()), int((~fired & ~pos).sum())
+        tpr = tp / (tp + fn) if tp + fn else 0.0
+        tnr = tn / (tn + fp) if tn + fp else 0.0
+        win = {"tp": tp, "fn": fn, "fp": fp, "tn": tn,
+               "accuracy": (tp + tn) / max(g1 - g0, 1),
+               "balanced_accuracy": 0.5 * (tpr + tnr)}
         per.append({"neuron": j, "best_pattern": best["pattern"],
+                    "windows": win,
                     "hit_rate": best["hit_rate"], "false_alarms": fa,
                     "other_pattern_spikes": other,
                     "mean_latency_ms": best["mean_latency_ms"],

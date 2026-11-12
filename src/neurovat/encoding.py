@@ -23,6 +23,15 @@ def scan_bin_steps(cfg):
     return steps
 
 
+def scan_events(image, bin_ms, threshold=0.5):
+    """Column-scan code of a 2-D image as events: (rows, times in ms). Pixel
+    (r, c) at or above ``threshold`` is one spike on input line r at the
+    start of time bin c. The same code as ``encoding = "scan"``, without the
+    presentation window."""
+    rows, cols = np.nonzero(np.asarray(image, float) >= threshold)
+    return rows.astype(np.int32), cols * float(bin_ms)
+
+
 def _scan(vec01, cfg, rng, signal_mask, noise):
     """Column-scan code: the image is swept left to right, one pixel column
     per time bin. Input line r is pixel row r; it fires once, at the start of

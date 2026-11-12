@@ -4,7 +4,7 @@ import pytest
 
 from neurovat import (CrossbarSNN, NetConfig, NeuronParams, STDPParams,
                       device_factory)
-from neurovat.encoding import encode_spikes
+from neurovat.encoding import encode_spikes, scan_events
 
 
 def enc(vec, seed=0, noise=True, mask=None, **cfg):
@@ -101,6 +101,18 @@ def test_column_scan_must_fit_the_presentation():
     cfg = _scan_cfg(present_ms=50.0)                # 6 columns x 10 ms = 60 ms
     with pytest.raises(ValueError, match="does not fit"):
         encode_spikes(np.zeros(24), cfg, np.random.default_rng(0), noise=False)
+
+
+def test_scan_events_are_the_spikes_of_the_clean_scan_raster():
+    cfg = NetConfig(grid_h=5, grid_w=7, encoding="scan", present_ms=30.0,
+                    dt_ms=0.5, scan_bin_ms=3.0, scan_threshold=0.4)
+    img = np.random.default_rng(8).random((5, 7))
+    S = encode_spikes(img.reshape(-1), cfg, np.random.default_rng(0), noise=False)
+    rows, times = scan_events(img, 3.0, 0.4)
+    step, row = np.nonzero(S)
+    assert rows.size == row.size > 0
+    assert sorted(zip(rows.tolist(), np.round(times, 9).tolist())) == \
+        sorted(zip(row.tolist(), np.round(step * cfg.dt_ms, 9).tolist()))
 
 
 def test_column_scan_network_has_one_input_per_row():
