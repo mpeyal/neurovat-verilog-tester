@@ -129,6 +129,9 @@ class NetworkStreamViewsMixin:
                 dpg.add_line_series([], [], label="pattern windows answered ("
                                     + sv.hit_rule(False) + ")",
                                     tag="nt_st_s_hit")
+                # the image-input learning signal: STDP prunes these answers
+                dpg.add_line_series([], [], label="other windows answered (%)",
+                                    tag="nt_st_s_oth")
         with dpg.plot(width=-1, height=185, no_menus=True):
             dpg.add_plot_legend()
             dpg.add_plot_axis(dpg.mvXAxis, label="stream time (s)",
@@ -709,10 +712,11 @@ class NetworkStreamViewsMixin:
         copies = (getattr(getattr(sess, "stream", None), "copies", None)
                   if sess is not None and self._nt_st_same_net(arch) else None)
         if not copies:
-            dpg.add_text("The Poisson patterns are frozen at the first Train: "
+            dpg.add_text("The Poisson patterns are frozen by the first run "
+                         "(Train, or Test as the untrained baseline): "
                          f"each is a {arch['pattern_ms']:g} ms section of its "
                          "afferents' own background activity, so it has no "
-                         "rate cue. Press Train to see them here.",
+                         "rate cue. Press Train or Test to see them here.",
                          color=C_TEXT2, wrap=0, parent=holder)
             return
         shown = np.asarray(arch["shown"], int)

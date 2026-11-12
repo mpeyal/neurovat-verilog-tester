@@ -1,6 +1,7 @@
 """Masquelier et al. (2008) paradigm: input statistics, the alternating
 nearest-spike rule, and pattern finding on a shortened run."""
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 
@@ -107,6 +108,24 @@ def test_a_session_tests_on_a_new_stream_with_frozen_weights():
     assert s.copies[0][0] is pattern[0][0]          # the same hidden pattern
     hit = r["spikes_per_window"][0]
     assert hit[0] > 0.9 and hit[1] < 0.05           # found in unseen input
+
+
+def test_an_untrained_first_run_freezes_the_patterns_that_training_then_uses():
+    """The GUI's untrained baseline: Test before Train. The Poisson patterns
+    are frozen by the first run whether it learns or not, the weights stay
+    at w_init, and a later Train works on the same patterns."""
+    P = MasquelierParams(n_afferents=200, n_pattern=100, threshold=50.0,
+                         n_out=2, seed=3)
+    s = Session(P, n_patterns=2)
+    s.run(1.0, learn=False)
+    frozen = s.copies
+    assert len(frozen) == 2 and all(len(a) for a, _t in frozen)
+    assert np.all(s.weights == P.w_init)            # nothing learnt yet
+    s.run(1.0)
+    assert not np.all(s.weights == P.w_init)        # training changed them
+    for (a1, t1), (a2, t2) in zip(frozen, s.copies):
+        np.testing.assert_array_equal(a1, a2)
+        np.testing.assert_array_equal(t1, t2)
 
 
 def test_on_section_reports_each_section_and_can_stop_the_run():
@@ -367,7 +386,10 @@ def test_a_silent_neuron_scores_half_balanced_accuracy():
 
 # --- sessions on given patterns ---------------------------------------------
 
-def test_stdp_learns_a_column_scanned_digit():
+def test_a_trained_neuron_detects_a_column_scanned_digit():
+    # detection only: without noise and with the auto threshold (0.85 x the
+    # peak at the start weight) the built-in digit is detected before any
+    # training (see the learning test below for what STDP adds)
     img = np.asarray(make_patterns("digits", 14, 14)[0][1]).reshape(14, 14)
     events = scan_events(img, 10.0)
     P = MasquelierParams(n_afferents=14, n_pattern=14, pattern_ms=140.0,
@@ -379,6 +401,39 @@ def test_stdp_learns_a_column_scanned_digit():
     w = s.run(10.0, learn=False)["per_neuron"][0]["windows"]
     assert w["tp"] >= 0.9 * (w["tp"] + w["fn"])
     assert w["fp"] <= 0.2 * (w["fp"] + w["tn"])
+
+
+MNIST = Path(__file__).resolve().parents[1] / "datasets" / "mnist.npz"
+
+
+@pytest.mark.skipif(not MNIST.exists(), reason="datasets/mnist.npz not present")
+def test_stdp_prunes_the_false_answers_to_an_mnist_digit():
+    """Learning, not only detection: the GUI flow on one network - untrained
+    baseline Test, Train, Test. The fresh neuron also answers empty windows
+    (10 Hz background + 10 Hz noise); at start weight 1 STDP can only lower
+    weights, and training keeps the hits and removes most false answers.
+    Without training the false answers stay (checked: this test then fails
+    on the 'after' assertion). No built-in image showed this
+    (their peaks sit far above the noise, so they are clean untrained)."""
+    with np.load(MNIST, allow_pickle=False) as d:
+        x, y = d["x_train"], d["y_train"]
+    img = np.asarray(x[int(np.nonzero(y == 0)[0][0])], float)
+    img = (img - img.min()) / (img.max() - img.min())          # the first '0'
+    events = scan_events(img, 10.0, 0.5)
+    P = MasquelierParams(n_afferents=28, n_pattern=28, pattern_ms=280.0,
+                         n_out=1, pattern_frac=0.5, spacing="even",
+                         bg_hz=10.0, noise_hz=10.0, w_init=1.0, seed=2)
+    P = replace(P, threshold=0.85 * pattern_peak(events, P))
+    s = Session(P, patterns=[events])
+    before = s.run(15.0, learn=False)["per_neuron"][0]["windows"]
+    assert np.all(s.weights == 1.0)                 # the baseline learns nothing
+    s.run(40.0)
+    after = s.run(15.0, learn=False)["per_neuron"][0]["windows"]
+    for w in (before, after):                       # hits held
+        assert w["tp"] >= 0.9 * (w["tp"] + w["fn"])
+    assert before["fp"] >= 0.3 * (before["fp"] + before["tn"])
+    assert after["fp"] <= 0.15 * (after["fp"] + after["tn"])
+    assert after["fp"] < before["fp"]
 
 
 def test_a_session_hides_the_given_patterns_in_each_new_stream():

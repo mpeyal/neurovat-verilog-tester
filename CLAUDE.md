@@ -29,6 +29,21 @@ Virtuoso** on a shared university host.
   `vatester/stream_view.py` (image input, auto threshold, raster windows).
   Live raster snapshots are extracted in the worker and posted as
   `nt_stream_view`; the render thread only draws them.
+  Test before any Train runs the **untrained baseline** (a fresh session,
+  STDP off, same frozen patterns that a later Train continues on); the
+  verdict then shows both rows. The baseline runs only when no network
+  exists yet (fresh, or after New network); once one exists, Test after a
+  network setting changed refuses ("settings changed since this network
+  was built") instead of replacing the trained network. With image input a
+  neuron that answers the image windows *detects* the image; only "trained
+  false windows below untrained false windows, hits held" says STDP
+  *learnt* something. Image input starts at weight 1.0 (Poisson 0.475). The
+  auto threshold scales with the start weight, so the untrained network was
+  the same at either (measured on the MNIST "0"); at 1.0 STDP can only prune, at 0.475 it potentiated
+  the image rows and the false answers rose (MNIST "0"). Learning shows on
+  MNIST at 28 rows; the built-in images are clean untrained (detection
+  only). The Learning tab's "other windows answered (%)" line is the image
+  learning signal.
 - Bridge note: the mailbox holds one command; while an async command
   (`nt_train`, ...) is pending, a second command (e.g. `shot`) is not served
   while it runs (a `shot` sent then came back black), so a mid-run screenshot

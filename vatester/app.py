@@ -203,13 +203,34 @@ each neuron take one pattern. nt_st_input picks the input: "Poisson patterns
 afferents) or "scanned images (spatio-temporal)" (one afferent per pixel row,
 column c fires at c x nt_st_bin ms, section = ceil(columns x bin) ms; images
 from nt_st_imgset, hidden ones nt_st_img_pick, distractors
-nt_st_img_distract, background nt_st_bg Hz between presentations; noise
-defaults to 0 for images because noise Hz also lands inside the image). For
-images a window counts as answered by at least one output spike (a neuron
-fires 3-6 times per image), for Poisson by exactly one; threshold 0 = auto
-(0.85 x the weakest clean image peak, or 0.25 x afferents). Known limit of
-the image input: several hidden images are not split over several neurons
-and a neuron trained on one image also answers distractor images. The view
+nt_st_img_distract, background nt_st_bg Hz between presentations; nt_st_noise
+adds to that background in the empty windows, which are the windows answered
+falsely). For images a window counts as answered by at least one output
+spike (measured on MNIST: about 1-5 spikes per answered image), for Poisson
+by exactly one; threshold 0 = auto (0.85 x the weakest clean image peak AT
+THE START WEIGHTS, or 0.25 x afferents), so the untrained network answered
+the same at start weight 0.475 and 1.0 (measured on the MNIST "0"). Image
+input sets nt_st_w0 to 1.0 (Poisson
+0.475) unless changed: at 1.0 STDP can only lower weights and prunes the
+answers to noise; at 0.475 (measured on the MNIST '0') it potentiated the
+digit's rows and the false answers rose. "test" when no network exists yet
+(fresh, or after "build" / New network) runs the UNTRAINED BASELINE (STDP
+off, start weights; a later "train" continues the same network and
+patterns), and a test after training reports both. Once a network exists,
+"test" after a network setting changed is refused ("settings changed since
+this network was built"): "build", or restore the settings. With images say
+the neuron "detects" / "answers" an image; say it LEARNT only when the
+trained test has fewer false windows than the untrained baseline with the
+hits held - so run the baseline first. Learning shows on MNIST at 28 rows
+(nt_st_imgset "dataset", nt_st_img_size 28; 1 neuron, noise and background
+10 Hz, even spacing, share 0.5: the first "0" answered 7-11 of 18 empty
+windows untrained, 0-2 after 60 s of training, hits 17/17); the built-in
+28 x 28 digits and letters are already clean untrained, so they show
+detection, not learning. Known limit of the image input: several hidden
+images are not split one per neuron (MNIST "0", "1", "2" with 3 neurons:
+two neurons took the "0", none the "1"), and a neuron at start weight 1.0
+also answers other digits shown as distractors, before and after training.
+The view
 tabs are nt_st_tabs (nt_st_tab_raster live/replayed raster, nt_st_tab_net
 architecture, nt_st_tab_pat patterns, nt_st_tab_learn verdict with per-neuron
 TP/FN/FP/TN window counts). Setting nt_mode switches the whole Trainer
@@ -219,19 +240,23 @@ continuing from the current weights, and "test" plays a new stream around the
 same patterns with STDP off ("stream" / "stream_test" do the same and switch
 the mode for you). Change nt_st_jitter /
 nt_st_noise / nt_st_delete / nt_st_share between a stream and a stream_test to
-measure robustness; changing any other nt_st_* control or nt_seed starts a new
-network. nt_st_aplus / nt_st_aratio / nt_st_tplus / nt_st_tminus / nt_st_w0
+measure robustness; changing any other nt_st_* control or nt_seed makes
+"train" start a new network and "test" refuse (see above). nt_st_aplus / nt_st_aratio / nt_st_tplus / nt_st_tminus / nt_st_w0
 (STDP), nt_st_taum / nt_st_taus / nt_st_refr (neuron) and nt_st_inh /
 nt_st_tinh (lateral inhibition) are the rule's constants; their defaults are
 the validated paper values, so change them only with a stated reason.
-A run is good when every pattern has its own neuron (it answers the windows of
-that pattern - one section long, see the result - and stays quiet elsewhere)
-and false alarms are below 1 /s.
+A Poisson run is good when every pattern has its own neuron (it answers the
+windows of that pattern - one section long, see the result - and stays quiet
+elsewhere) and false alarms are below 1 /s. An image run detects an image when
+a neuron answers >= 90 % of its windows and <= 10 % of the others.
 With nt_st_synapse = "selected device" the weights are device conductances.
 nt_st_pulse = "calibrated" searches the pulse amplitudes so that one pulse of
 width nt_pwidth moves a device by one STDP step; "as set" uses nt_potamp /
-nt_depamp as they are. Whether a given device learns is an open question:
-report what you see. After a stream run you started, its result is sent to you.
+nt_depamp as they are (at start weight 1.0 the pulse is sized at weight 0.5,
+since at a bound one direction cannot move). Whether a given device learns
+is an open question: report what you see (one run, ECFET v2, calibrated,
+MNIST "0" at 28 rows, settings above, seed 1: empty windows answered 8 -> 1
+of 18 after 60 s of training, hits 17/17). After a stream run you started, its result is sent to you.
 """
 
 

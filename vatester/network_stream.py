@@ -10,7 +10,14 @@ each neuron take one pattern. Two inputs: the Poisson patterns of the papers
 images (spatio-temporal: one afferent per pixel row, one time bin per pixel
 column; the section is columns x bin ms) shown between background noise or
 distractor images. Train runs with STDP on; Test freezes the weights and
-plays a fresh stream around the same patterns. The network is its own (the
+plays a fresh stream around the same patterns. Test before any Train is the
+untrained baseline (a fresh network at its start weights, STDP off); a later
+Train continues that same network, and the verdict of a later Test shows
+both, so only that comparison can say that STDP learnt anything (with image
+input a neuron can detect the image untrained). The baseline is only run
+when no network exists yet (fresh, or after New network): once one exists,
+Test after a change of a network setting refuses instead of replacing it.
+The network is its own (the
 pixel-grid crossbar is too small for it) but uses the selected synapse
 device and power profile.
 
@@ -22,6 +29,7 @@ worker only posts queue messages (``nt_stream`` learning points,
 import math
 import threading
 import time
+from dataclasses import replace
 
 import dearpygui.dearpygui as dpg
 import numpy as np
@@ -35,6 +43,9 @@ IDEAL, DEVICE = "ideal weights", "selected device"
 STREAM_MODE = "unsupervised stream"    # value of the nt_mode combo
 CALIBRATED, AS_SET = "calibrated", "as set"
 CHUNK_S = 2.0                       # live-plot resolution
+# live Learning-tab series (tag nt_st_s_<key>): pattern windows answered %,
+# other windows answered %, false alarms /s, latency ms
+SERIES = ("hit", "oth", "fa", "lat")
 VIEW_HZ = 12.0                      # live raster snapshots per wall second
 
 # Learning-rule, neuron and inhibition constants of the stream network:
@@ -51,7 +62,15 @@ RULE = [
     ("nt_st_tminus", "tau- ms", "tau_minus", 33.7, 0.5, 200.0,
      "LTD window time constant"),
     ("nt_st_w0", "Start weight", "w_init", 0.475, 0.0, 1.0,
-     "initial weight of every synapse, 0-1 of the range"),
+     "initial weight of every synapse, 0-1 of the range. Image input sets it "
+     "to 1 (back to 0.475 for Poisson) unless you changed it. With the auto "
+     "threshold (scaled to the start weight) the untrained network answered "
+     "the same at 0.475 and 1 (MNIST '0', 1 and 3 neurons); at 1 STDP can "
+     "only lower weights, so it "
+     "prunes the answers to noise. Measured on the MNIST '0' at 28 rows, "
+     "noise 10 Hz: at 0.475, 60 s of training raised the false answers "
+     "(STDP potentiated the digit's rows under a fixed threshold); at 1 it "
+     "removed them"),
     ("nt_st_taum", "tau m ms", "tau_m", 10.0, 0.5, 200.0,
      "membrane time constant"),
     ("nt_st_taus", "tau s ms", "tau_s", 2.5, 0.1, 100.0,
@@ -89,8 +108,8 @@ STREAM_CONTROLS = [
     ("nt_st_spacing", "stream: random | even (every k-th section)"),
     ("nt_st_jitter", "stream: spike jitter ms"),
     ("nt_st_noise", "stream: extra noise spikes Hz on every afferent, inside "
-                    "the patterns too (switching input sets 10 Poisson / 0 "
-                    "images if untouched)"),
+                    "the patterns too (image input: on top of nt_st_bg in "
+                    "the empty windows, which are the ones answered falsely)"),
     ("nt_st_delete", "stream: fraction of pattern spikes deleted 0-1"),
     ("nt_st_thr", "stream: neuron threshold (0 = auto: 0.25 x afferents for "
                   "Poisson, 0.85 x weakest clean image peak for images)"),
@@ -138,6 +157,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
     _nt_stream_session = None       # neurovat.masquelier.Session
     _nt_stream_key = None           # settings the session was built for
     _nt_stream_last = None          # JSON-safe result of the last run
+    _nt_stream_baseline = None      # ... of the last untrained-baseline Test
+    _nt_stream_trained_s = 0.0      # seconds trained on the current session
     _nt_stream_error = None
     _nt_stream_agent = False        # the agent started the run in flight
     _nt_stream_rounds = 0           # agent-started runs since the last pause
@@ -157,9 +178,12 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         """Left-panel controls of the stream mode (inside ``nt_stream_group``)."""
         self._small("One continuous spike stream, no epochs and no labels: "
                     "hidden patterns recur in background activity. "
-                    "Train = STDP on, continuing from the weights learnt so "
+                    "Train = STDP on, continuing from the weights trained so "
                     "far. Test = STDP off, a new stream around the same "
-                    "patterns. New network = start again.",
+                    "patterns; Test before any Train = the untrained "
+                    "baseline, kept for comparison with later Tests. New "
+                    "network = start again (Test after changing a network "
+                    "setting asks for it rather than replace the network).",
                     color=C_MUTED, wrap=340)
         changed = self._nt_st_on_control
         with self._ctl_table():
@@ -198,7 +222,9 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                           tip="Indices of the hidden images, comma-separated "
                               "(0 = the first of the set). Each is one "
                               "pattern. Several images all drive the same "
-                              "rows, so one neuron tends to take them all.")
+                              "rows, so they are not split one per neuron "
+                              "(MNIST '0', '1', '2', 3 neurons: two took the "
+                              "'0', none the '1').")
             self._ctl_row("distractors", "nt_st_img_distract", "text",
                           hint="none", callback=changed,
                           tip="Indices of other images shown, unlabelled, in "
@@ -242,7 +268,11 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                           tip="Device synapses only. Calibrated: the "
                               "amplitudes are searched so that one pulse "
                               "on a device at the starting weight moves "
-                              "it by one STDP step (pulse width from "
+                              "it by one STDP step (at weight 0.5 when the "
+                              "start weight is below 0.1 or above 0.9, as "
+                              "for image input: at a bound one direction "
+                              "cannot move. 0.1, 0.9 and 0.5 are free "
+                              "choices made here, not tuned; pulse width from "
                               "'Synapse write pulses'); the values found are "
                               "logged. As set: the pot / dep amplitude "
                               "below stands for one STDP step, whatever "
@@ -257,11 +287,32 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                              "existing Data-tab loader; it downloads only when "
                              "the file is missing). For image set 'dataset'.",
                              wrap=300)
+            self._small("Start weight 1 for images (set when you pick image "
+                        "input, unless you changed it): STDP can then only "
+                        "lower weights and prunes the answers to noise. Test "
+                        "before Train gives the untrained baseline; only a "
+                        "trained Test with fewer false windows says it learnt.",
+                        color=C_MUTED, wrap=340)
+            self._small("Learning shows on MNIST at 28 rows (image set "
+                        "'dataset', Load MNIST). Measured, 1 neuron, noise and "
+                        "background 10 Hz, even spacing, share 0.5, 30 s "
+                        "Tests: the first '0' answered 7-11 of 18 empty "
+                        "windows untrained and 0-2 after 60 s of training, "
+                        "17/17 hits (seeds 1-3); the first '1' 18 and 16 -> "
+                        "1 and 2 (seeds 1, 2). The built-in 28 x 28 digits and "
+                        "letters are already clean untrained (their peak sits "
+                        "far above the noise): they show detection, not "
+                        "learning.",
+                        color=C_MUTED, wrap=340)
             self._small("Known limit: several hidden images are not split "
-                        "over several neurons (every image drives the same "
-                        "rows, one neuron takes them all), and a neuron "
-                        "trained on one image also answers other images shown "
-                        "as distractors. Hence the default: one image.",
+                        "one per neuron. MNIST '0', '1', '2' with 3 neurons, "
+                        "120 s of training (seed 1): two neurons took the "
+                        "'0', one of them also answers the '1' and '2', and "
+                        "no neuron took the '1'. A neuron for one image also "
+                        "answers other images shown as distractors (MNIST "
+                        "'0' with 1-9 as distractors, noise 0: before and "
+                        "after training). Hence the default: one image, no "
+                        "distractors.",
                         color=C_MUTED, wrap=340)
         with dpg.collapsing_header(label="Stream input", default_open=True):
             with self._ctl_table():
@@ -280,9 +331,10 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                 self._ctl_row("jitter ms", "nt_st_jitter", default=1.0)
                 self._ctl_row("noise Hz", "nt_st_noise", default=10.0,
                               tip="Extra random spikes on every afferent, "
-                                  "everywhere, inside the patterns too. "
-                                  "Switching the input sets it to 10 (Poisson) "
-                                  "or 0 (images) unless you changed it.")
+                                  "everywhere, inside the patterns too. With "
+                                  "image input it adds to 'background Hz' in "
+                                  "the empty windows, which are the windows "
+                                  "a neuron answers falsely.")
                 self._ctl_row("spike deletion", "nt_st_delete", default=0.0,
                               tip="Fraction of the pattern's spikes dropped "
                                   "at each presentation.")
@@ -301,7 +353,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             dpg.add_button(label="Paper defaults", width=-1,
                            callback=self.on_nt_stream_rule_defaults)
             self._small("Defaults: Masquelier et al. 2008, the values the "
-                        "benchmark is validated with. The two inhibition "
+                        "benchmark is validated with (except the start "
+                        "weight of image input: 1). The two inhibition "
                         "values are choices made here: a neuron that fires "
                         "resets the others and holds them back.",
                         color=C_MUTED, wrap=340)
@@ -326,20 +379,22 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
 
     def _nt_st_changed(self, tag):
         """A stream control changed (widget callback, bridge or agent set):
-        input-dependent rows, the noise default, and the previews."""
+        input-dependent rows, the start-weight default, and the previews."""
         try:
             if tag == "nt_st_input":
                 kind = sv.input_kind(self._nt_get("nt_st_input", sv.POISSON))
                 old = self._nt_st_input_shown
                 if kind != old:
                     self._nt_st_input_shown = kind
-                    noise = float(self._nt_get("nt_st_noise", 10.0))
-                    if noise == sv.NOISE_DEFAULT[old] and dpg.does_item_exist(
-                            "nt_st_noise"):
-                        dpg.set_value("nt_st_noise", sv.NOISE_DEFAULT[kind])
-                        self.log(f"[stream] input: {kind}; noise Hz set to its "
-                                 f"default for this input, "
-                                 f"{sv.NOISE_DEFAULT[kind]:g}")
+                    w0 = float(self._nt_get("nt_st_w0", sv.W0_DEFAULT[old]))
+                    if abs(w0 - sv.W0_DEFAULT[old]) < 1e-6 and \
+                            dpg.does_item_exist("nt_st_w0"):
+                        dpg.set_value("nt_st_w0", sv.W0_DEFAULT[kind])
+                        why = ("so STDP can only lower weights and prunes the "
+                               "answers to noise" if kind == sv.IMAGES
+                               else "the paper value")
+                        self.log(f"[stream] input: {kind}; start weight set "
+                                 f"to {sv.W0_DEFAULT[kind]:g} ({why})")
             if tag in ("nt_st_input", "nt_st_imgset"):
                 self._nt_st_show_input_rows()
             if tag in PREVIEW_TAGS or not tag:
@@ -386,7 +441,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                 if self._nt_devlabel_grid is None:
                     self._nt_devlabel_grid = dpg.get_value("nt_devlabel")
                 dpg.set_value("nt_devlabel", "Unsupervised stream: set the "
-                              "network on the left, then Train. Power profile "
+                              "network on the left, then Test (the untrained "
+                              "baseline) and Train. Power profile "
                               "and saved models belong to the other modes.")
             elif getattr(self, "_nt_devlabel_grid", None) is not None:
                 dpg.set_value("nt_devlabel", self._nt_devlabel_grid)
@@ -413,7 +469,10 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         self._nt_apply_mode()
 
     def on_nt_stream_rule_defaults(self, *_):
+        kind = sv.input_kind(self._nt_get("nt_st_input", sv.POISSON))
         for tag, _label, _field, default, *_rest in RULE:
+            if tag == "nt_st_w0":           # the start weight of this input
+                default = sv.W0_DEFAULT[kind]
             if dpg.does_item_exist(tag):
                 dpg.set_value(tag, default)
         self._nt_st_changed("")
@@ -603,11 +662,13 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         if self.trainer_running:
             return
         self._nt_stream_session = self._nt_stream_key = None
-        self._nt_stream_last = None
+        self._nt_stream_last = self._nt_stream_baseline = None
+        self._nt_stream_trained_s = 0.0
         self._nt_stream_clear()
         self._nt_st_rec = None
         self._nt_st_set_play(False)
-        self._nt_stream_say("new network - press Train", C_TEXT2)
+        self._nt_stream_say("new network - Test for the untrained baseline, "
+                            "or Train", C_TEXT2)
         self._nt_status("stream network reset", C_GREEN)
         self._nt_st_changed("")
 
@@ -617,11 +678,11 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             dpg.configure_item("nt_st_status", color=color)
 
     def _nt_stream_clear(self):
-        self._nt_stream_series = {"t": [], "hit": [], "fa": [], "lat": []}
+        self._nt_stream_series = {"t": [], **{k: [] for k in SERIES}}
         self._nt_stream_t0 = 0.0
-        for tag in ("nt_st_s_hit", "nt_st_s_fa", "nt_st_s_lat"):
-            if dpg.does_item_exist(tag):
-                dpg.set_value(tag, [[], []])
+        for k in SERIES:
+            if dpg.does_item_exist(f"nt_st_s_{k}"):
+                dpg.set_value(f"nt_st_s_{k}", [[], []])
 
     def _nt_stream_start(self, learn):
         if self.trainer_running:
@@ -634,15 +695,28 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             self._nt_stream_say(str(exc), C_RED)
             return
         fresh = self._nt_stream_session is None or key != self._nt_stream_key
-        if fresh and not learn:
-            self._nt_stream_error = "nothing to test: Train first"
-            self._nt_stream_say(self._nt_stream_error + " (a network setting "
-                                "changed, or no network yet)", C_RED)
+        if fresh and not learn and self._nt_stream_session is not None:
+            # a Test must not silently replace the network it is meant to
+            # test by an untrained one: the baseline is only for a network
+            # that does not exist yet (fresh app, or after New network)
+            self._nt_stream_error = ("settings changed since this network was "
+                                     "built: press New network, or restore "
+                                     "them")
+            self._nt_stream_say(self._nt_stream_error, C_RED)
             return
         if fresh:
             self._nt_stream_session = None
             self._nt_stream_key = key
+            self._nt_stream_baseline = None
+            self._nt_stream_trained_s = 0.0
             self._nt_stream_clear()
+        # Test on a network that has not been trained: the untrained baseline
+        # (a fresh session, STDP off, at its start weights); the session and
+        # its frozen patterns are kept, so a later Train continues it. (Train
+        # after a settings change still starts a new network, as before.)
+        untrained = not learn and self._nt_stream_trained_s <= 0.0
+        cfg["untrained"] = untrained
+        cfg["trained_s"] = self._nt_stream_trained_s
         self._nt_st_set_play(False)
         images = cfg["image"] is not None
         cfg["t0_s"] = self._nt_stream_t0
@@ -666,10 +740,15 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         if dpg.does_item_exist("nt_st_s_hit"):
             dpg.configure_item("nt_st_s_hit", label=f"pattern windows answered "
                                f"({rule_txt})")
+        if dpg.does_item_exist("nt_st_s_lat"):
+            dpg.configure_item("nt_st_s_lat", label="first-spike latency (ms)"
+                               if images else "latency (ms)")
         self.trainer_running = True
         self._trainer_stop = False
         self._nt_busy(True)
-        what = "training (STDP on)" if learn else "testing (STDP off)"
+        what = ("training (STDP on)" if learn else
+                "testing the UNTRAINED baseline (STDP off, start weights)"
+                if untrained else "testing (STDP off)")
         self._nt_status(f"stream {what}", C_AMBER)
         self._nt_stream_say(f"{what} - {cfg['seconds']:g} s of stream...",
                             C_AMBER)
@@ -716,8 +795,15 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                     energy = EnergyMeter([(cfg["n_out"], cfg["aff"])],
                                          [d["kind"]], d["power"], 1e-3)
                     a_minus = P.a_minus_ratio * P.a_plus
+                    # the pulse is sized on a device at the start weight; at
+                    # a bound of the range (image input starts at 1) one
+                    # direction cannot move, so size it mid-range instead.
+                    # 0.1 / 0.9 (the bounds band) and 0.5 (mid-range) are
+                    # free choices, not tuned to make any device learn
+                    w_cal = (P.w_init if 0.1 <= P.w_init <= 0.9 else 0.5)
                     if d["calibrate"]:
-                        w = calibrate_write(array, P, d["width"], d["pot"])
+                        w = calibrate_write(array, replace(P, w_init=w_cal),
+                                            d["width"], d["pot"])
                     else:
                         sign = array.potentiation_sign(d["pot"], d["width"])
                         w = {"pot_sign": sign, "pulse_width": d["width"],
@@ -725,11 +811,15 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                              "dep_gain": d["dep"] / a_minus if a_minus > 0 else 0.0,
                              "pot_amp": d["pot"], "dep_amp": d["dep"],
                              "pot_step": pulse_step(array, sign * d["pot"],
-                                                    d["width"], P.w_init),
+                                                    d["width"], w_cal),
                              "dep_step": -pulse_step(array, -sign * d["dep"],
-                                                     d["width"], P.w_init)}
+                                                     d["width"], w_cal)}
                     unit = "A" if d["kind"] == "current" else "V"
                     how = CALIBRATED if d["calibrate"] else AS_SET
+                    if w_cal != P.w_init:
+                        how += (f", sized at weight {w_cal:g}: the start "
+                                f"weight {P.w_init:g} is at a bound of the "
+                                "range, where one direction cannot move")
                     self.q.put(("log", (
                         f"[stream] write pulses ({how}): potentiation "
                         f"{w['pot_amp']:.3g} {unit} -> +{w['pot_step']:.4f} "
@@ -748,7 +838,12 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             images = img is not None
             pms = session.P.pattern_ms
             arch = cfg["arch"]
-            acc = {"n": 0, "pat": 0, "hit": 0, "fa": 0, "lat": []}
+            # per live chunk: sections, pattern sections and those answered,
+            # false-alarm spikes, latencies, and the other (non-pattern)
+            # sections and those with at least one output spike - the
+            # learning signal of image input (STDP prunes those answers)
+            acc = {"n": 0, "pat": 0, "hit": 0, "fa": 0, "lat": [],
+                   "oth": 0, "oth_hit": 0}
             per = max(int(round(CHUNK_S * 1000.0 / pms)), 1)
             live = {"view": None, "t": [], "j": [], "wall": 0.0}
             net_idx = np.asarray(arch["net_idx"], int)
@@ -788,15 +883,20 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                         acc["lat"].append(first)
                 else:
                     acc["fa"] += len(info["spikes"])
+                    acc["oth"] += 1
+                    acc["oth_hit"] += bool(info["spikes"])
                 if acc["n"] >= per:
                     span = acc["n"] * pms / 1000.0
                     self.q.put(("nt_stream", {
                         "t_s": t_ms / 1000.0,
                         "hit": 100.0 * acc["hit"] / acc["pat"] if acc["pat"] else None,
+                        "oth": (100.0 * acc["oth_hit"] / acc["oth"]
+                                if acc["oth"] else None),
                         "fa": acc["fa"] / span,
                         "lat": float(np.mean(acc["lat"])) if acc["lat"] else None,
                         "spikes": info["post_spikes"]}))
-                    acc.update(n=0, pat=0, hit=0, fa=0, lat=[])
+                    acc.update(n=0, pat=0, hit=0, fa=0, lat=[], oth=0,
+                               oth_hit=0)
                 return not self._trainer_stop
 
             changes = {"pattern_frac": cfg["share"], "jitter_ms": cfg["jitter"],
@@ -809,6 +909,13 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             owner = res["pattern_owner"]
             lats = [res["per_neuron"][j]["mean_latency_ms"]
                     for j in owner.values()]
+            # first spike per answered window of each neuron's best pattern,
+            # over the scored windows (the engine's mean is over all spikes)
+            t_score = (res["simulated_s"] - res["score_window_s"]) * 1000.0
+            first = [sv.first_spike_latency(
+                res["post_t_ms"], res["post_neuron"], res["post_pattern"],
+                res["post_latency_ms"], t_score, q["neuron"],
+                q["best_pattern"]) for q in res["per_neuron"]]
             out["weights"] = np.atleast_2d(np.array(res["weights"], float))
             out["view"] = sv.RunView(session.stream, pms, cfg["n_out"],
                                      cfg["threshold"], cfg["t0_s"],
@@ -821,8 +928,13 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             out["u"] = res.get("u_ms")
             out["arch"] = arch
             out["share"] = cfg["share"]
+            untrained = bool(cfg.get("untrained"))
             out["result"] = _clean({
-                "phase": "train" if learn else "test",
+                "phase": ("train" if learn else
+                          "untrained baseline" if untrained else "test"),
+                "untrained": untrained,
+                "trained_s": cfg.get("trained_s", 0.0),
+                "first_spike_latency_ms": first,
                 "stopped": bool(self._trainer_stop),
                 "input": cfg["input"],
                 "images": ({k: img[k] for k in ("set", "size", "picks",
@@ -849,11 +961,12 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                 "per_neuron": res["per_neuron"]})
             if d is not None:
                 phase = "train" if learn else "eval"
+                what = ("training" if learn else "test, untrained baseline"
+                        if untrained else "test")
                 out["energy"] = (
                     f"power model: {d['power_note']}\n\n" + format_report(
                         session.kw["energy"].report(phase),
-                        f"Stream {'training' if learn else 'test'} - "
-                        f"{d['label']}"))
+                        f"Stream {what} - {d['label']}"))
         except Exception as ex:                          # noqa: BLE001
             out["error"] = str(ex) or repr(ex)
             self.q.put(("log", f"[stream] error: {ex!r}"))
@@ -864,9 +977,9 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
     def _on_nt_stream(self, d):
         s = self._nt_stream_series
         s["t"].append(self._nt_stream_t0 + d["t_s"])
-        for k in ("hit", "fa", "lat"):
-            s[k].append(d[k])
-        for k in ("hit", "fa", "lat"):
+        for k in SERIES:
+            s[k].append(d.get(k))
+        for k in SERIES:
             pts = [(t, v) for t, v in zip(s["t"], s[k]) if v is not None]
             dpg.set_value(f"nt_st_s_{k}", [[p[0] for p in pts],
                                            [p[1] for p in pts]])
@@ -874,7 +987,9 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             dpg.fit_axis_data(ax)
         dpg.set_axis_limits("nt_st_y1", -3.0, 106.0)
         hit = "-" if d["hit"] is None else f"{d['hit']:.0f} %"
+        oth = "-" if d.get("oth") is None else f"{d['oth']:.0f} %"
         self._nt_stream_say(f"{s['t'][-1]:.0f} s of stream - hit rate {hit}, "
+                            f"other windows answered {oth}, "
                             f"false alarms {d['fa']:.1f} /s, "
                             f"{d['spikes']} output spikes this run", C_AMBER)
 
@@ -894,6 +1009,104 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                        f"{'-' if ba is None else f'{ba:.2f}'}")
         return out
 
+    @staticmethod
+    def _nt_st_phase_text(r):
+        stopped = " (stopped)" if r.get("stopped") else ""
+        if r.get("untrained"):
+            return f"Test, UNTRAINED baseline (STDP off, start weights){stopped}"
+        if r["phase"] == "train":
+            return f"Training (STDP on){stopped}"
+        return (f"Test after {r.get('trained_s') or 0:.0f} s of training "
+                f"(STDP off){stopped}")
+
+    def _nt_st_poisson_verdict(self, r, learn, base):
+        """The Poisson verdict: the engine's 'learnt' criterion (the paper's
+        kind of test), the window counts, and the baseline if there is one."""
+        own = ", ".join(f"pattern {int(p) + 1} -> neuron {j + 1}"
+                        for p, j in sorted(r["pattern_owner"].items()))
+        lat = ("-" if r["mean_latency_ms"] is None
+               else f"{r['mean_latency_ms']:.1f} ms")
+        wins = self._nt_st_window_lines(r)
+        good = (r["patterns_learnt"] == r["patterns"]
+                and r["false_alarms_per_s"] < 1.0 and not r.get("untrained"))
+        head = (self._nt_st_phase_text(r) if r.get("untrained") else
+                f"{'Training' if learn else 'Test'}"
+                f"{' (stopped)' if r['stopped'] else ''}")
+        text = (f"{head}: "
+                f"hit = {r['hit_rule']} ({r['pattern_ms']:g} ms windows). "
+                f"{r['patterns_learnt']} of {r['patterns']} pattern(s) "
+                f"learnt: answered in at least 90 % of their windows by a "
+                f"neuron that stays quiet elsewhere ({own or 'none'}); "
+                f"{r['false_alarms_per_s']:.2f} false alarms /s; latency {lat}; "
+                f"{r['post_spikes']} output spikes, {r['writes']:,} writes. "
+                f"Windows: " + "; ".join(wins) + ". ")
+        if base is not None:
+            text += ("Untrained baseline of this network: "
+                     + "; ".join(self._nt_st_window_lines(base)) + ". ")
+        text += (f"Scored on the last {r['score_window_s']:.0f} s of "
+                 f"{r['simulated_s']:.0f} s.")
+        return text, good
+
+    def _nt_st_image_verdict(self, r, base):
+        """ONE statement for image input: per hidden image, does a neuron
+        detect it (>= 90 % of its windows, <= 10 % of the others); and, with
+        an untrained baseline, what training changed. 'Learnt' only from
+        that comparison."""
+        img = r.get("images") or {}
+        picks, labels = img.get("picks") or [], img.get("labels") or []
+
+        def name(p):
+            return (f"image {picks[p]} '{labels[p]}'" if p < len(picks)
+                    else f"pattern {p + 1}")
+        rows = sv.pattern_rows(r["per_neuron"], r["patterns"])
+        lat = r.get("first_spike_latency_ms") or []
+        parts = []
+        for row in rows:
+            p, j = row["pattern"], row["neuron"]
+            if j is None:
+                parts.append(f"{name(p)}: no neuron answers it best")
+                continue
+            hit, false = sv.window_rates(row["windows"])
+            l = lat[j] if j < len(lat) else None
+            parts.append(
+                f"{name(p)}: neuron {j + 1} answers {100 * hit:.0f} % of its "
+                f"windows and {100 * false:.0f} % of the others "
+                f"({sv.window_text(row['windows'])}) - "
+                + ("detects it" if row["detects"] else "does NOT detect it")
+                + ("" if l is None else
+                   f"; first-spike latency {l:.0f} ms after onset"))
+        text = (f"{self._nt_st_phase_text(r)}: hit = {r['hit_rule']} "
+                f"({r['pattern_ms']:g} ms windows). " + "; ".join(parts) + ".")
+        good = (not r.get("untrained")) and all(x["detects"] for x in rows)
+        if base is not None:
+            brows = sv.pattern_rows(base["per_neuron"], base["patterns"])
+            this = "trained" if r["phase"] == "test" else "this training run"
+            text += " (untrained baseline: " + "; ".join(
+                f"{name(b['pattern'])}: untrained {sv.window_text(b['windows'])}"
+                f"; {this} {sv.window_text(t['windows'])}"
+                for b, t in zip(brows, rows)) + ")."
+            diff = sv.stream_differs(base.get("stream"), r.get("stream"))
+            if r["phase"] != "test":
+                text += " Test after training to compare."
+            elif diff:
+                text += (" Not comparable: the baseline ran with other stream "
+                         f"settings ({', '.join(diff)}).")
+            else:
+                text += " " + " ".join(
+                    f"{name(b['pattern'])}: "
+                    f"{sv.training_effect(b['windows'], t['windows'])[1]}."
+                    for b, t in zip(brows, rows))
+        elif not r.get("untrained"):
+            text += (" No untrained baseline of this network (New network, "
+                     "then Test before Train), so this does not show whether "
+                     "training did it.")
+        text += (f" Detects = answers at least {100 * sv.DETECT_HIT:.0f} % of "
+                 f"its windows and at most {100 * sv.DETECT_FALSE:.0f} % of "
+                 f"the others. {r['post_spikes']} output spikes, "
+                 f"{r['writes']:,} writes. Scored on the last "
+                 f"{r['score_window_s']:.0f} s of {r['simulated_s']:.0f} s.")
+        return text, good
+
     def _on_nt_stream_done(self, out):
         self.trainer_running = False
         self._nt_busy(False)
@@ -903,6 +1116,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
         if out["error"]:
             self._nt_stream_error = out["error"]
             self._nt_stream_session = self._nt_stream_key = None
+            self._nt_stream_baseline = None
+            self._nt_stream_trained_s = 0.0
             self._nt_status("stream failed", C_RED)
             self._nt_stream_say("failed: " + out["error"], C_RED)
             if agent:
@@ -910,37 +1125,29 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
             return
         r = self._nt_stream_last = out["result"]
         self._nt_stream_t0 += r["simulated_s"]
-        images = r["input"] == sv.IMAGES
-        own = ", ".join(f"pattern {int(p) + 1} -> neuron {j + 1}"
-                        for p, j in sorted(r["pattern_owner"].items()))
-        lat = ("-" if r["mean_latency_ms"] is None
-               else f"{r['mean_latency_ms']:.1f} ms")
-        wins = self._nt_st_window_lines(r)
-        if images:
-            per = r["per_neuron"]
-            covered = {q["best_pattern"] for q in per
-                       if (q["windows"]["balanced_accuracy"] or 0) >= 0.9}
-            good = len(covered) == r["patterns"]
+        if out["learn"]:
+            self._nt_stream_trained_s += r["simulated_s"]
+        untrained = bool(r.get("untrained"))
+        if untrained:
+            self._nt_stream_baseline = r
+        base = None if untrained else self._nt_stream_baseline
+        if r["input"] == sv.IMAGES:
+            text, good = self._nt_st_image_verdict(r, base)
         else:
-            good = (r["patterns_learnt"] == r["patterns"]
-                    and r["false_alarms_per_s"] < 1.0)
-        text = (f"{'Training' if out['learn'] else 'Test'}"
-                f"{' (stopped)' if r['stopped'] else ''}: "
-                f"hit = {r['hit_rule']} ({r['pattern_ms']:g} ms windows). "
-                f"{r['patterns_learnt']} of {r['patterns']} pattern(s) "
-                f"learnt: answered in at least 90 % of their windows by a "
-                f"neuron that stays quiet elsewhere ({own or 'none'}); "
-                f"{r['false_alarms_per_s']:.2f} false alarms /s; latency {lat}; "
-                f"{r['post_spikes']} output spikes, {r['writes']:,} writes. "
-                f"Windows: " + "; ".join(wins) + ". "
-                f"Scored on the last {r['score_window_s']:.0f} s of "
-                f"{r['simulated_s']:.0f} s.")
+            text, good = self._nt_st_poisson_verdict(r, out["learn"], base)
         dpg.set_value("nt_st_verdict", text)
         dpg.configure_item("nt_st_verdict", color=C_GREEN if good else C_AMBER)
-        self._nt_status("stream done", C_GREEN if good else C_AMBER)
-        self._nt_stream_say(f"done - {self._nt_stream_t0:.0f} s of stream in "
-                            "total. Train continues from here; Test checks "
-                            "without learning.", C_TEXT2)
+        if untrained:
+            self._nt_status("stream untrained baseline done", C_TEXT2)
+            self._nt_stream_say(
+                f"untrained baseline done ({self._nt_stream_t0:.0f} s of "
+                "stream in total) and kept: Train continues this same network "
+                "and patterns; a Test after it shows both.", C_TEXT2)
+        else:
+            self._nt_status("stream done", C_GREEN if good else C_AMBER)
+            self._nt_stream_say(f"done - {self._nt_stream_t0:.0f} s of stream "
+                                "in total. Train continues from here; Test "
+                                "checks without learning.", C_TEXT2)
         self.log("[stream] " + text)
         if dpg.does_item_exist("nt_st_table_cap"):
             dpg.set_value("nt_st_table_cap", f"SPIKES PER {r['pattern_ms']:g} ms "
@@ -989,18 +1196,49 @@ class NetworkStreamMixin(NetworkStreamViewsMixin):
                f"{r['images']['distract'] or 'none'}"
                if r.get("images") else f"{r['afferents']} afferents, "
                f"{r['patterns']} Poisson pattern(s)")
-        return [
+        images = bool(r.get("images"))
+        if images:
+            rows = sv.pattern_rows(r["per_neuron"], r["patterns"])
+            fl = r.get("first_spike_latency_ms") or []
+            judged = (
+                f"  hit rule: {r['hit_rule']}; detection (>= "
+                f"{100 * sv.DETECT_HIT:.0f} % of its windows, <= "
+                f"{100 * sv.DETECT_FALSE:.0f} % of the others) per hidden "
+                "image: " + str([bool(x["detects"]) for x in rows])
+                + f"; first-spike latency per neuron (ms): "
+                + str([None if v is None else round(v, 1) for v in fl])
+                + f"; writes {r['writes']}. An image neuron can detect "
+                "untrained; it LEARNT only if trained false windows are below "
+                "the untrained baseline's with hits held.")
+        else:
+            judged = (
+                f"  hit rule: {r['hit_rule']}; patterns learnt "
+                f"{r['patterns_learnt']}/{r['patterns']} "
+                f"(pattern -> neuron, 0-based: {r['pattern_owner']}), false "
+                f"alarms {r['false_alarms_per_s']:.2f}/s, latency "
+                f"{r['mean_latency_ms']} ms, writes {r['writes']}")
+        lines = [
             f"stream mode, last run ({r['phase']}, {r['synapses']}): {src}, "
             f"{r['neurons']} neuron(s), {r['simulated_s']:.0f} s, threshold "
-            f"{r['threshold']:.4g} ({r['threshold_rule']}), section "
-            f"{r['pattern_ms']:g} ms, stream {r['stream']}",
-            f"  hit rule: {r['hit_rule']}; patterns learnt "
-            f"{r['patterns_learnt']}/{r['patterns']} "
-            f"(pattern -> neuron, 0-based: {r['pattern_owner']}), false alarms "
-            f"{r['false_alarms_per_s']:.2f}/s, latency {r['mean_latency_ms']} "
-            f"ms, writes {r['writes']}",
+            f"{r['threshold']:.4g} ({r['threshold_rule']}), start weight "
+            f"{r['rule'].get('w_init')}, section {r['pattern_ms']:g} ms, "
+            f"stream {r['stream']}, trained so far "
+            f"{self._nt_stream_trained_s:.0f} s",
+            judged,
             "  windows: " + "; ".join(self._nt_st_window_lines(r)),
             f"  spikes per {r['pattern_ms']:g} ms window, neuron x (patterns..., "
             "no pattern): "
             + str([[round(v, 2) for v in row] for row in r["spikes_per_window"]]),
         ]
+        base = self._nt_stream_baseline
+        if base is not None and base is not r:
+            lines.append(
+                "  untrained baseline of this network (stream "
+                f"{base['stream']}): windows "
+                + "; ".join(self._nt_st_window_lines(base))
+                + f" | last run ({r['phase']}): "
+                + "; ".join(self._nt_st_window_lines(r)))
+        elif base is None and not r.get("untrained"):
+            lines.append("  no untrained baseline of this network (Test "
+                         "before the first Train records one).")
+        return lines

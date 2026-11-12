@@ -17,7 +17,14 @@ AUTO_THR = 0.85              # image threshold = AUTO_THR x weakest clean peak
 RASTER_SHOWN = 60            # Poisson: afferents drawn in the raster
 NET_SHOWN = 24               # Poisson: afferents drawn in the architecture
 U_BUDGET = 2400.0            # record u only when seconds x neurons <= this
-NOISE_DEFAULT = {POISSON: 10.0, IMAGES: 0.0}   # nt_st_noise per input
+# nt_st_w0 per input. Images start at 1.0. The auto threshold is 0.85 x the
+# image's peak AT THE START WEIGHTS, so the untrained network answered the
+# same at 0.475 and 1.0 (measured on the MNIST '0', 1 and 3 neurons).
+# What differs is what STDP can do: at 1.0 it can only lower weights and
+# prunes the answers to noise; at 0.475 it potentiated the digit's rows under
+# the fixed threshold and the false answers rose (MNIST '0', 60 s).
+W0_DEFAULT = {POISSON: 0.475, IMAGES: 1.0}
+DETECT_HIT, DETECT_FALSE = 0.9, 0.1   # image verdict: >= 90 % hits, <= 10 % others
 
 
 def input_kind(value):
@@ -168,6 +175,95 @@ def section_hit(spikes, images):
     if images:
         return True
     return 1 in np.bincount([s[1] for s in spikes])
+
+
+def first_spike_latency(post_t, post_j, post_lab, post_lat, t0_ms, neuron,
+                        pattern):
+    """Mean ms from window onset to the FIRST spike of ``neuron`` in each
+    window of ``pattern`` it answered, over the windows that start at or
+    after ``t0_ms`` (the scored part of the run). None if it answered none."""
+    t = np.asarray(post_t, float)
+    lat = np.asarray(post_lat, float)
+    m = ((np.asarray(post_j, int) == int(neuron))
+         & (np.asarray(post_lab, int) == int(pattern)) & np.isfinite(lat))
+    onset = np.round(t - np.where(np.isfinite(lat), lat, 0.0), 6)
+    m &= onset >= float(t0_ms) - 1e-6
+    if not m.any():
+        return None
+    first = {}
+    for o, v in zip(onset[m].tolist(), lat[m].tolist()):
+        first[o] = min(first.get(o, math.inf), v)
+    return float(np.mean(list(first.values())))
+
+
+def window_rates(w):
+    """(share of pattern windows answered, share of other windows answered)."""
+    pos, neg = w["tp"] + w["fn"], w["fp"] + w["tn"]
+    return (w["tp"] / pos if pos else 0.0, w["fp"] / neg if neg else 0.0)
+
+
+def detects(w):
+    """The image verdict: answers >= 90 % of its windows, <= 10 % of others."""
+    if not w:
+        return False
+    hit, false = window_rates(w)
+    return hit >= DETECT_HIT and false <= DETECT_FALSE
+
+
+def window_text(w):
+    if not w:
+        return "no neuron"
+    ba = w.get("balanced_accuracy")
+    return (f"TP {w['tp']} FN {w['fn']} FP {w['fp']} TN {w['tn']}, balanced "
+            f"acc {'-' if ba is None else f'{ba:.2f}'}")
+
+
+def pattern_rows(per_neuron, n_patterns):
+    """Per hidden pattern: the neuron that answers it best (among those whose
+    best pattern it is), its window counts, and whether it detects it."""
+    rows = []
+    for p in range(int(n_patterns)):
+        cand = [q for q in per_neuron if int(q["best_pattern"]) == p]
+        if not cand:
+            rows.append({"pattern": p, "neuron": None, "windows": None,
+                         "detects": False})
+            continue
+        q = max(cand, key=lambda q: (detects(q["windows"]),
+                                     q["windows"]["balanced_accuracy"] or 0.0))
+        rows.append({"pattern": p, "neuron": int(q["neuron"]),
+                     "windows": q["windows"], "detects": detects(q["windows"])})
+    return rows
+
+
+COMPARED = ("share", "spacing", "jitter", "noise", "delete", "bg")
+
+
+def stream_differs(a, b):
+    """Stream settings (``result['stream']``) in which two runs differ."""
+    return [k for k in COMPARED if (a or {}).get(k) != (b or {}).get(k)]
+
+
+def training_effect(base, trained):
+    """What training changed for one pattern, from the window counts of the
+    untrained baseline and of the trained run: (learnt?, text)."""
+    if not base or not trained:
+        return False, "no neuron answers it in one of the two runs"
+    bh, bf = window_rates(base)
+    th, tf = window_rates(trained)
+    change = (f"other windows answered {100 * bf:.0f} % -> {100 * tf:.0f} %, "
+              f"pattern windows {100 * bh:.0f} % -> {100 * th:.0f} %")
+    held = th >= min(bh, DETECT_HIT)
+    if held and tf < bf:
+        line = ("it now detects it" if detects(trained) else
+                f"still above the {100 * DETECT_FALSE:.0f} % detection line")
+        return True, (f"learnt: training pruned the false answers with the "
+                      f"hits held ({change}); {line}")
+    if detects(trained) and detects(base):
+        return False, ("detected already untrained, so training added "
+                       f"nothing measurable ({change})")
+    if tf > bf or th < bh:
+        return False, f"training made it worse ({change})"
+    return False, f"no learning shown ({change})"
 
 
 def view_window_ms(value, images, pattern_ms, share):

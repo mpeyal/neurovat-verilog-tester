@@ -165,3 +165,52 @@ def test_run_view_distractors_and_poisson_sample():
     assert ys and max(ys) < shown.size
     x, y = sv.frozen_raster(sp.stream.copies[0], shown)
     assert len(x) == len(y) and (not y or max(y) < shown.size)
+
+
+def test_first_spike_latency_takes_the_first_spike_of_each_answered_window():
+    # windows of 100 ms starting at 0, 200, 400; neuron 0 answers 0 and 400
+    post_t = [12.0, 30.0, 55.0, 160.0, 408.0, 420.0, 230.0]
+    post_j = [0, 0, 0, 0, 0, 0, 1]
+    post_lab = [0, 0, 0, -1, 0, 0, 0]
+    post_lat = [12.0, 30.0, 55.0, np.nan, 8.0, 20.0, 30.0]
+    assert sv.first_spike_latency(post_t, post_j, post_lab, post_lat, 0.0,
+                                  0, 0) == pytest.approx(10.0)    # (12 + 8) / 2
+    # only windows starting in the scored part count
+    assert sv.first_spike_latency(post_t, post_j, post_lab, post_lat, 300.0,
+                                  0, 0) == pytest.approx(8.0)
+    assert sv.first_spike_latency(post_t, post_j, post_lab, post_lat, 0.0,
+                                  0, 1) is None
+
+
+def test_detection_and_training_effect_wording():
+    clean = {"tp": 17, "fn": 0, "fp": 0, "tn": 18, "balanced_accuracy": 1.0}
+    noisy = {"tp": 17, "fn": 0, "fp": 8, "tn": 10, "balanced_accuracy": 0.78}
+    assert sv.detects(clean) and not sv.detects(noisy) and not sv.detects(None)
+    assert sv.window_rates(noisy) == pytest.approx((1.0, 8 / 18))
+    learnt, text = sv.training_effect(noisy, clean)
+    assert learnt and text.startswith("learnt") and "now detects" in text
+    # 11/18 -> 2/18 false with every hit held: learnt, though 2/18 is just
+    # above the 10 % detection line
+    eleven = {"tp": 17, "fn": 0, "fp": 11, "tn": 7, "balanced_accuracy": 0.69}
+    two = {"tp": 17, "fn": 0, "fp": 2, "tn": 16, "balanced_accuracy": 0.94}
+    assert not sv.detects(two)
+    learnt, text = sv.training_effect(eleven, two)
+    assert learnt and "still above" in text
+    lost = {"tp": 10, "fn": 7, "fp": 0, "tn": 18, "balanced_accuracy": 0.79}
+    assert not sv.training_effect(noisy, lost)[0]       # hits not held
+    learnt, text = sv.training_effect(clean, clean)
+    assert not learnt and "already" in text
+    learnt, text = sv.training_effect(clean, noisy)
+    assert not learnt and "worse" in text
+    assert sv.stream_differs({"noise": 10.0, "bg": 10.0},
+                             {"noise": 20.0, "bg": 10.0}) == ["noise"]
+    per = [{"neuron": 0, "best_pattern": 0, "windows": noisy},
+           {"neuron": 1, "best_pattern": 0, "windows": clean}]
+    rows = sv.pattern_rows(per, 2)
+    assert rows[0]["neuron"] == 1 and rows[0]["detects"]
+    assert rows[1]["neuron"] is None and not rows[1]["detects"]
+
+
+def test_image_input_starts_at_weight_one():
+    assert sv.W0_DEFAULT[sv.POISSON] == 0.475       # the paper value, unchanged
+    assert sv.W0_DEFAULT[sv.IMAGES] == 1.0

@@ -58,11 +58,32 @@ def main():
             # Poisson input, defaults, short run
             set_("nt_st_aff", 200)
             set_("nt_st_seconds", 4)
+            # Test first: the untrained baseline freezes the Poisson patterns
+            app._nt_stream_start(False)
+            assert app.trainer_running, app._nt_stream_error
+            pump(app)
+            r = app._nt_stream_last
+            assert r["phase"] == "untrained baseline" and r["writes"] == 0
+            assert "UNTRAINED baseline" in dpg.get_value("nt_st_verdict")
+            frozen = app._nt_stream_session.copies
+            assert frozen and all(len(a) for a, _t in frozen)
             app._nt_stream_start(True)
             views = pump(app)
             r = app._nt_stream_last
             assert r and r["input"] == sv.POISSON and r["pattern_ms"] == 50.0
+            assert r["phase"] == "train"
+            for (a1, t1), (a2, t2) in zip(frozen,
+                                          app._nt_stream_session.copies):
+                assert (a1 == a2).all() and (t1 == t2).all()
+            assert "Untrained baseline of this network" in dpg.get_value(
+                "nt_st_verdict")
             assert views > 0, "no live raster snapshot drawn"
+            # the live series, the other-windows one included
+            for k in ("hit", "oth", "fa"):
+                xs, ys = dpg.get_value(f"nt_st_s_{k}")[:2]
+                assert xs, f"empty live series {k}"
+            assert all(0.0 <= v <= 100.0 for v in
+                       dpg.get_value("nt_st_s_oth")[1])
             assert app._nt_st_rec is not None
             assert dpg.get_value("nt_st_r_bg")[0], "empty Poisson raster"
             assert "exactly one" in dpg.get_value("nt_st_verdict")
@@ -70,23 +91,87 @@ def main():
             for tab in ("nt_st_tab_net", "nt_st_tab_pat", "nt_st_tab_raster"):
                 assert set_("nt_st_tabs", tab)
                 frames(app, 2)
-            # image input: noise default swaps, rows switch
+            # image input: the start weight swaps to 1 (noise stays), rows
+            # switch
             assert set_("nt_st_input", "images")
             assert dpg.get_value("nt_st_input") == sv.IMAGES
-            assert dpg.get_value("nt_st_noise") == 0.0
+            assert dpg.get_value("nt_st_noise") == 10.0
+            assert dpg.get_value("nt_st_w0") == sv.W0_DEFAULT[sv.IMAGES]
+            assert any("start weight set to 1" in s for s in app._log_lines)
             row = dpg.get_item_parent("nt_st_aff")
             assert not dpg.get_item_configuration(row)["show"]
             set_("nt_st_neurons", 1)
             set_("nt_st_spacing", "even")
             set_("nt_st_seconds", 6)
+            # the trained Poisson network still exists: a Test with other
+            # settings refuses rather than replace it by an untrained one
+            poisson = app._nt_stream_session
+            app._nt_stream_start(False)
+            assert not app.trainer_running
+            assert "settings changed" in app._nt_stream_error
+            assert app._nt_stream_session is poisson
+            # Test first: the untrained baseline on a fresh network
+            app.on_nt_stream_reset()
+            assert app._nt_stream_session is None
+            app._nt_stream_start(False)
+            assert app.trainer_running, app._nt_stream_error
+            pump(app)
+            r = app._nt_stream_last
+            assert r["phase"] == "untrained baseline" and r["untrained"]
+            assert r["input"] == sv.IMAGES and r["pattern_ms"] == 140.0
+            assert r["rule"]["w_init"] == 1.0
+            assert app._nt_stream_baseline is r
+            verdict = dpg.get_value("nt_st_verdict")
+            assert "UNTRAINED baseline" in verdict and "learnt" not in verdict
+            assert any("UNTRAINED baseline" in s for s in app._log_lines)
+            session = app._nt_stream_session
+            assert session is not None and session.runs == 1
+            copies = session.copies
             app._nt_stream_start(True)
             pump(app)
             r = app._nt_stream_last
-            assert r["input"] == sv.IMAGES and r["pattern_ms"] == 140.0
+            assert app._nt_stream_session is session         # the same network
+            assert len(session.copies) == len(copies)        # and patterns
+            for (a1, t1), (a2, t2) in zip(copies, session.copies):
+                assert (a1 == a2).all() and (t1 == t2).all()
             assert "at least one" in r["hit_rule"]
+            assert app._nt_stream_trained_s == r["simulated_s"]
             app._nt_stream_start(False)
             pump(app)
-            assert app._nt_stream_last["phase"] == "test"
+            r = app._nt_stream_last
+            assert r["phase"] == "test" and not r["untrained"]
+            verdict = dpg.get_value("nt_st_verdict")
+            assert "untrained baseline:" in verdict and "untrained TP" in verdict
+            assert "trained TP" in verdict and "of training" in verdict
+            assert all(v is None or 0.0 <= v < 140.0
+                       for v in r["first_spike_latency_ms"])
+            ctx = "\n".join(app._nt_stream_context())
+            assert "untrained baseline of this network" in ctx
+            assert "detection" in ctx and "patterns learnt" not in ctx
+            # Train, then a key setting changes: Test refuses and leaves the
+            # trained network, its baseline and the last result alone
+            last, base = app._nt_stream_last, app._nt_stream_baseline
+            trained = app._nt_stream_trained_s
+            set_("nt_st_thr", 25.0)
+            app._nt_stream_start(False)
+            assert not app.trainer_running
+            assert app._nt_stream_error == (
+                "settings changed since this network was built: press New "
+                "network, or restore them")
+            assert app._nt_stream_error in dpg.get_value("nt_st_status")
+            assert app._nt_stream_session is session
+            assert app._nt_stream_trained_s == trained > 0.0
+            assert app._nt_stream_baseline is base
+            assert app._nt_stream_last is last
+            # restored: Test runs on the trained network again
+            set_("nt_st_thr", 0.0)
+            app._nt_stream_start(False)
+            assert app.trainer_running, app._nt_stream_error
+            pump(app)
+            r = app._nt_stream_last
+            assert r["phase"] == "test" and not r["untrained"]
+            assert app._nt_stream_session is session
+            assert app._nt_stream_baseline is base
             assert app._nt_st_arch["images"]
             assert dpg.get_value("nt_st_r_p0")[0], "no pattern spikes drawn"
             # replay: move, play a little, pause
@@ -137,13 +222,23 @@ def main():
             # switch input back and mode out and in
             assert set_("nt_st_input", "Poisson")
             assert dpg.get_value("nt_st_noise") == 10.0
+            assert dpg.get_value("nt_st_w0") == sv.W0_DEFAULT[sv.POISSON]
+            # a start weight the user changed is not swapped
+            set_("nt_st_w0", 0.6)
+            assert set_("nt_st_input", "images")
+            assert dpg.get_value("nt_st_w0") == 0.6
+            assert set_("nt_st_input", "Poisson")
+            assert dpg.get_value("nt_st_w0") == 0.6
+            set_("nt_st_w0", sv.W0_DEFAULT[sv.POISSON])
             assert set_("nt_mode", "supervised")
             frames(app, 2)
             assert set_("nt_mode", "unsupervised stream")
             frames(app, 2)
             errs = errors(app)
             assert not errs, errs
-            print("PASS: stream Poisson + image input, live raster, replay, "
+            print("PASS: stream Poisson + image input, untrained baseline -> "
+                  "train -> test, Test refused after a setting change, "
+                  "start-weight swap, live raster, replay, "
                   "distractors, errors in place, input / mode switches")
         finally:
             app.virtuoso.disconnect()

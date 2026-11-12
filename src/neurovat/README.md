@@ -243,17 +243,72 @@ all of this as the learning mode **unsupervised stream**.
 The stream can also hide scanned images (`make_event_stream`, with
 `encoding.scan_events`: one afferent per pixel row, pixel column c fires at
 c x bin ms). The GUI's image input sets the threshold to 0.85 x the lowest
-peak potential one clean presentation drives at the starting weights
+peak potential one clean presentation drives at the STARTING weights
 (`pattern_peak`; 0.85 is a free choice) and counts a window as answered when
 the neuron fires at least once in it, since it answers an image with several
-spikes. Measured with one MNIST digit (28 rows, 10 ms per column, 10 Hz
-background between presentations, no noise inside them, 1 ms jitter, even
-spacing, one neuron): after 40 s of training a 15 s test answered every
-image window and few or none of the empty ones (in the GUI: 9 of 9 and 0 of 9
-in the scored last 5 s, seed 1). Known limit: several images are not
-separated by several neurons (every image drives the same rows and one
-neuron takes them all), and a neuron trained on one image also answers other
-images shown as distractors.
+spikes. Because the threshold is tied to the starting weights, a neuron that
+answers the image windows may have learnt nothing: compare with the
+untrained baseline (a fresh `Session` run with `learn=False`; in the GUI,
+Test before Train).
+
+Measured with the first MNIST "0" (28 rows, 10 ms per column, a 280 ms
+section, even spacing with `pattern_frac` 0.5, `bg_hz` 10 in the empty
+sections, 1 ms jitter, one neuron), scored on 30 s test runs (the last
+third: 17 image windows, 18 empty windows). The false windows are the empty
+ones, where `noise_hz` adds to `bg_hz`.
+
+- The untrained network did not depend on `w_init` (all weights equal, the
+  threshold scaled to the peak at `w_init`). Measured on this "0": 30 s
+  untrained at 0.475 and at 1.0, `noise_hz` 10, one neuron, seeds 1 and 2,
+  gave the same spikes (8 and 7 of 18 false, 17/17 hits); 10 s with three
+  neurons (seed 1) too. With `noise_hz` 0 the untrained neuron is clean
+  (0/18 false; measured at 0.475).
+- `w_init` 0.475 (the paper value; measured only at this start weight):
+  after 60 s of training 17/17 hits, 0-4/18 false at noise 0 and 18/18 at
+  noise 10. STDP potentiates the weights on the digit's rows while the
+  threshold stays put, so training makes it worse.
+- `w_init` 1.0 (threshold 0.85 x the peak at 1.0), `noise_hz` 10, three
+  seeds: untrained 17/17 hits and 8, 7, 11 of 18 false; after 60 s of
+  training 17/17 hits and 0-2 of 18 false. Weights can only fall from 1.0,
+  so STDP prunes the false answers, as in Masquelier. The first-spike
+  latency does not change (about 77-81 ms after onset). This is why the
+  GUI's image input starts at weight 1.0.
+- Longer training (`w_init` 1.0, seed 1, in the GUI): 300 s of training,
+  then a 30 s test: 17/17 hits and 0/18 false (untrained 8/18). In the live
+  2 s chunks of the training run every pattern window was answered for all
+  300 s, and the share of empty windows answered fell to 0 after about 60 s
+  of training (one later chunk, at 78 s, at 33 %). Weights at 300 s: 16 of
+  28 above 0.9, 11 below 0.1.
+- The first MNIST "1" (`w_init` 1.0, `noise_hz` 10, in the GUI, 60 s of
+  training): untrained 17/17 hits and 18 / 16 of 18 false, trained 17/17 and
+  1 / 2 of 18 (seeds 1 / 2).
+- ECFET v2 synapses (`verilog/ecfet_v2.va` twin, calibrated pulses, seed 1,
+  otherwise as above, in the GUI): untrained 17/17 hits and 8/18 false,
+  after 60 s of training 17/17 and 1/18. The pulse is calibrated at weight
+  0.5 (at 1.0 one direction cannot move; 0.1 / 0.9 / 0.5 are free choices):
+  there one pulse makes one STDP step each way; at weight 1.0 the
+  potentiation pulse makes no step and the depression pulse about one. The
+  weights ended between 0.50 and 1.00 (15 of 28 above 0.9). One run only.
+- Built-in 28 x 28 images of `make_patterns` (digits '0', '1', '7' and
+  letters 'L', 'T') at `w_init` 1.0, `noise_hz` 10 and 20, seeds 1-2, 60 s
+  of training: clean untrained (0/18 false; once 2/18, the '7' at noise 20)
+  and after training (0/18), 17/17 hits throughout. Their clean peak at
+  weight 1 is far higher than the MNIST "0"'s (about 36 for the digit '0'
+  and 50 for the 'L', against about 17), so the threshold sits far above the
+  noise; they show detection, not learning. So does the 14 x 14 built-in
+  digit '0' at noise 0 and 10.
+
+Known limit: several images are not separated by several neurons (every
+image drives the same rows). MNIST "0", "1", "2" hidden, 3 neurons, `w_init`
+1.0, `noise_hz` 10, seed 1, 120 s of training, 30 s tests (5-6 windows per
+digit scored): neurons 1 and 3 both answer the "0" best (5/5 hits each, with
+9 and 17 of 30 other windows), neuron 3 also answers the "1" and "2" (about
+2-4 spikes per window of each), neuron 2 answers 3 of 6 "2" windows, and no
+neuron takes the "1". One run. A neuron for one image also answers other
+images shown as distractors. With the other
+MNIST digits 1-9 as distractors (`w_init` 1.0, `noise_hz` 0): untrained 13
+and 16 of 18 false windows, after 120 s of training 14 and 14 of 18 - no
+learning.
 
 The MNIST benchmark trains and scores the pre-package engine
 (`benchmarks/legacy_neuro.py`) and this package on the same MNIST subset from
