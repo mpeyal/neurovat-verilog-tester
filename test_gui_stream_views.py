@@ -73,9 +73,10 @@ def check_codes(app, set_):
         assert row_shown("nt_st_code_win") == (layout == "pixel")
         if label:
             assert row_label("nt_st_bin") == label
-        noise = sv.noise_default(layout, code)
-        assert noise == {"latency": sv.PIXEL_NOISE_HZ,
-                         "frozen Poisson": 10.0}.get(code, 10.0)
+        noise = sv.noise_default(layout)
+        # both pixel codes (latency, frozen Poisson) default to 3 Hz
+        assert noise == (sv.PIXEL_NOISE_HZ if layout == "pixel" else 10.0)
+        assert sv.PIXEL_NOISE_HZ == 3.0
         assert dpg.get_value("nt_st_noise") == noise, code
         assert dpg.get_value("nt_st_bg") == noise, code
         # the start weight follows the code: 0.5 for frozen Poisson, else 1
@@ -114,10 +115,11 @@ def check_codes(app, set_):
     assert dpg.get_value("nt_st_noise") == 10.0
     assert set_("nt_st_input", "images")
     assert dpg.get_value("nt_st_noise") == sv.PIXEL_NOISE_HZ
-    # latency <-> frozen Poisson (same layout): noise and start weight move;
-    # a start weight the user changed stays
+    # latency <-> frozen Poisson (same layout): the start weight moves, the
+    # noise stays at 3 Hz; a start weight the user changed stays
     assert set_("nt_st_code", "frozen Poisson")
-    assert dpg.get_value("nt_st_noise") == dpg.get_value("nt_st_bg") == 10.0
+    assert dpg.get_value("nt_st_noise") == dpg.get_value("nt_st_bg") == \
+        sv.PIXEL_NOISE_HZ
     assert dpg.get_value("nt_st_w0") == 0.5
     assert set_("nt_st_code", "latency")
     assert dpg.get_value("nt_st_noise") == sv.PIXEL_NOISE_HZ

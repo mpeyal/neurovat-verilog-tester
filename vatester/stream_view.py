@@ -39,14 +39,14 @@ DETECT_HIT, DETECT_FALSE = 0.9, 0.1   # image verdict: >= 90 % hits, <= 10 % oth
 # lines instead of 28, so the same rate per line is 28 times the noise
 # spikes per second on the network.
 NOISE_HZ = 10.0
-# free parameter; measured on MNIST '0', 2 seeds: latency learns at 3-5 Hz
-# (untrained 188/188 false windows -> 0-4/188, hits held); at 1 Hz it is
-# clean untrained; at 10 Hz it fires in every window
+# free parameter, for both pixel codes. Latency, MNIST '0', 2 seeds: learns
+# at 3-5 Hz (188/188 false windows -> 0-4/188, hits held); clean untrained
+# at 1 Hz; fires in every window at 10 Hz. Frozen Poisson (start weight
+# 0.5): the MNIST '1' learns at 3 Hz (117/226 -> 0/228, hits held; 1 seed)
+# and fires in every window at 10 Hz; the MNIST '0' is clean untrained at
+# 3 Hz and learns at 10 Hz (2 seeds x 2 draws). Noise tolerance depends
+# on how much ink the image has.
 PIXEL_NOISE_HZ = 3.0
-# ... except per code: frozen Poisson (start weight 0.5) is clean untrained
-# at 1-5 Hz, so only at 10 Hz is there something to learn (every empty
-# window answered untrained -> none, hits held; MNIST '0', 4 runs)
-CODE_NOISE_HZ = {"frozen Poisson": 10.0}
 # pixel codes: input lines drawn in the raster (room for every inked pixel
 # of one image: the built-in 28 x 28 '0' has 454, an MNIST digit ~100-200)
 PIXEL_SHOWN = 480
@@ -75,28 +75,19 @@ def code_layout(value):
     return STREAM_LAYOUT[code_name(value)]
 
 
-def noise_default(layout, code=None):
+def noise_default(layout):
     """Default noise Hz / background Hz for an input layout (None = Poisson
-    input) and image code: the code's CODE_NOISE_HZ if it has one, else
-    PIXEL_NOISE_HZ for the pixel codes, NOISE_HZ otherwise."""
-    if code is not None:
-        try:
-            code = code_name(code)
-        except ValueError:
-            code = None
-    if code in CODE_NOISE_HZ:
-        return CODE_NOISE_HZ[code]
+    input): PIXEL_NOISE_HZ for the pixel codes, NOISE_HZ otherwise."""
     return PIXEL_NOISE_HZ if layout == "pixel" else NOISE_HZ
 
 
-def swapped_default(value, old_layout, new_layout, old_code=None,
-                    new_code=None):
-    """The value a noise control takes when the layout or code changes: the
-    new default if it still holds the old default (the user has not edited
+def swapped_default(value, old_layout, new_layout):
+    """The value a noise control takes when the layout changes: the new
+    default if it still holds the old default (the user has not edited
     it), else ``value`` unchanged."""
     v = float(value)
-    if abs(v - noise_default(old_layout, old_code)) < 1e-6:
-        return noise_default(new_layout, new_code)
+    if abs(v - noise_default(old_layout)) < 1e-6:
+        return noise_default(new_layout)
     return v
 
 
@@ -162,12 +153,13 @@ CODE_TIPS = {
     "frozen Poisson": "frozen Poisson: one input per pixel; Poisson spikes "
                       "at 100 Hz x brightness over the window, drawn once "
                       "and repeated unchanged (about 5 per line). Start "
-                      "weight 0.5 and noise 10 Hz (set when you pick it, "
-                      "unless you changed them): from weight 1 STDP "
-                      "depressed the image's own lines below the threshold "
-                      "and the hits collapsed; from 0.5 they held at 1-10 "
-                      "Hz, and at 10 Hz training removed the false answers "
-                      "(clean untrained at 1-5 Hz).",
+                      "weight 0.5 (set when you pick it, unless you "
+                      "changed it): from weight 1 STDP depressed the "
+                      "image's own lines below the threshold and the hits "
+                      "collapsed. Noise 3 Hz, as for latency: the sparse "
+                      "MNIST '1' learns at 3 Hz and fires in every window "
+                      "at 10 Hz; the dense MNIST '0' is clean untrained at "
+                      "3 Hz and learns at 10 Hz.",
 }
 
 

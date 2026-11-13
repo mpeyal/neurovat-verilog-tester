@@ -103,8 +103,8 @@ STREAM_CONTROLS = [
     ("nt_st_code", "stream (image input): encoding, column scan (one input "
                    "per pixel row) | row scan (per pixel column) | latency "
                    "(per pixel, brighter = earlier) | frozen Poisson (per "
-                   "pixel, a fixed rate draw; sets start weight 0.5 and "
-                   "noise 10 Hz unless changed)"),
+                   "pixel, a fixed rate draw; sets start weight 0.5 "
+                   "unless changed)"),
     ("nt_st_code_win", "stream (image input, latency / frozen Poisson): "
                        "window ms the code spreads the spikes over"),
     ("nt_st_img_pick", "stream (image input): indices of the hidden images, "
@@ -124,9 +124,8 @@ STREAM_CONTROLS = [
                     "the patterns too (image input: on top of nt_st_bg in "
                     "the empty windows, which are the ones answered falsely; "
                     f"default {sv.NOISE_HZ:g}, {sv.PIXEL_NOISE_HZ:g} for "
-                    "latency, "
-                    f"{sv.CODE_NOISE_HZ['frozen Poisson']:g} for frozen "
-                    "Poisson, as is nt_st_bg)"),
+                    "the pixel codes (latency, frozen Poisson), as is "
+                    "nt_st_bg)"),
     ("nt_st_delete", "stream: fraction of pattern spikes deleted 0-1"),
     ("nt_st_thr", "stream: neuron threshold (0 = auto: 0.25 x afferents for "
                   "Poisson, 0.85 x weakest clean image peak for images)"),
@@ -188,7 +187,6 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
     _nt_st_input_shown = sv.POISSON
     _nt_st_code_shown = sv.CODES[0]     # the encoding combo, normalised
     _nt_st_noise_layout = "row"         # layout the noise defaults are set for
-    _nt_st_noise_code = None            # ... and image code (None = Poisson)
     _nt_st_w0_shown = sv.W0_DEFAULT[sv.POISSON]   # start-weight default set
 
     # ---- layout -----------------------------------------------------
@@ -248,10 +246,9 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                           dv=sv.CODES[0], callback=changed,
                           tip="How an image becomes spikes:\n"
                               + "\n".join(sv.CODE_TIPS[c] for c in sv.CODES)
-                              + f"\nLatency sets noise and background Hz to "
-                              f"{sv.PIXEL_NOISE_HZ:g}, frozen Poisson to "
-                              f"{sv.CODE_NOISE_HZ['frozen Poisson']:g} (and "
-                              "start weight "
+                              + f"\nLatency and frozen Poisson set noise and "
+                              f"background Hz to {sv.PIXEL_NOISE_HZ:g} "
+                              "(frozen Poisson also start weight "
                               f"{sv.W0_CODE['frozen Poisson']:g}), the scans "
                               f"to {sv.NOISE_HZ:g}, unless you changed them.")
             from neurovat.encoding import STREAM_MARGIN_MS, STREAM_WINDOW_MS
@@ -288,8 +285,7 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                           tip="Poisson rate per afferent in the sections "
                               "that show no image. Unused when there are "
                               f"distractors. Default {sv.NOISE_HZ:g}; "
-                              f"{sv.PIXEL_NOISE_HZ:g} for latency, "
-                              f"{sv.CODE_NOISE_HZ['frozen Poisson']:g} for "
+                              f"{sv.PIXEL_NOISE_HZ:g} for latency and "
                               "frozen Poisson (set when you pick one, unless "
                               "you changed it).")
             self._ctl_row("threshold", "nt_st_thr", default=0.0,
@@ -365,7 +361,12 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                     "1-5 Hz, hits held. From start weight 1 the hits "
                     "collapsed in 13 of 16 runs: each line fires about 5 "
                     "times per window, so STDP depressed the image's own "
-                    "lines below the threshold."):
+                    "lines below the threshold.",
+                    "frozen Poisson defaults to 3 Hz: at 3 Hz a dense image "
+                    "(e.g. the MNIST '0') is already clean untrained; raise "
+                    "noise and background to 10 Hz to see pruning there; a "
+                    "sparse image (the MNIST '1') fires in every window at "
+                    "10 Hz."):
                 self._small("  - " + line, color=C_MUTED, wrap=340)
             self._small("The built-in 28 x 28 digits and letters are already "
                         "clean untrained (their peak sits far above the "
@@ -403,12 +404,9 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                                   "the empty windows, which are the windows "
                                   "a neuron answers falsely. Default "
                                   f"{sv.NOISE_HZ:g}; {sv.PIXEL_NOISE_HZ:g} for "
-                                  "latency (size x size afferents instead "
-                                  "of size); "
-                                  f"{sv.CODE_NOISE_HZ['frozen Poisson']:g} "
-                                  "for frozen Poisson (clean untrained "
-                                  "below it); set when you pick one unless "
-                                  "you changed it.")
+                                  "latency and frozen Poisson (size x size "
+                                  "afferents instead of size); set when you "
+                                  "pick one unless you changed it.")
                 self._ctl_row("spike deletion", "nt_st_delete", default=0.0,
                               tip="Fraction of the pattern's spikes dropped "
                                   "at each presentation.")
@@ -544,39 +542,35 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
         self.log(f"[stream] start weight set to {new:g} ({why})")
 
     def _nt_st_swap_noise(self):
-        """Noise Hz and background Hz follow the layout and code
-        (``sv.noise_default``: PIXEL_NOISE_HZ for the pixel codes, NOISE_HZ
-        otherwise, CODE_NOISE_HZ for a code that has its own), as the start
+        """Noise Hz and background Hz follow the layout (``sv.noise_default``:
+        PIXEL_NOISE_HZ for the pixel codes, NOISE_HZ otherwise), as the start
         weight does: only a control that still holds the old default
         moves."""
-        new = (self._nt_st_noise_layout_now(), self._nt_st_code_now())
-        old = (self._nt_st_noise_layout, self._nt_st_noise_code)
+        new = self._nt_st_noise_layout_now()
+        old = self._nt_st_noise_layout
         if new == old:
             return
-        self._nt_st_noise_layout, self._nt_st_noise_code = new
-        if sv.noise_default(*new) == sv.noise_default(*old):
+        self._nt_st_noise_layout = new
+        if sv.noise_default(new) == sv.noise_default(old):
             return
         moved = []
         for tag in ("nt_st_noise", "nt_st_bg"):
             if not dpg.does_item_exist(tag):
                 continue
             cur = float(dpg.get_value(tag))
-            val = sv.swapped_default(cur, old[0], new[0], old[1], new[1])
+            val = sv.swapped_default(cur, old, new)
             if val != cur:
                 dpg.set_value(tag, val)
                 moved.append(tag)
         if moved:
             names = {"nt_st_noise": "noise Hz", "nt_st_bg": "background Hz"}
-            if new[1] in sv.CODE_NOISE_HZ:
-                why = (f"{new[1]}: clean untrained below this, so nothing "
-                       "to learn")
-            elif new[0] == "pixel":
+            if new == "pixel":
                 why = ("the pixel codes have size x size afferents, so the "
                        "same rate per afferent is far more noise per window")
             else:
                 why = "the scan default"
             self.log(f"[stream] {' and '.join(names[t] for t in moved)} set "
-                     f"to {sv.noise_default(*new):g} ({why})")
+                     f"to {sv.noise_default(new):g} ({why})")
 
     def _nt_st_refresh_previews(self):
         """Rebuild the architecture from the controls (no run) and redraw

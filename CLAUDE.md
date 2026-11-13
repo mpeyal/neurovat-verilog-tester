@@ -50,11 +50,13 @@ Virtuoso** on a shared university host.
   codes). Learning shows on the MNIST "0" at size 28 with both scans (10 Hz
   noise) and with latency at 3-5 Hz noise after 60 s of training (30 s gave
   only a partial drop). Frozen Poisson needs start weight 0.5 (`W0_CODE`)
-  and noise 10 Hz (`CODE_NOISE_HZ`, the noise defaults follow the code, not
-  only the layout): from 1.0 its hits collapsed after training (about 5
-  spikes per line, so STDP depresses the image's own lines below the
-  threshold); from 0.5 they held in all 16 cells of the 1-10 Hz x 2 seeds x
-  2 draws grid, and it learns at 10 Hz (clean untrained at 1-5 Hz). The
+  and takes the pixel-code noise default, 3 Hz (`PIXEL_NOISE_HZ`; the noise
+  defaults follow the layout): from 1.0 its hits collapsed after training
+  (about 5 spikes per line, so STDP depresses the image's own lines below
+  the threshold); from 0.5 they held in all 16 cells of the MNIST "0"
+  1-10 Hz x 2 seeds x 2 draws grid. The MNIST "0" is clean untrained at
+  3 Hz and learns at 10 Hz; the sparse MNIST "1" learns at 3 Hz and fires
+  in every window at 10 Hz (noise tolerance depends on ink). The
   table is in `src/neurovat/README.md`. The built-in images are clean untrained
   (detection only). The Learning tab's "other windows answered (%)" line is
   the image learning signal.
@@ -128,7 +130,7 @@ appears in the workspace. Drive it with the CLI client:
     python tools/nvat_ctl.py set nt_st_code latency  # image encoding: column scan (one per pixel
                                             # row) | row scan (per column) | latency |
                                             # frozen Poisson (one per pixel; sets
-                                            # start weight 0.5, noise 10 Hz)
+                                            # start weight 0.5)
     python tools/nvat_ctl.py tab nt_st_tab_raster   # stream views: nt_st_tab_raster / _net / _pat /
                                             # _learn / _weights / _energy / _robust
     python tools/nvat_ctl.py set nt_st_play 1       # replay the last run's raster (0 = pause)

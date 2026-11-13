@@ -208,15 +208,15 @@ column c fires at c x nt_st_bin ms), "row scan" (one per pixel column, row r
 at r x nt_st_bin ms), "latency" (one per pixel; a pixel fires once, the
 brighter the earlier, within nt_st_code_win ms, default 50, after a 15 ms
 lead) or "frozen Poisson" (one per pixel; a fixed draw at 100 Hz x intensity
-over nt_st_code_win ms; picking it sets nt_st_w0 to 0.5 and noise /
-background to 10 Hz unless changed). Inputs = nt_st_img_size for the scans, size x size
+over nt_st_code_win ms; picking it sets nt_st_w0 to 0.5 unless
+changed). Inputs = nt_st_img_size for the scans, size x size
 for the pixel codes (784 at 28); section = ceil(size x bin) ms for the scans,
 window + 2 x 15 ms for the pixel codes. Images from nt_st_imgset, hidden ones
 nt_st_img_pick, distractors nt_st_img_distract, background nt_st_bg Hz
 between presentations; nt_st_noise adds to that background in the empty
 windows, which are the windows answered falsely. Both default to 10 Hz for
-the scans and frozen Poisson and 3 Hz for latency (swapped when the code changes,
-unless edited). For images a window counts as answered by at least one output
+the scans and 3 Hz for the pixel codes (latency, frozen Poisson; swapped when
+the code changes, unless edited). For images a window counts as answered by at least one output
 spike (measured on MNIST: about 1-5 spikes per answered image), for Poisson
 by exactly one; threshold 0 = auto (0.85 x the weakest clean image peak AT
 THE START WEIGHTS, or 0.25 x afferents), so the untrained network answered
@@ -240,9 +240,12 @@ last third). Counted over the whole 30 s test (60 s of training, untrained
 -> trained false windows, hits held): column scan 25-27 -> 2 of 54, row scan
 40-44 -> 2 of 54, latency at 3-5 Hz 188 -> 0-4 of 188 (2 seeds; at 10 Hz it
 fires in every window and learns nothing; 30 s of training gave only 63 ->
-39 of 63). Frozen Poisson (start weight 0.5, noise 10 Hz): every empty
-window answered untrained -> none after 60 s of training, hits held (2
-seeds x 2 frozen draws); clean untrained at 1-5 Hz. From start weight 1 its
+39 of 63). Frozen Poisson (start weight 0.5): the MNIST "0" at 10 Hz:
+every empty window answered untrained -> none after 60 s of training, hits
+held (2 seeds x 2 frozen draws); clean untrained at 1-5 Hz. The MNIST "1"
+at 3 Hz: 117/226 -> 0/228 false windows, hits held (1 seed); at 10 Hz the
+"1" fires in every window. Noise tolerance depends on how much ink the
+image has. From start weight 1 the
 hits collapsed after training (each line fires about 5 times per window, so
 STDP depressed the image's own lines below the threshold). The built-in
 28 x 28 digits and letters are already clean untrained, so they show

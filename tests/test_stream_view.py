@@ -237,27 +237,28 @@ def test_code_names_layouts_and_noise_defaults():
     assert "0.5" in sv.CODE_TIPS["frozen Poisson"]
 
 
-def test_frozen_poisson_has_its_own_start_weight_and_noise_defaults():
+def test_frozen_poisson_has_its_own_start_weight_and_pixel_noise_default():
     # frozen Poisson: start weight 0.5 (from 1 the hits collapsed after
-    # training), noise 10 Hz (clean untrained below); the other codes keep
-    # the input / layout defaults
+    # training); noise is the pixel-code default, 3 Hz, as for latency (the
+    # sparse MNIST '1' fires in every window at 10 Hz)
     fp = "frozen Poisson"
-    assert sv.W0_CODE == {fp: 0.5} and sv.CODE_NOISE_HZ == {fp: 10.0}
+    assert sv.W0_CODE == {fp: 0.5}
+    assert not hasattr(sv, "CODE_NOISE_HZ")
     assert sv.w0_default(sv.IMAGES, fp) == 0.5
     assert sv.w0_default(sv.IMAGES, "poisson") == 0.5     # alias normalised
     for code in ("column scan", "row scan", "latency", None):
         assert sv.w0_default(sv.IMAGES, code) == sv.W0_DEFAULT[sv.IMAGES] == 1.0
     assert sv.w0_default(sv.IMAGES, "morse") == 1.0       # unknown: input's
     assert sv.w0_default(sv.POISSON, fp) == sv.W0_DEFAULT[sv.POISSON] == 0.475
-    assert sv.noise_default("pixel", fp) == 10.0
-    assert sv.noise_default("pixel", "latency") == sv.PIXEL_NOISE_HZ
-    assert sv.noise_default("row", "column scan") == sv.NOISE_HZ
-    assert sv.noise_default("pixel", "morse") == sv.PIXEL_NOISE_HZ
-    # latency <-> frozen Poisson: same layout, the code's default moves
-    assert sv.swapped_default(3.0, "pixel", "pixel", "latency", fp) == 10.0
-    assert sv.swapped_default(10.0, "pixel", "pixel", fp, "latency") == 3.0
-    assert sv.swapped_default(5.0, "pixel", "pixel", "latency", fp) == 5.0
-    assert sv.swapped_default(10.0, "pixel", "row", fp, "column scan") == 10.0
+    assert sv.code_layout(fp) == "pixel"
+    assert sv.noise_default(sv.code_layout(fp)) == sv.PIXEL_NOISE_HZ == 3.0
+    assert sv.noise_default(sv.code_layout("latency")) == 3.0
+    # latency <-> frozen Poisson: same layout, the noise stays
+    assert sv.swapped_default(3.0, "pixel", "pixel") == 3.0
+    assert sv.swapped_default(5.0, "pixel", "pixel") == 5.0
+    # a scan -> frozen Poisson: 10 -> 3; back again: 3 -> 10
+    assert sv.swapped_default(10.0, "row", sv.code_layout(fp)) == 3.0
+    assert sv.swapped_default(3.0, sv.code_layout(fp), "row") == 10.0
 
 
 def test_frozen_poisson_from_weight_half_keeps_its_clean_peak_threshold():

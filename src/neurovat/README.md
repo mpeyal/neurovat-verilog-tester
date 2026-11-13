@@ -407,15 +407,15 @@ score); hits held unless stated.
   63/63 -> 39/63 false windows.
 - Frozen Poisson (784 inputs, one fixed draw at 100 Hz x intensity over 50
   ms, about 5 spikes per inked line) starts at weight 0.5, not 1, and the
-  GUI sets its noise and background to 10 Hz. From weight 1 the hits
-  collapsed after training: STDP depressed each line's spikes after the
+  GUI sets its noise and background to 3 Hz, as for latency. From weight
+  1 the hits collapsed after training: STDP depressed each line's spikes after the
   output spike, the digit's own weights fell to a mean of 0.51-0.77, and
   the clean image's peak at the trained weights fell below the threshold
   (0.64-0.96 x), so the neuron stopped firing on it and STDP stopped. From
   0.5 the digit's weights stayed near their start (mean 0.44-0.51) while
   the other lines fell (mean 0.02-0.30), and the peak stayed at 1.10-1.27 x
-  the threshold. The image is clean untrained at 1-5 Hz (nothing to learn), and
-  learns at 10 Hz.
+  the threshold. The MNIST "0" is clean untrained at 1-5 Hz (nothing to
+  learn), and learns at 10 Hz (the grid below).
 
 Frozen Poisson fix search. MNIST "0" (`x_train/255`, size 28, ink 0.5),
 one neuron, random spacing, share 0.4, jitter 1 ms, `noise_hz` = `bg_hz`,
@@ -455,11 +455,36 @@ Start weight 0.5, per cell (untrained -> trained):
 | 5 | same | same | 0 -> 0 | 1.23 / 1.19 / 1.23 / 1.23 |
 | 10 | same | same | 226 -> 0 of 228, 226 -> 0, 221 -> 0 of 227, 221 -> 0 | 1.18 / 1.20 / 1.20 / 1.20 |
 
+Second-image check (frozen Poisson, start weight 0.5, 1 seed, 60 s of
+training, untrained -> trained; - = not listed here):
+
+| image | noise Hz | hits | false windows |
+|---|---|---|---|
+| built-in digit 0 | 3 | 149 -> 147 of 147 | 0 -> 0 |
+| built-in digit 0 | 10 | 149 -> 147 of 147 | 0 -> 0 |
+| MNIST "1" | 3 | 149 -> 147 of 147 | 117/226 -> 0/228 |
+| MNIST "1" | 10 | - | 226/226 -> 228/228 (every window; the weights all go to 1) |
+
+The same from start weight 1 (- = not listed here):
+
+| image | noise Hz | hits | false windows |
+|---|---|---|---|
+| built-in digit 0 | 3 | 149 -> 3 | - |
+| built-in digit 0 | 10 | 149 -> 1 | - |
+| MNIST "1" | 3 | -> 141 of 147 | - |
+| MNIST "1" | 10 | - | every window |
+
+Noise tolerance depends on how much ink the image has: the MNIST "1" (66
+inked pixels) fires in every window at 10 Hz, where the denser "0" learns.
+So the GUI defaults frozen Poisson to 3 Hz, like latency; at 3 Hz the "0"
+is already clean untrained, and noise and background must be raised to
+10 Hz to see pruning on it.
+
 Free parameters chosen here: the 50 ms window, the 15 ms margin,
 the 100 Hz rate, the frozen draw's seed (0 in `stream_events` when no rng is
 given; the GUI draws from the app seed, per image), the 3 Hz pixel-code
-noise default (latency), and frozen Poisson's start weight 0.5 and 10 Hz
-noise default (`stream_view.W0_CODE`, `CODE_NOISE_HZ`).
+noise default (both pixel codes, `stream_view.PIXEL_NOISE_HZ`), and frozen
+Poisson's start weight 0.5 (`stream_view.W0_CODE`).
 
 The MNIST benchmark trains and scores the pre-package engine
 (`benchmarks/legacy_neuro.py`) and this package on the same MNIST subset from

@@ -27,7 +27,7 @@ Then drive it from any shell (this is what the agent / Claude Code calls):
     python tools/nvat_ctl.py set nt_st_input "scanned images"   # or "Poisson"; image rows:
                                                  # nt_st_imgset / _img_size / _img_pick / _img_distract
     python tools/nvat_ctl.py set nt_st_code latency  # image encoding: column scan | row scan |
-                                                 # latency | frozen Poisson (window: nt_st_code_win; frozen Poisson sets nt_st_w0 0.5, noise 10 Hz)
+                                                 # latency | frozen Poisson (window: nt_st_code_win; frozen Poisson sets nt_st_w0 0.5)
     python tools/nvat_ctl.py tab nt_st_tab_raster  # stream views: _raster _net _pat _learn _weights _energy _robust
     python tools/nvat_ctl.py set nt_st_view_t 3  # replay position (s into the last run)
     python tools/nvat_ctl.py set nt_st_play 1    # play the replay (0 = pause)
