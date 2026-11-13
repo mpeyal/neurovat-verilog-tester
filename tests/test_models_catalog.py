@@ -34,19 +34,35 @@ def test_newest_none_when_family_missing():
     assert mc.newest([], "opus") is None
 
 
-def test_builtin_pin_is_opus_5_5():
-    row = mc.newest(mc.BUILTIN["claude"], "opus")
-    assert row[:2] == ("Opus 5.5", "claude-opus-5-5")
+def test_builtin_pin_is_the_cli_opus_alias():
+    # offline / CLI login: pin the alias the Claude CLI resolves to its
+    # newest Opus, so a new Opus needs no app update
     assert mc.BUILTIN["claude"][0][1] is None        # Default stays first
-    assert mc.resolve_pin(("Default", None), mc.BUILTIN["claude"],
-                          False) == ("Opus 5.5", "claude-opus-5-5")
+    assert mc.resolve_pin(None, mc.BUILTIN["claude"], False) == \
+        ("Opus (latest)", "opus")
+    # the alias never counts as a versioned id
+    assert mc.newest(mc.BUILTIN["claude"], "opus")[1] == "claude-opus-5-5"
+
+
+def test_api_model_id_resolves_alias(monkeypatch):
+    live = [("Opus 5.6", "claude-opus-5-6", "x"),
+            ("Opus 5.5", "claude-opus-5-5", "x")]
+    monkeypatch.setattr(mc, "_fetch_claude", lambda api_key=None: live)
+    assert mc.api_model_id("opus") == "claude-opus-5-6"
+    assert mc.api_model_id("default") == "claude-opus-5-6"
+    assert mc.api_model_id("claude-sonnet-5-5") == "claude-sonnet-5-5"
+
+    def boom(api_key=None):
+        raise RuntimeError("offline")
+    monkeypatch.setattr(mc, "_fetch_claude", boom)
+    assert mc.api_model_id("opus") == "claude-opus-5-5"
 
 
 def test_live_list_moves_pin_only_without_hand_pick():
-    live = mc.BUILTIN["claude"] + [("Opus 6", "claude-opus-6", "new")]
+    live = _rows("claude-opus-5-5", "claude-opus-6", "claude-sonnet-5-5")
     cur = ("Opus 5.5", "claude-opus-5-5")
     assert mc.resolve_pin(cur, live, user_picked=False) == \
-        ("Opus 6", "claude-opus-6")
+        ("claude-opus-6", "claude-opus-6")
     assert mc.resolve_pin(cur, live, user_picked=True) == cur
     picked = ("Sonnet 5.5", "claude-sonnet-5-5")
     assert mc.resolve_pin(picked, live, user_picked=True) == picked

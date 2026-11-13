@@ -36,6 +36,7 @@ _FETCH_TIMEOUT = 15
 BUILTIN = {
     "claude": [
         ("Default", None, "your Claude Code default"),
+        ("Opus (latest)", "opus", "newest Opus your Claude Code knows"),
         ("Opus 5.5", "claude-opus-5-5", "most capable everyday"),
         ("Fable 5.2", "claude-fable-5-2", "most capable, priciest"),
         ("Sonnet 5.5", "claude-sonnet-5-5", "fast + smart"),
@@ -95,18 +96,46 @@ def newest(rows, family="opus"):
 def resolve_pin(current, rows, user_picked, family="opus"):
     """Selection (label, id-or-None) after a model list arrives.
 
-    Not picked by hand this session -> the newest `family` model in `rows`.
+    Not picked by hand this session -> the `family` alias row when the list
+    has one (the built-in list: the Claude CLI resolves the alias "opus" to
+    the newest Opus it knows, and the CLI updates itself, so a new Opus is
+    picked up with no app change), else the newest `family` model in `rows`
+    (a live list, which is already current).
     Otherwise (or when the list has none) keep `current` while the list still
     offers it, and fall back to Default when it no longer does - never send
     an id the provider stopped listing."""
     if not user_picked:
-        best = newest(rows, family)
+        alias = next((r for r in rows or () if len(r) > 1 and r[1] == family),
+                     None)
+        best = alias or newest(rows, family)
         if best:
             return best[0], best[1]
     label, mid = current or ("Default", None)
     if mid is None or any(len(r) > 1 and r[1] == mid for r in rows or ()):
         return label, mid
     return "Default", None
+
+
+ALIASES = ("opus", "sonnet", "haiku", "fable")
+
+
+def api_model_id(model, api_key=None, fallback="claude-opus-5-5"):
+    """Concrete id for the Messages API, which does not accept CLI aliases.
+
+    'opus' (or Default) -> the newest Opus the Models API lists right now;
+    an explicit id passes through. Never raises: offline or unauthenticated
+    it returns the newest Opus in the built-in list, then `fallback`."""
+    if model and model != "default" and model not in ALIASES:
+        return model
+    family = model if model in ALIASES else "opus"
+    try:
+        row = newest(_fetch_claude(api_key), family)
+        if row:
+            return row[1]
+    except Exception:
+        pass
+    row = newest(BUILTIN["claude"], family)
+    return row[1] if row else fallback
 
 
 def source_note(source, provider="claude"):

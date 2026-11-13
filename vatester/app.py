@@ -394,9 +394,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         # to "Default". The selection is not persisted across restarts.
         self.model_sel = {p: ("Default", None) for p in PROVIDER_ORDER}
         self.model_user_picked = {p: False for p in PROVIDER_ORDER}
-        _pin = models_catalog.newest(models_catalog.BUILTIN["claude"], "opus")
-        if _pin:
-            self.model_sel["claude"] = (_pin[0], _pin[1])
+        self.model_sel["claude"] = models_catalog.resolve_pin(
+            None, models_catalog.BUILTIN["claude"], False)
         # live model lists, provider -> [(label, id, blurb)]. Seeded with the
         # offline fallback and replaced by _refresh_models_async once each
         # provider has been asked what it actually offers.
@@ -2439,6 +2438,12 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             if q and q in hay:
                 return label, mid
         # OpenAI: accept any explicit model id verbatim (e.g. a new release)
+        # Claude: accept a full model id the list does not show yet
+        # (e.g. "/model claude-opus-5-6" the day it ships)
+        if (self.agent.provider == "claude" and " " not in q
+                and query.strip().lower().startswith("claude-")):
+            raw = query.strip().lower()
+            return raw, raw
         if self.agent.provider == "openai" and q and " " not in q:
             raw = query.strip()
             return raw, raw

@@ -3,7 +3,7 @@
 Claude provider (default):
   - `claude` CLI headless (`claude -p --output-format json`): full agentic
     backend with real file tools / shell; conversation via --resume.
-  - Anthropic SDK fallback (claude-opus-5-5): chat + patterns only.
+  - Anthropic SDK fallback (newest listed Opus): chat + patterns only.
 
 OpenAI provider:
   - `codex` CLI headless (`codex exec`) when installed: agentic backend with
@@ -728,7 +728,7 @@ class ClaudeAgent:
         if self.cli:
             return f"claude CLI ({_cli_origin(self.cli)})"
         if self.sdk_ok:
-            return "Anthropic SDK (claude-opus-5-5)"
+            return "Anthropic SDK (newest Opus)"
         return "no backend - install claude CLI or set ANTHROPIC_API_KEY"
 
     def reset(self):
@@ -962,7 +962,15 @@ class ClaudeAgent:
             client = anthropic.Anthropic(api_key=self.override_value)
         else:
             client = anthropic.Anthropic()
-        model_id = model if model and model != "default" else "claude-opus-5-5"
+        # The Messages API takes no CLI aliases: "opus"/Default become the
+        # newest Opus the Models API lists (resolved once per session).
+        key = (model or "default", self.override_value
+               if self.override_kind == "api_key" else None)
+        if getattr(self, "_sdk_model", (None, None))[0] != key:
+            from . import models_catalog
+            self._sdk_model = (key, models_catalog.api_model_id(
+                model, api_key=key[1]))
+        model_id = self._sdk_model[1]
         self._history.append({"role": "user", "content": text})
         try:
             resp = client.messages.create(
