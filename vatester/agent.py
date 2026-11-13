@@ -33,7 +33,8 @@ device tester GUI (ECFET / ECRAM / FeFET synaptic models).
 MODELS. The GUI plots Python behavioral twins of the workspace .va files:
   simulation_core/model_v1.py    <-> basic_v1_Diffu_Drft_verilog.va   (basic ECFET port)
   simulation_core/model_v2.py    <-> verilog/ecfet_v2.va                       (practical ECRAM)
-  simulation_core/model_fefet.py <-> verilog/FeFET.va                       (FeFET)
+  simulation_core/model_v3.py    <-> verilog/ecfet_v3.va                       (paper-faithful ECFET)
+  your own devices: twins/*.py   <-> verilog/*.va                               (see twins/README.md)
 
 Keep new Verilog-A source files in the workspace's verilog/ folder. Python
 device twins belong in simulation_core/ or twins/, as described below.
