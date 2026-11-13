@@ -379,13 +379,24 @@ class ControlBridge:
 
     def _cmd_nt_robust(self, args):
         """Robustness sweep of the trained stream network (the Robustness
-        tab's Run sweep, with its level / seconds controls); waits."""
+        tab's Run sweep, with its level / seconds controls); waits.
+        ``retrain`` (1 / 0 / 'retrain' / 'recall'; omitted = the tab's mode),
+        ``train_s`` (training seconds per level, 0 = as trained) and
+        ``repeats`` set the retrain controls first."""
         app = self.app
         if app.trainer_running:
             raise RuntimeError("Trainer is busy.")
         app._nt_set_control("nt_mode", "unsupervised stream")
         if args.get("seconds") not in (None, ""):
             app._nt_set_control("nt_st_rb_seconds", float(args["seconds"]))
+        if args.get("retrain") not in (None, ""):
+            if not app._nt_set_control("nt_st_rb_mode", str(args["retrain"])):
+                raise ValueError(f"retrain: {args['retrain']!r} is not 1 / 0 "
+                                 "/ retrain / recall")
+        if args.get("train_s") not in (None, ""):
+            app._nt_set_control("nt_st_rb_train_s", float(args["train_s"]))
+        if args.get("repeats") not in (None, ""):
+            app._nt_set_control("nt_st_rb_repeats", int(float(args["repeats"])))
         if not app._nt_rb_start():
             raise RuntimeError(app._nt_rb_error or "sweep did not start")
 
@@ -393,7 +404,7 @@ class ControlBridge:
             if app._nt_rb_error:
                 raise RuntimeError(app._nt_rb_error)
             res = app._nt_rb_compact()
-            return {"robust": res,
+            return {"mode": (res or {}).get("mode"), "robust": res,
                     "table": dpg.get_value("nt_st_rb_table")}
         return _Async(lambda: not app.trainer_running, finalize,
                       timeout_s=args.get("timeout_s", 7200))

@@ -27,6 +27,12 @@ U_BUDGET = 2400.0            # record u only when seconds x neurons <= this
 # prunes the answers to noise; at 0.475 it potentiated the digit's rows under
 # the fixed threshold and the false answers rose (MNIST '0', 60 s).
 W0_DEFAULT = {POISSON: 0.475, IMAGES: 1.0}
+# ... except per image code (free parameter, measured on the MNIST '0', 28 x
+# 28, 1-10 Hz noise, 2 stream seeds x 2 frozen draws): frozen Poisson fires
+# about 5 spikes per line per window, so from 1.0 STDP depressed the image's
+# own lines below the threshold and the hits collapsed (13 of 16 cells); from
+# 0.5 the hits held in all 16 (0.7 failed, see neurovat/README.md)
+W0_CODE = {"frozen Poisson": 0.5}
 DETECT_HIT, DETECT_FALSE = 0.9, 0.1   # image verdict: >= 90 % hits, <= 10 % others
 # nt_st_noise / nt_st_bg defaults per input layout: 10 Hz for the scans (and
 # Poisson input); the pixel codes (latency, frozen Poisson) have 28 x 28 = 784
@@ -37,6 +43,10 @@ NOISE_HZ = 10.0
 # (untrained 188/188 false windows -> 0-4/188, hits held); at 1 Hz it is
 # clean untrained; at 10 Hz it fires in every window
 PIXEL_NOISE_HZ = 3.0
+# ... except per code: frozen Poisson (start weight 0.5) is clean untrained
+# at 1-5 Hz, so only at 10 Hz is there something to learn (every empty
+# window answered untrained -> none, hits held; MNIST '0', 4 runs)
+CODE_NOISE_HZ = {"frozen Poisson": 10.0}
 # pixel codes: input lines drawn in the raster (room for every inked pixel
 # of one image: the built-in 28 x 28 '0' has 454, an MNIST digit ~100-200)
 PIXEL_SHOWN = 480
@@ -65,20 +75,41 @@ def code_layout(value):
     return STREAM_LAYOUT[code_name(value)]
 
 
-def noise_default(layout):
+def noise_default(layout, code=None):
     """Default noise Hz / background Hz for an input layout (None = Poisson
-    input): PIXEL_NOISE_HZ for the pixel codes, NOISE_HZ otherwise."""
+    input) and image code: the code's CODE_NOISE_HZ if it has one, else
+    PIXEL_NOISE_HZ for the pixel codes, NOISE_HZ otherwise."""
+    if code is not None:
+        try:
+            code = code_name(code)
+        except ValueError:
+            code = None
+    if code in CODE_NOISE_HZ:
+        return CODE_NOISE_HZ[code]
     return PIXEL_NOISE_HZ if layout == "pixel" else NOISE_HZ
 
 
-def swapped_default(value, old_layout, new_layout):
-    """The value a noise control takes when the layout changes: the new
-    layout's default if it still holds the old layout's default (the user
-    has not edited it), else ``value`` unchanged."""
+def swapped_default(value, old_layout, new_layout, old_code=None,
+                    new_code=None):
+    """The value a noise control takes when the layout or code changes: the
+    new default if it still holds the old default (the user has not edited
+    it), else ``value`` unchanged."""
     v = float(value)
-    if abs(v - noise_default(old_layout)) < 1e-6:
-        return noise_default(new_layout)
+    if abs(v - noise_default(old_layout, old_code)) < 1e-6:
+        return noise_default(new_layout, new_code)
     return v
+
+
+def w0_default(kind, code=None):
+    """Default start weight (nt_st_w0) of an input kind and image code:
+    W0_DEFAULT per input, W0_CODE for an image code that has one."""
+    if kind != IMAGES:
+        return W0_DEFAULT[POISSON]
+    try:
+        code = code_name(code)
+    except ValueError:
+        code = None
+    return W0_CODE.get(code, W0_DEFAULT[IMAGES])
 
 
 def line_label(layout, i, size):
@@ -127,15 +158,16 @@ CODE_TIPS = {
                 "at r x bin ms (a top-to-bottom sweep).",
     "latency": "latency: one input per pixel (r x W + c); a pixel fires once, "
                "the brighter the earlier, within the window. Learns at 3-5 "
-               "Hz noise with 60 s of training (default 3 Hz for the pixel "
-               "codes).",
-    "frozen Poisson": "frozen Poisson (unreliable): one input per pixel; "
-                      "Poisson spikes at 100 Hz x brightness over the window, "
-                      "drawn once and repeated unchanged. The hits collapsed "
-                      "after training at 1, 3 (a GUI run) and 5 Hz and on 1 of "
-                      "2 seeds at "
-                      "10 Hz: about 5 spikes per line per window, so STDP "
-                      "depresses the image's own lines below the threshold.",
+               "Hz noise with 60 s of training (default 3 Hz for latency).",
+    "frozen Poisson": "frozen Poisson: one input per pixel; Poisson spikes "
+                      "at 100 Hz x brightness over the window, drawn once "
+                      "and repeated unchanged (about 5 per line). Start "
+                      "weight 0.5 and noise 10 Hz (set when you pick it, "
+                      "unless you changed them): from weight 1 STDP "
+                      "depressed the image's own lines below the threshold "
+                      "and the hits collapsed; from 0.5 they held at 1-10 "
+                      "Hz, and at 10 Hz training removed the false answers "
+                      "(clean untrained at 1-5 Hz).",
 }
 
 

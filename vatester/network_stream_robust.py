@@ -13,6 +13,15 @@ and its stop flag ``_trainer_stop``.
 "Show in Raster" replays ONE keyed STDP-off run at a swept level through the
 Raster tab (the same stream and numbers as that level of the sweep).
 
+Two modes (radio ``nt_st_rb_mode``): "recall" tests the trained network at
+every level; "retrain at each level" trains a fresh copy at every level
+(``nt_st_rb_train_s`` seconds, 0 = the seconds the network was trained;
+``nt_st_rb_repeats`` trainings) and tests that. The last result of each
+mode is kept; the toggle switches the plots, the table and the Raster list
+between them (disabled while a sweep runs). In retrain mode "Show in
+Raster" replays that level's retrained weights (the first training) on a
+copy, never the session's. Retrain is refused for device synapses.
+
 The module-level helpers are GUI-free (tested in tests/test_robust_tab.py).
 """
 import math
@@ -43,6 +52,26 @@ INTRO = ("After training, the network is tested (STDP off, threshold held) "
          "on one fixed test stream, one factor changed at a time; counted "
          "over the whole run, so the numbers differ from Test's last-third "
          "verdict.")
+MODES = ("recall", "retrain at each level")
+MODE_KEYS = {MODES[0]: sr.RECALL, MODES[1]: sr.RETRAIN}
+MODE_TEXT = {
+    sr.RECALL: ("RECALL: the trained network, tested at each level (STDP "
+                "off)"),
+    sr.RETRAIN: ("RETRAIN at each level: a fresh copy (start weights, same "
+                 "patterns, threshold held) trained at the level with STDP "
+                 "on, then tested there (STDP off). Nominal = retrained at "
+                 "nominal: an independent training, not your network")}
+DEVICE_RETRAIN = sr.DEVICE_REFUSAL + " (use recall for device synapses)"
+
+
+def mode_key(value):
+    """Radio / bridge value -> sr.RECALL | sr.RETRAIN (None if unknown)."""
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "on") or s.startswith("retrain"):
+        return sr.RETRAIN
+    if s in ("0", "false", "no", "off", "") or s.startswith("recall"):
+        return sr.RECALL
+    return None
 
 # (tag, one-line meaning) - added to the controls the agent / bridge may set
 ROBUST_CONTROLS = [
@@ -59,6 +88,14 @@ ROBUST_CONTROLS = [
                            "(ideal synapses only)"),
     ("nt_st_rb_pick", "robustness sweep: the swept level 'Show in Raster' "
                       "replays (an item of the list, or its index)"),
+    ("nt_st_rb_mode", "robustness sweep mode: 'recall' (test the trained "
+                      "network) | 'retrain at each level' (train a fresh "
+                      "copy at each level, then test it; ideal synapses "
+                      "only). Switches the shown result"),
+    ("nt_st_rb_train_s", "robustness retrain: training seconds per level "
+                         "(0 = the seconds the network was trained)"),
+    ("nt_st_rb_repeats", "robustness retrain: independent trainings per "
+                         "level (1-10, default 1): mean and min-max"),
 ]
 
 
@@ -140,17 +177,33 @@ def _num(v):
     return v
 
 
+SPREAD = ("n_runs", "hit_min", "hit_max", "false_min", "false_max",
+          "train_post_spikes")
+
+
 def _run(r):
     if r is None:
         return None
-    return {k: _num(r[k]) for k in (
+    out = {k: _num(r[k]) for k in (
         "hits", "pattern_windows", "false_windows", "other_windows",
         "hit_pct", "false_pct", "balanced_accuracy", "post_spikes")}
+    out.update({k: _num(r[k]) for k in SPREAD if k in r})
+    return out
+
+
+def _row(r, scale):
+    out = {"level": float(r["level"]), "shown": float(r["level"]) * scale,
+           "nominal": bool(r["nominal"]), "trained": _run(r["trained"]),
+           "untrained": _run(r["untrained"])}
+    if "repeats" in r:              # retrain: each training (no weights)
+        out["repeats"] = [_run(x) for x in r["repeats"]]
+    return out
 
 
 def compact(result):
-    """JSON-safe copy without the per-neuron engine counts (NaN -> None);
-    each row also carries ``shown``, the level in display units."""
+    """JSON-safe copy without the per-neuron engine counts and the retrained
+    weights (NaN -> None); each row also carries ``shown``, the level in
+    display units."""
     if result is None:
         return None
     out = {k: _num(v) for k, v in result.items()
@@ -159,12 +212,43 @@ def compact(result):
     out["factors"] = [{
         "factor": b["factor"], "label": b["label"], "unit": b["unit"],
         "scale": b["scale"],
-        "rows": [{"level": float(r["level"]),
-                  "shown": float(r["level"]) * b["scale"],
-                  "nominal": bool(r["nominal"]),
-                  "trained": _run(r["trained"]),
-                  "untrained": _run(r["untrained"])} for r in b["rows"]]}
+        "rows": [_row(r, b["scale"]) for r in b["rows"]]}
         for b in result["factors"]]
+    return out
+
+
+def result_mode(result):
+    return (result or {}).get("mode") or sr.RECALL
+
+
+def find_row(result, factor, level):
+    """The row of ``factor`` at ``level`` (None if not swept)."""
+    for b in (result or {}).get("factors", []):
+        if b["factor"] == factor:
+            for r in b["rows"]:
+                if float(r["level"]) == float(level):
+                    return r
+    return None
+
+
+def bands(block):
+    """Retrain with several trainings: the min-max of the trained hit % and
+    false % per level, {"hit": (xs, lo, hi), "false": ...}; empty lists
+    when the rows have one training (or none)."""
+    out = {}
+    for what in ("hit", "false"):
+        xs, lo, hi = [], [], []
+        for r in block["rows"]:
+            run = r.get("trained") or {}
+            a, b = run.get(f"{what}_min"), run.get(f"{what}_max")
+            if (run.get("n_runs") or 1) < 2 or a is None or b is None:
+                continue
+            if not (math.isfinite(float(a)) and math.isfinite(float(b))):
+                continue
+            xs.append(float(r["level"]) * block["scale"])
+            lo.append(float(a))
+            hi.append(float(b))
+        out[what] = (xs, lo, hi)
     return out
 
 
@@ -189,9 +273,11 @@ def series(block):
 def entries(result):
     """[(text, factor, level)] of every swept level (the Raster combo)."""
     out = []
+    nom = (f" ({sr.RETRAIN_NOMINAL})" if result_mode(result) == sr.RETRAIN
+           else " (nominal)")
     for b in (result or {}).get("factors", []):
         for r in b["rows"]:
-            mark = " (nominal)" if r["nominal"] else ""
+            mark = nom if r["nominal"] else ""
             out.append((f"{b['label']} {r['level'] * b['scale']:g} "
                         f"{b['unit']}{mark}", b["factor"], float(r["level"])))
     return out
@@ -218,14 +304,21 @@ def summary_lines(result):
     def cell(r):
         if r is None:
             return "-"
-        return (f"hits {r['hits']}/{r['pattern_windows']}, false "
+        text = (f"hits {r['hits']}/{r['pattern_windows']}, false "
                 f"{r['false_windows']}/{r['other_windows']}")
+        if (r.get("n_runs") or 1) > 1:
+            text += (f" (summed over {r['n_runs']} trainings; hit % "
+                     f"{r['hit_pct']:.1f} [{r['hit_min']:.0f}-"
+                     f"{r['hit_max']:.0f}], false % {r['false_pct']:.1f} "
+                     f"[{r['false_min']:.0f}-{r['false_max']:.0f}])")
+        return text
+    who = "retrained" if result_mode(result) == sr.RETRAIN else "trained"
     lines = []
     for b in result.get("factors", []):
         for r in b["rows"]:
             mark = "*" if r["nominal"] else ""
             lines.append(f"  {b['label']} {r['level'] * b['scale']:g}"
-                         f"{mark} {b['unit']}: trained {cell(r['trained'])}"
+                         f"{mark} {b['unit']}: {who} {cell(r['trained'])}"
                          f" | untrained {cell(r['untrained'])}")
     return lines
 
@@ -234,9 +327,11 @@ def summary_lines(result):
 
 class NetworkStreamRobustMixin:
     _nt_stream_trained_with = None  # stream settings of the last Train
-    _nt_rb_result = None            # the last sweep (full, render thread)
+    _nt_rb_result = None            # the SHOWN mode's last sweep (full)
     _nt_rb_meta = None              # ... which network it was run on
     _nt_rb_entries = ()             # [(text, factor, level)] for the combo
+    _nt_rb_store = None             # {mode: (result, meta)}: last of each
+    _nt_rb_shown = sr.RECALL        # the mode the plots / table show
     _nt_rb_error = None
     _nt_rb_kind = None              # "sweep" | "raster" while one runs
     _nt_rb_agent = False            # the agent started the sweep in flight
@@ -308,18 +403,57 @@ class NetworkStreamRobustMixin:
                                callback=lambda *_: self._nt_rb_start())
                 dpg.add_button(label=" Stop ", tag="nt_st_rb_stop",
                                callback=lambda *_: self._nt_rb_stop())
+            with dpg.group(horizontal=True):
+                self._small("mode", color=C_TEXT2)
+                dpg.add_radio_button(list(MODES), tag="nt_st_rb_mode",
+                                     default_value=MODES[0], horizontal=True,
+                                     callback=lambda *_: self._nt_rb_on_mode())
+                with dpg.tooltip("nt_st_rb_mode"):
+                    dpg.add_text(
+                        "recall: the trained network is tested at each level."
+                        "\nretrain at each level: for every level a fresh "
+                        "copy (start weights, same patterns, threshold held) "
+                        "is trained AT that level (STDP on, one training "
+                        "stream for every level), then tested there (STDP "
+                        "off, the sweep's test stream): what a network "
+                        "trained under that input learns. Ideal synapses "
+                        "only. The last result of each mode is kept: the "
+                        "toggle switches between them.", wrap=320)
+                self._small("  train s / level", color=C_TEXT2)
+                dpg.add_input_double(tag="nt_st_rb_train_s", default_value=0.0,
+                                     width=70, format="%.4g", step=0,
+                                     callback=lambda *_: self._nt_rb_mode_note())
+                with dpg.tooltip("nt_st_rb_train_s"):
+                    dpg.add_text("Retrain: seconds of training per level "
+                                 "(and per repeat). 0 = the seconds this "
+                                 "network was trained.", wrap=300)
+                self._small("repeats", color=C_TEXT2)
+                dpg.add_input_int(tag="nt_st_rb_repeats", default_value=1,
+                                  width=70, min_value=1, max_value=10,
+                                  min_clamped=True, max_clamped=True, step=0,
+                                  callback=lambda *_: self._nt_rb_mode_note())
+                with dpg.tooltip("nt_st_rb_repeats"):
+                    dpg.add_text("Retrain: independent trainings per level "
+                                 "(training streams (key, 1..N)). The plots "
+                                 "show the mean and a min-max band; 1 = one "
+                                 "training run per level.", wrap=300)
+            self._small("recall: the trained network is tested at each level; "
+                        "training seconds and repeats are for retrain",
+                        color=C_MUTED, tag="nt_st_rb_mode_note", wrap=0)
             dpg.add_text("Robustness: train first, then press Run sweep.",
                          tag="nt_st_rb_status", color=C_TEXT2, wrap=0)
             self._small("", color=C_MUTED, tag="nt_st_rb_nominal", wrap=0)
+            dpg.add_text("showing: " + MODE_TEXT[sr.RECALL] + " - no sweep yet",
+                         tag="nt_st_rb_showing", color=C_TEXT2, wrap=0)
             with dpg.group(horizontal=True):
-                for (col, alpha), what in (((HIT_COL, 255), "trained: hits"),
-                                           ((FALSE_COL, 255), "false windows"),
-                                           ((HIT_COL, 150), "  untrained "
-                                            "(faded, wide): hits"),
-                                           ((FALSE_COL, 150), "false windows"),
-                                           ((NOM_COL[:3], 255),
-                                            "  | grey line = nominal")):
-                    self._small(what, color=(*col, alpha))
+                for (col, alpha), what, tag in (
+                        ((HIT_COL, 255), "trained: hits", "nt_st_rb_leg_who"),
+                        ((FALSE_COL, 255), "false windows", 0),
+                        ((HIT_COL, 150), "  untrained (faded, wide): hits", 0),
+                        ((FALSE_COL, 150), "false windows", 0),
+                        ((NOM_COL[:3], 255), "  | grey line = nominal", 0),
+                        ((NOM_COL[:3], 255), "", "nt_st_rb_leg_band")):
+                    self._small(what, color=(*col, alpha), tag=tag)
             with dpg.table(header_row=False, borders_innerV=False,
                            borders_outerV=False, borders_innerH=False,
                            borders_outerH=False, pad_outerX=False,
@@ -335,12 +469,16 @@ class NetworkStreamRobustMixin:
                 dpg.add_button(label=" Show in Raster ", tag="nt_st_rb_show",
                                callback=lambda *_: self._nt_rb_show_raster())
                 with dpg.tooltip("nt_st_rb_show"):
-                    dpg.add_text("Runs ONE keyed STDP-off run of the trained "
+                    dpg.add_text("Runs ONE keyed STDP-off run of the shown "
                                  "network at that level and shows it in the "
                                  "Raster tab: the same stream and spikes as "
-                                 "that level of the sweep. It replaces the "
-                                 "Raster's replay of the last Train / Test.",
+                                 "that level of the sweep. Recall: the "
+                                 "trained network. Retrain: that level's "
+                                 "retrained weights (the first training), "
+                                 "on a copy. It replaces the Raster's "
+                                 "replay of the last Train / Test.",
                                  wrap=300)
+                self._small("", color=C_MUTED, tag="nt_st_rb_show_note")
             dpg.add_input_text(tag="nt_st_rb_table", multiline=True,
                                readonly=True, width=-1, height=230,
                                default_value="no sweep yet")
@@ -358,6 +496,13 @@ class NetworkStreamRobustMixin:
                 s = dpg.add_inf_line_series([], label="nominal",
                                             tag=f"nt_st_rb_{stem}_nom")
                 dpg.bind_item_theme(s, self._nt_st_theme("line", NOM_COL, 1.0))
+                # retrain with repeats: min-max band of the retrained runs
+                for what, col in (("hit", HIT_COL), ("false", FALSE_COL)):
+                    s = dpg.add_shade_series(
+                        [], [], y2=[], label=f"min-max {what}",
+                        tag=f"nt_st_rb_{stem}_band_{what}")
+                    dpg.bind_item_theme(s, self._nt_st_theme(
+                        "fill", (*col, 60)))
                 # untrained first (wide, faded), trained on top: they can
                 # coincide exactly and both must stay visible
                 for who, weight, marker, msize, alpha in (
@@ -443,34 +588,191 @@ class NetworkStreamRobustMixin:
             return self._nt_rb_refuse(str(exc))
         seconds = min(max(seconds, 1.0), 600.0)
         device = s.device is not None
+        mode = self._nt_rb_mode()
+        retrain = mode == sr.RETRAIN
+        train_s, repeats = self._nt_rb_train_settings()
+        if retrain and device:
+            return self._nt_rb_refuse(DEVICE_RETRAIN)
         want_base = bool(self._nt_get("nt_st_rb_untrained", True))
         untrained = None if want_base else False
         n_levels = sum(len(lv) for _f, lv in plan)
-        n_runs = n_levels * (2 if want_base and not device else 1)
-        self._nt_rb_meta = {"session": s, "trained_s": self._nt_stream_trained_s,
-                            "key": key, "how": how, "device": device,
-                            "nominal": dict(nom), "seconds": seconds}
+        n_tests = n_levels * (2 if want_base and not device else 1)
+        meta = {"session": s, "trained_s": self._nt_stream_trained_s,
+                "key": key, "how": how, "device": device,
+                "nominal": dict(nom), "seconds": seconds, "mode": mode}
+        if retrain:
+            meta.update(train_s=train_s, repeats=repeats)
+        self._nt_rb_run_meta = meta     # stored with the result when done
         self.trainer_running = True
         self._trainer_stop = False
         self._nt_rb_kind = "sweep"
         self._nt_busy(True)
+        self._nt_rb_enable_mode(False)
+        self._nt_rb_show_mode(mode)     # this mode's previous result, if any
         self._nt_rb_clear()
+        self._nt_rb_set_showing(mode, None, running=True)
         nom_txt = ", ".join(f"{k} {v:g}" if isinstance(v, (int, float))
                             else f"{k} {v}" for k, v in nom.items())
         if dpg.does_item_exist("nt_st_rb_nominal"):
             dpg.set_value("nt_st_rb_nominal", f"nominal = {how}: {nom_txt}"
                           + (f". {DEVICE_NOTE}." if device and want_base else ""))
         self._nt_status("robustness sweep", C_AMBER)
-        self._nt_rb_say(f"sweep: {n_levels} levels, {n_runs} runs of "
-                        f"{seconds:g} s - starting...", C_AMBER)
-        self.log(f"[robust] sweep: {n_levels} levels x {seconds:g} s, "
-                 f"untrained {'on' if want_base else 'off'}"
+        if retrain:
+            n_train = n_levels * repeats
+            sim_s = n_train * (train_s + seconds) + (n_tests - n_levels) * seconds
+            self._nt_rb_say(
+                f"retrain sweep: {n_levels} levels x {repeats} training(s) of "
+                f"{train_s:g} s + {seconds:g} s test"
+                + (" + untrained test" if n_tests > n_levels else "")
+                + f" = {sim_s:g} s of stream - starting...", C_AMBER)
+        else:
+            self._nt_rb_say(f"sweep: {n_levels} levels, {n_tests} runs of "
+                            f"{seconds:g} s - starting...", C_AMBER)
+        self.log(f"[robust] {mode} sweep: {n_levels} levels x {seconds:g} s"
+                 + (f", {repeats} x {train_s:g} s training per level"
+                    if retrain else "")
+                 + f", untrained {'on' if want_base else 'off'}"
                  f"{' (device: not available)' if device and want_base else ''}"
                  f"; nominal = {how}: {nom_txt}")
         threading.Thread(target=self._nt_rb_worker,
                          args=(s, plan, seconds, nominal, untrained, device,
-                               want_base), daemon=True).start()
+                               want_base, retrain, train_s, repeats),
+                         daemon=True).start()
         return True
+
+    # ---- mode ------------------------------------------------------------
+
+    def _nt_rb_mode(self):
+        """The mode the radio selects (sr.RECALL | sr.RETRAIN)."""
+        return mode_key(self._nt_get("nt_st_rb_mode", MODES[0])) or sr.RECALL
+
+    def _nt_rb_train_settings(self):
+        """(training seconds per level, repeats): 0 s = the seconds the
+        network was trained."""
+        try:
+            train_s = float(self._nt_get("nt_st_rb_train_s", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            train_s = 0.0
+        if not math.isfinite(train_s) or train_s <= 0.0:
+            train_s = float(self._nt_stream_trained_s or 0.0)
+        train_s = min(max(train_s, 1.0), 3600.0)
+        try:
+            repeats = int(self._nt_get("nt_st_rb_repeats", 1) or 1)
+        except (TypeError, ValueError):
+            repeats = 1
+        return train_s, min(max(repeats, 1), 10)
+
+    def _nt_rb_enable_mode(self, on):
+        for tag in ("nt_st_rb_mode", "nt_st_rb_train_s", "nt_st_rb_repeats"):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, enabled=on)
+
+    def _nt_rb_on_mode(self, *_):
+        """The radio (or the bridge) switched the mode: show that mode's
+        last result. While a sweep runs the mode is held."""
+        mode = self._nt_rb_mode()
+        if self.trainer_running and self._nt_rb_kind is not None:
+            run = self._nt_rb_shown
+            if mode != run and dpg.does_item_exist("nt_st_rb_mode"):
+                dpg.set_value("nt_st_rb_mode",
+                              MODES[run == sr.RETRAIN])
+            return
+        self._nt_rb_show_mode(mode)
+        r = self._nt_rb_result
+        if r is None:
+            self._nt_rb_say(f"{mode}: no sweep in this mode yet - press Run "
+                            "sweep.", C_TEXT2)
+        else:
+            self._nt_rb_say(f"{mode}: showing its last sweep ("
+                            f"{len(self._nt_rb_entries)} levels, "
+                            f"{r.get('wall_s', 0.0):.0f} s wall"
+                            + (", STOPPED" if r.get("stopped") else "")
+                            + ").", C_TEXT2)
+
+    def _nt_rb_show_mode(self, mode):
+        """Make ``mode``'s stored result the shown one (plots, table, Raster
+        list, labels)."""
+        self._nt_rb_shown = mode
+        r, meta = (self._nt_rb_store or {}).get(mode, (None, None))
+        self._nt_rb_result, self._nt_rb_meta = r, meta
+        self._nt_rb_entries = entries(r) if r else ()
+        items = [e[0] for e in self._nt_rb_entries]
+        if dpg.does_item_exist("nt_st_rb_pick"):
+            dpg.configure_item("nt_st_rb_pick", items=items)
+            if items and dpg.get_value("nt_st_rb_pick") not in items:
+                dpg.set_value("nt_st_rb_pick", items[0])
+            elif not items:
+                dpg.set_value("nt_st_rb_pick", "")
+        self._nt_rb_clear()
+        if r is not None:
+            self._nt_rb_draw(compact(r))
+        if dpg.does_item_exist("nt_st_rb_table"):
+            dpg.set_value("nt_st_rb_table", table_text(r) if r else
+                          f"no {mode} sweep yet")
+        self._nt_rb_set_showing(mode, r)
+
+    def _nt_rb_set_showing(self, mode, r, running=False):
+        """The labels that say which mode the plots show."""
+        if dpg.does_item_exist("nt_st_rb_showing"):
+            if running:
+                tail = " - running..."
+            elif r is None:
+                tail = " - no sweep in this mode yet"
+            else:
+                tail = (f"; {r['seconds']:g} s test per level"
+                        + (f", {r['train_seconds']:g} s training per level, "
+                           + ("one training run per level"
+                              if int(r.get("repeats") or 1) == 1 else
+                              f"{r['repeats']} training runs per level: "
+                              "mean, band = min-max")
+                           if mode == sr.RETRAIN else "")
+                        + ("; STOPPED, partial" if r.get("stopped") else ""))
+                meta = self._nt_rb_meta or {}
+                if meta.get("session") is not None:
+                    tail += f"; run on the network after {meta['trained_s']:.0f} s of training"
+                    if (meta["session"] is not self._nt_stream_session
+                            or meta["trained_s"] != self._nt_stream_trained_s):
+                        tail += " (the network changed since: run it again)"
+            dpg.set_value("nt_st_rb_showing",
+                          "showing: " + MODE_TEXT[mode] + tail)
+            dpg.configure_item("nt_st_rb_showing",
+                               color=C_AMBER if mode == sr.RETRAIN
+                               else C_TEXT2)
+        if dpg.does_item_exist("nt_st_rb_leg_who"):
+            dpg.set_value("nt_st_rb_leg_who", "retrained: hits"
+                          if mode == sr.RETRAIN else "trained: hits")
+        if dpg.does_item_exist("nt_st_rb_leg_band"):
+            multi = (mode == sr.RETRAIN and r is not None
+                     and int(r.get("repeats") or 1) > 1)
+            dpg.set_value("nt_st_rb_leg_band", "  | shaded = min-max of the "
+                          "trainings" if multi else "")
+        if dpg.does_item_exist("nt_st_rb_show_note"):
+            dpg.set_value("nt_st_rb_show_note", "replays that level's "
+                          "retrained weights (first training)"
+                          if mode == sr.RETRAIN else "")
+        self._nt_rb_mode_note()
+
+    def _nt_rb_mode_note(self):
+        if not dpg.does_item_exist("nt_st_rb_mode_note"):
+            return
+        mode = self._nt_rb_mode()
+        if mode != sr.RETRAIN:
+            dpg.set_value("nt_st_rb_mode_note", "recall: the trained network "
+                          "is tested at each level; training seconds and "
+                          "repeats are for retrain")
+            return
+        train_s, repeats = self._nt_rb_train_settings()
+        s = self._nt_stream_session
+        if s is not None and s.device is not None:
+            note = DEVICE_RETRAIN
+        else:
+            raw = float(self._nt_get("nt_st_rb_train_s", 0.0) or 0.0)
+            note = (f"retrain: {train_s:g} s training per level"
+                    + (" (= the network's trained seconds)" if raw <= 0.0
+                       else "") + ", "
+                    + ("one training run per level" if repeats == 1 else
+                       f"{repeats} training runs per level"))
+        dpg.set_value("nt_st_rb_mode_note", note)
 
     def _nt_rb_stop(self, *_):
         if self.trainer_running:
@@ -485,17 +787,25 @@ class NetworkStreamRobustMixin:
                     t = f"nt_st_rb_{stem}_{who}_{what}"
                     if dpg.does_item_exist(t):
                         dpg.set_value(t, [[], []])
+            for what in ("hit", "false"):
+                t = f"nt_st_rb_{stem}_band_{what}"
+                if dpg.does_item_exist(t):
+                    dpg.set_value(t, [[], [], []])
             if dpg.does_item_exist(f"nt_st_rb_{stem}_nom"):
                 dpg.set_value(f"nt_st_rb_{stem}_nom", [[]])
 
     # ---- worker (no DPG access) ------------------------------------------
 
     def _nt_rb_worker(self, session, plan, seconds, nominal, untrained,
-                      device, want_base):
-        out = {"kind": "sweep", "error": None, "result": None}
+                      device, want_base, retrain=False, train_s=None,
+                      repeats=1):
+        mode = sr.RETRAIN if retrain else sr.RECALL
+        out = {"kind": "sweep", "mode": mode, "error": None, "result": None}
         try:
             stop = lambda: bool(self._trainer_stop)            # noqa: E731
             total = sum(len(lv) for _f, lv in plan)
+            kw = ({"retrain": True, "train_seconds": train_s,
+                   "repeats": repeats} if retrain else {})
             merged, k = None, 0
             for factor, levels in plan:
                 for v in levels:
@@ -506,10 +816,10 @@ class NetworkStreamRobustMixin:
 
                     def progress(_i, _n, text, k=k):
                         self.q.put(("nt_robust_progress", {
-                            "text": f"level {k + 1} of {total}: {text}"}))
+                            "text": f"level {k + 1}/{total}, {text}"}))
                     part = sr.sweep(session, {factor: [v]}, seconds=seconds,
                                     nominal=nominal, on_progress=progress,
-                                    stop=stop, untrained=untrained)
+                                    stop=stop, untrained=untrained, **kw)
                     merged = merge(merged, part)
                     if device and want_base:
                         merged["untrained_note"] = DEVICE_NOTE
@@ -527,7 +837,12 @@ class NetworkStreamRobustMixin:
                     session, nominal), "seconds": float(seconds),
                     "key": sr.SWEEP_KEY, "images": bool(session.given),
                     "rule": sv.hit_rule(bool(session.given)),
-                    "untrained_note": "-", "stopped": True, "wall_s": 0.0}
+                    "untrained_note": "-", "stopped": True, "wall_s": 0.0,
+                    "mode": mode}
+                if retrain:
+                    merged.update(train_seconds=float(train_s),
+                                  repeats=int(repeats),
+                                  train_key=sr.TRAIN_KEY)
             out["result"] = merged
         except Exception as ex:                          # noqa: BLE001
             out["error"] = str(ex) or repr(ex)
@@ -536,9 +851,11 @@ class NetworkStreamRobustMixin:
             self.q.put(("nt_robust_done", out))
 
     def _nt_rb_raster_worker(self, session, factor, level, nominal, seconds,
-                             key, arch, view_ms):
+                             key, arch, view_ms, retrained=False):
+        """``session``: the trained session (recall) or a copy holding a
+        level's retrained weights (retrain)."""
         out = {"kind": "raster", "error": None, "factor": factor,
-               "level": level}
+               "level": level, "retrained": retrained}
         saved = session.kw
         try:
             changes = dict(sr.nominal_settings(session, nominal))
@@ -592,39 +909,44 @@ class NetworkStreamRobustMixin:
         self._nt_rb_kind = None
         agent, self._nt_rb_agent = self._nt_rb_agent, False
         try:
+            self._nt_rb_enable_mode(True)
             if out.get("kind") == "raster":
                 self._nt_rb_raster_done(out)
                 return
+            mode = out.get("mode") or sr.RECALL
             if out["error"]:
                 self._nt_rb_error = out["error"]
+                self._nt_rb_show_mode(mode)     # back to its last result
                 self._nt_status("robustness sweep failed", C_RED)
-                self._nt_rb_say("sweep failed: " + out["error"], C_RED)
+                self._nt_rb_say(f"{mode} sweep failed: " + out["error"], C_RED)
                 if agent:
                     self.append_chat("sys", "robustness sweep failed: "
                                      + out["error"])
                 return
-            r = self._nt_rb_result = out["result"]
-            self._nt_rb_draw(compact(r))
+            r = out["result"]
+            if self._nt_rb_store is None:
+                self._nt_rb_store = {}
+            self._nt_rb_store[mode] = (r, getattr(self, "_nt_rb_run_meta",
+                                                  None))
+            if self._nt_rb_mode() != mode and dpg.does_item_exist(
+                    "nt_st_rb_mode"):
+                dpg.set_value("nt_st_rb_mode", MODES[mode == sr.RETRAIN])
+            self._nt_rb_show_mode(mode)
             table = table_text(r)
-            dpg.set_value("nt_st_rb_table", table)
-            self._nt_rb_entries = entries(r)
-            items = [e[0] for e in self._nt_rb_entries]
-            dpg.configure_item("nt_st_rb_pick", items=items)
-            if items and dpg.get_value("nt_st_rb_pick") not in items:
-                dpg.set_value("nt_st_rb_pick", items[0])
             n = len(self._nt_rb_entries)
             if r.get("stopped"):
                 self._nt_status("robustness sweep stopped", C_AMBER)
-                self._nt_rb_say(f"stopped: {n} level(s) finished "
+                self._nt_rb_say(f"{mode} sweep stopped: {n} level(s) finished "
                                 f"({r.get('wall_s', 0.0):.0f} s wall)", C_AMBER)
             else:
                 self._nt_status("robustness sweep done", C_GREEN)
-                self._nt_rb_say(f"done: {n} levels in {r.get('wall_s', 0.0):.0f} "
-                                "s wall. The same sweep again gives the same "
-                                "numbers (one fixed stream key).", C_GREEN)
+                self._nt_rb_say(f"{mode} sweep done: {n} levels in "
+                                f"{r.get('wall_s', 0.0):.0f} s wall. The same "
+                                "sweep again gives the same numbers (fixed "
+                                "stream keys).", C_GREEN)
             self.log("[robust] " + table.replace("\n", "\n  "))
             if agent:
-                self.append_chat("sys", "robustness sweep done:\n"
+                self.append_chat("sys", f"robustness sweep ({mode}) done:\n"
                                  + "\n".join(summary_lines(r)))
         except Exception as exc:                        # noqa: BLE001
             self.log(f"[robust] view error: {exc!r}")
@@ -644,6 +966,12 @@ class NetworkStreamRobustMixin:
                     xs, ys = data.get(f"{who}_{what}", ([], []))
                     dpg.set_value(f"nt_st_rb_{stem}_{who}_{what}", [xs, ys])
                     xs_all += xs
+            band = bands(b) if b else {}
+            for what in ("hit", "false"):
+                xs, lo, hi = band.get(what, ([], [], []))
+                t = f"nt_st_rb_{stem}_band_{what}"
+                if dpg.does_item_exist(t):
+                    dpg.set_value(t, [xs, hi, lo])
             nv = nominal.get(factor)
             nx = [] if nv is None else [float(nv) * scale]
             dpg.set_value(f"nt_st_rb_{stem}_nom", [nx])
@@ -681,6 +1009,20 @@ class NetworkStreamRobustMixin:
         arch = self._nt_st_arch
         if not arch or arch.get("error") or not self._nt_st_same_net(arch):
             return self._nt_rb_refuse("the network view is not available")
+        retrained = result_mode(r) == sr.RETRAIN
+        net = s
+        if retrained:
+            # replay THAT level's retrained network (its first training),
+            # on a copy: the session is never run or changed
+            row = find_row(r, e[1], e[2])
+            weights = (row or {}).get("weights")
+            if not weights:
+                return self._nt_rb_refuse("this retrained level kept no "
+                                          "weights: run the sweep again")
+            if s.device is not None:
+                return self._nt_rb_refuse(DEVICE_RETRAIN)
+            net = sr.fresh_like(s)
+            net.weights = np.array(weights[0], float)
         images = bool(s.given)
         nominal = r["nominal"]
         view_ms = sv.view_window_ms(self._nt_get("nt_st_view_win", 0.0),
@@ -690,13 +1032,17 @@ class NetworkStreamRobustMixin:
         self._trainer_stop = False
         self._nt_rb_kind = "raster"
         self._nt_busy(True)
+        self._nt_rb_enable_mode(False)
         self._nt_st_set_play(False)
-        self._nt_rb_say(f"Raster: running {e[0]} ({r['seconds']:g} s, STDP "
-                        "off, the sweep's stream)...", C_AMBER)
+        self._nt_rb_say(f"Raster: running {e[0]}"
+                        + (" with its retrained weights" if retrained else "")
+                        + f" ({r['seconds']:g} s, STDP off, the sweep's "
+                        "stream)...", C_AMBER)
         self._nt_status("robustness: raster run", C_AMBER)
         threading.Thread(target=self._nt_rb_raster_worker,
-                         args=(s, e[1], e[2], dict(nominal), r["seconds"],
-                               r["key"], arch, view_ms), daemon=True).start()
+                         args=(net, e[1], e[2], dict(nominal), r["seconds"],
+                               r["key"], arch, view_ms, retrained),
+                         daemon=True).start()
         return True
 
     def _nt_rb_raster_done(self, out):
@@ -719,6 +1065,8 @@ class NetworkStreamRobustMixin:
         e = next((x for x in self._nt_rb_entries
                   if x[1] == out["factor"] and x[2] == out["level"]), None)
         what = e[0] if e else f"{out['factor']} {out['level']:g}"
+        if out.get("retrained"):
+            what += " - retrained network (first training)"
         self._nt_status("robustness raster shown", C_GREEN)
         self._nt_rb_say(f"Raster tab: {what}, {out['post_spikes']} output "
                         "spikes (as in the sweep). Train / Test replace it.",
@@ -733,14 +1081,27 @@ class NetworkStreamRobustMixin:
 
     def _nt_rb_context(self):
         """Lines for the agent's context: the last robustness sweep."""
-        r = self._nt_rb_result
-        if not r:
+        store = self._nt_rb_store or {}
+        if not store:
             return ["robustness sweep (nt_st_tab_robust): none yet."]
-        meta = self._nt_rb_meta or {}
-        return ([f"robustness sweep (STDP off, threshold held, one fixed "
-                 f"stream, whole run counted; {r['seconds']:g} s per level, "
-                 f"after {meta.get('trained_s', 0.0):.0f} s of training; "
-                 f"nominal = {meta.get('how', '?')}; * = nominal; untrained: "
-                 f"{r['untrained_note']}"
-                 f"{'; STOPPED, partial' if r.get('stopped') else ''}):"]
-                + summary_lines(r))
+        lines = []
+        for mode in (sr.RECALL, sr.RETRAIN):
+            r, meta = store.get(mode, (None, None))
+            if not r:
+                continue
+            meta = meta or {}
+            how = (f"RETRAIN at each level: a fresh copy trained "
+                   f"{r['train_seconds']:g} s at the level (STDP on), then "
+                   f"tested; {r['repeats']} training run(s) per level; * = "
+                   f"{sr.RETRAIN_NOMINAL} (an independent training, not the "
+                   "user's network)" if mode == sr.RETRAIN else
+                   "RECALL: the trained network; * = nominal")
+            lines += ([f"robustness sweep, {how} (STDP off while testing, "
+                       f"threshold held, one fixed test stream, whole run "
+                       f"counted; {r['seconds']:g} s test per level, network "
+                       f"trained {meta.get('trained_s', 0.0):.0f} s; nominal "
+                       f"= {meta.get('how', '?')}; untrained: "
+                       f"{r['untrained_note']}"
+                       f"{'; STOPPED, partial' if r.get('stopped') else ''}):"]
+                      + summary_lines(r))
+        return lines

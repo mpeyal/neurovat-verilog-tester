@@ -353,6 +353,38 @@ network gave 0/54 false at every level except 26 Hz, and 44 and 9 hits at
 - With 10 ms per column, jitter up to 5 ms does not change any window's
   answer.
 
+**Retrain at each level.** Recall asks how the trained network copes with a
+worse input; retrain (`sweep(..., retrain=True, train_seconds=T,
+repeats=N)`, the tab's "retrain at each level") asks what a network trained
+*under* that input learns. Per level, a fresh copy (start weights, the same
+frozen patterns, the threshold held) is trained with STDP on for T s at that
+level on one keyed training stream (the same key for every level, so only
+the factor differs), then tested at that level with STDP off on the sweep's
+test stream. The user's network is never run. The nominal row is "retrained
+at nominal": an independent training on another stream, not the network you
+trained. N trainings per level (keys (2009, r)) give a mean and a min-max.
+Device synapses are refused (a device copy cannot be made).
+
+Measured: MNIST "0", size 28, column scan, 3 neurons, 60 s of training,
+30 s test per level, ONE training run per level (611 s wall; recall took
+227 s). Hits of 45 image windows / false of 62 other windows:
+
+| level | recall: hits / false | retrain: hits / false |
+|---|---|---|
+| jitter 1 ms (nominal) | 45 / 8 | 45 / 10 |
+| jitter 3 ms | 45 / 8 | 45 / 6 |
+| jitter 5 ms | 45 / 8 | 45 / 4 |
+| missing spikes 10 % | 45 / 8 | 45 / 10 |
+| missing spikes 30 % | 44 / 8 | 45 / 15 |
+| missing spikes 50 % | 23 / 8 | 34 / 22 |
+| extra spikes 5 Hz | 45 / 0 | 45 / 0 |
+| extra spikes 26 Hz | 45 / 62 | 45 / 62 |
+
+The clearest change is at 50 % missing spikes: a network trained there
+keeps more hits (23 -> 34 of 45) but answers more empty windows (8 -> 22 of
+62). With one training run per level, differences of a few windows are not
+trends.
+
 #### Stream encodings
 
 How the image is turned into spikes decides what STDP can learn. Measured
@@ -370,22 +402,64 @@ score); hits held unless stated.
   every window (188/188 -> 188/188 false), nothing learnt; at 1 Hz it is
   clean untrained (0 false), nothing to learn; at 3 Hz 188/188 -> 1/188 on
   both seeds (random spacing at 0.4: 226/226 -> 1/228); at 5 Hz 188/188 ->
-  0-4/188. The GUI defaults pixel codes to 3 Hz noise and background. It
+  0-4/188. The GUI defaults latency to 3 Hz noise and background. It
   needs the longer training: 30 s of training in the GUI gave only
   63/63 -> 39/63 false windows.
 - Frozen Poisson (784 inputs, one fixed draw at 100 Hz x intensity over 50
-  ms) is unreliable. At 1 Hz, at 5 Hz and on 1 of 2 seeds at 10 Hz the hits
-  collapse after training (e.g. 187 -> 9-15). At 3 Hz the one headless run
-  held its hits but learnt nothing, only because it was already clean
-  untrained; a GUI run at 3 Hz (30 s of training, a different frozen draw)
-  collapsed from 62 to 21 hits. Each line fires about 5 times per window, so
-  STDP depresses the image's own lines until the drive no longer reaches the
-  threshold (the auto threshold, 0.85 of the clean peak).
+  ms, about 5 spikes per inked line) starts at weight 0.5, not 1, and the
+  GUI sets its noise and background to 10 Hz. From weight 1 the hits
+  collapsed after training: STDP depressed each line's spikes after the
+  output spike, the digit's own weights fell to a mean of 0.51-0.77, and
+  the clean image's peak at the trained weights fell below the threshold
+  (0.64-0.96 x), so the neuron stopped firing on it and STDP stopped. From
+  0.5 the digit's weights stayed near their start (mean 0.44-0.51) while
+  the other lines fell (mean 0.02-0.30), and the peak stayed at 1.10-1.27 x
+  the threshold. The image is clean untrained at 1-5 Hz (nothing to learn), and
+  learns at 10 Hz.
+
+Frozen Poisson fix search. MNIST "0" (`x_train/255`, size 28, ink 0.5),
+one neuron, random spacing, share 0.4, jitter 1 ms, `noise_hz` = `bg_hz`,
+auto threshold. Protocol: untrained 30 s Test on a fresh session, then
+60 s of training, then a 30 s Test, all whole-run counts. Cells: 1, 3, 5,
+10 Hz x stream seeds 1, 2 x frozen draws `[d, 0]` (`d` = 0, 1; the GUI
+draws image i with `[app seed, i]`). A setting passes when, in every cell,
+the trained hit rate is at least 95 % of the untrained one and the false
+windows fall wherever the untrained network had any. "4 cells" = screened
+on stream seed 1, draw 1 at each Hz and rejected at the first failure;
+other counts are runs cut short. Every rejected setting lost hits in at
+least one cell, and the failing cell moves with the setting (no noise
+range works). Hits compare as rates: the Tests are different stretches of
+stream, so there are 149 or 154 image windows untrained and 147 or 148
+trained.
+
+| setting | cells | hits held | worst trained hits (cell) | peak / thr after training | result |
+|---|---|---|---|---|---|
+| as before (thr 0.85, 100 Hz, w0 1) | 16 | 3 of 16 | 9/147 (3 Hz, draw 1) | 0.64-0.96 | fail |
+| auto threshold 0.70 x peak | 13 | 7 of 13 | 35/147 (1 Hz, draw 1) | 0.74-1.16 | fail |
+| auto threshold 0.60 x peak | 4 | 3 of 4 | 0/147 (10 Hz) | 0.41-0.97 | fail |
+| rate 40 Hz | 4 | 1 of 4 | 0/147 (5 Hz) | 0.20-1.16 | fail |
+| first spike of each line only | 7 | 5 of 7 | 114/148 (1 Hz); 10 Hz: false 226 -> 228 | 0.70-1.16 | fail |
+| one spike per inked pixel, uniform time | 16 | 8 of 16 | 0/147 (3 Hz); 5-10 Hz: false never fall | 0.02-1.17 | fail |
+| start weight 0.7 | 4 | 1 of 4 | 104/147 (10 Hz) | 0.86-1.01 | fail |
+| start weight 0.6 | 4 | 4 of 4 | 147/147 | 0.95-1.05 | screen passed, peak at the threshold |
+| **start weight 0.5** | **16** | **16 of 16** | 147/147 | **1.10-1.27** | **pass** |
+| start weight 0.5, 180 s training | 4 | 4 of 4 | 147/147 | 1.20-1.26 | pass |
+| start weight 0.4 | 4 | 4 of 4 | 147/147 | 1.15-1.31 | screen passed |
+
+Start weight 0.5, per cell (untrained -> trained):
+
+| noise Hz | stream seed, draw | hits | false windows | peak / thr |
+|---|---|---|---|---|
+| 1 | 1, 0 / 1, 1 / 2, 0 / 2, 1 | 149 -> 147 of 147, 149 -> 147, 154 -> 148 of 148, 154 -> 148 | 0 -> 0 in all four | 1.27 / 1.24 / 1.26 / 1.25 |
+| 3 | same | same | 0 -> 0 | 1.23 / 1.10 / 1.26 / 1.21 |
+| 5 | same | same | 0 -> 0 | 1.23 / 1.19 / 1.23 / 1.23 |
+| 10 | same | same | 226 -> 0 of 228, 226 -> 0, 221 -> 0 of 227, 221 -> 0 | 1.18 / 1.20 / 1.20 / 1.20 |
 
 Free parameters chosen here: the 50 ms window, the 15 ms margin,
 the 100 Hz rate, the frozen draw's seed (0 in `stream_events` when no rng is
-given; the GUI draws from the app seed, per image), and the 3 Hz pixel-code
-noise default.
+given; the GUI draws from the app seed, per image), the 3 Hz pixel-code
+noise default (latency), and frozen Poisson's start weight 0.5 and 10 Hz
+noise default (`stream_view.W0_CODE`, `CODE_NOISE_HZ`).
 
 The MNIST benchmark trains and scores the pre-package engine
 (`benchmarks/legacy_neuro.py`) and this package on the same MNIST subset from

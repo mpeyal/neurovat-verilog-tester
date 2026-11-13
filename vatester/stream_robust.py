@@ -34,6 +34,24 @@ Test-before-Train baseline, so a curve shows what training bought.
   untrained device baseline needs a fresh device, which only the caller can
   build: pass ``untrained=`` (a Session or a callable that returns one), else
   that row is skipped.
+
+RETRAIN mode (``retrain=True``) asks a different question: not "how does the
+trained network cope with a worse input" but "what does a network trained
+UNDER that input learn". For every level a fresh copy (:func:`fresh_like`:
+start weights, same patterns, threshold and parameters) is trained with STDP
+on for ``train_seconds`` at that level, on the keyed training stream
+``(train_key, r)`` - one key for every level, so only the factor differs and
+a repeat sweep is identical - then tested at the same level, STDP off, on
+the sweep's test stream ``key``. The threshold is held (never re-derived);
+the untrained copy is tested as in recall. The nominal row is an
+independent training on a different stream ("retrained at nominal"), so it
+does not equal the user's network. ``repeats`` = N independent trainings
+per level (keys ``(train_key, 0..N-1)``): the row holds the mean hit % /
+false % (counts summed over the trainings) and their min-max. Each
+training's final weights are kept (``row["weights"]``) so a level can be
+replayed. The caller's session is never run: its weights, runs and stream
+stay as they were. Device sessions are refused (a device copy cannot be
+made).
 """
 import math
 import time
@@ -57,6 +75,11 @@ FIGURE_LEVELS = {"jitter_ms": (1.0, 3.0, 5.0),
                  "spike_deletion": (0.0, 0.1, 0.3, 0.5),
                  "noise_hz": (5.0, 26.0)}
 SWEEP_KEY = 2008                 # default stream key (any fixed int)
+TRAIN_KEY = 2009                 # retrain: training streams (TRAIN_KEY, r)
+RECALL, RETRAIN = "recall", "retrain"
+RETRAIN_NOMINAL = "retrained at nominal"
+DEVICE_REFUSAL = ("retraining needs ideal weights: a device copy cannot be "
+                  "made")
 
 
 def factor_name(name):
@@ -139,6 +162,68 @@ def measure(session, seconds, changes, key=SWEEP_KEY, images=None,
             "wall_s": time.perf_counter() - t0}
 
 
+def retrain_once(session, train_seconds, seconds, changes, key=SWEEP_KEY,
+                 train_key=TRAIN_KEY, images=None, stop=None, on_phase=None):
+    """Train a :func:`fresh_like` copy of ``session`` (STDP on) for
+    ``train_seconds`` on the keyed training stream ``train_key`` under
+    ``changes``, then test it there (STDP off, stream ``key``). ``session``
+    is not run. Returns :func:`measure`'s dict plus ``weights`` (the copy's
+    final weights) and ``train_post_spikes``, or None when ``stop()``
+    became true. ``on_phase("training" | "testing")`` is called before each
+    part."""
+    if session.device is not None:
+        raise ValueError(DEVICE_REFUSAL)
+    copy = fresh_like(session)
+    if on_phase:
+        on_phase("training")
+    t0 = time.perf_counter()
+    res = copy.run(float(train_seconds), learn=True, stream_key=train_key,
+                   on_section=lambda _t, _i: not (stop and stop()),
+                   **changes)
+    if res.get("stopped") or (stop and stop()):
+        return None
+    t_train = time.perf_counter() - t0
+    if on_phase:
+        on_phase("testing")
+    m = measure(copy, seconds, changes, key, images, stop)
+    if m is None:
+        return None
+    m["weights"] = np.array(copy.weights, float)
+    m["train_post_spikes"] = int(res["post_spikes"])
+    m["train_wall_s"] = t_train
+    return m
+
+
+def _pct(vals):
+    v = [float(x) for x in vals if x is not None and math.isfinite(float(x))]
+    if not v:
+        return float("nan"), float("nan"), float("nan")
+    return float(np.mean(v)), min(v), max(v)
+
+
+def aggregate(runs):
+    """One row cell of N retrainings (each :func:`measure`-shaped): hit % /
+    false % / balanced accuracy are the means, the window counts and spikes
+    are summed over the trainings (every training is tested on the same
+    stream, so hits / windows is the mean hit share), plus ``n_runs`` and
+    the min-max (``hit_min``, ``hit_max``, ``false_min``, ``false_max``).
+    One run: that run's dict with the min-max fields added."""
+    if len(runs) == 1:
+        out = {k: v for k, v in runs[0].items() if k != "weights"}
+    else:
+        out = {k: int(sum(r[k] for r in runs)) for k in (
+            "pattern_windows", "hits", "other_windows", "false_windows",
+            "post_spikes")}
+        out["balanced_accuracy"] = _pct(
+            r["balanced_accuracy"] for r in runs)[0]
+        out["wall_s"] = float(sum(r["wall_s"] for r in runs))
+    hit, hlo, hhi = _pct(r["hit_pct"] for r in runs)
+    false, flo, fhi = _pct(r["false_pct"] for r in runs)
+    out.update(hit_pct=hit, false_pct=false, hit_min=hlo, hit_max=hhi,
+               false_min=flo, false_max=fhi, n_runs=len(runs))
+    return out
+
+
 def _plan(session, factors, nom):
     if factors is None:
         factors = FACTORS
@@ -161,9 +246,18 @@ def _plan(session, factors, nom):
 
 def sweep(session, factors=None, seconds=30.0, nominal=None, on_progress=None,
           stop=None, untrained=None, key=SWEEP_KEY, images=None,
-          energy=False):
+          energy=False, retrain=False, train_seconds=None, repeats=1,
+          train_key=TRAIN_KEY):
     """Test ``session`` (STDP off) at each level of each factor, one factor
     at a time, the others at ``nominal`` (see :func:`nominal_settings`).
+
+    ``retrain=True``: for each level train ``repeats`` fresh copies for
+    ``train_seconds`` (required) at that level on the training streams
+    ``(train_key, r)``, then test them (see the module note); ``session``
+    itself is not run. ValueError for a device session. A level stopped
+    half-way (also during training) is dropped. Rows then also hold
+    ``repeats`` (each training's test dict) and ``weights`` (each
+    training's final weights); ``trained`` is their :func:`aggregate`.
 
     ``factors``: None (jitter_ms, spike_deletion, noise_hz at
     :func:`default_levels`), a list of factor names, or {name: levels}.
@@ -176,10 +270,24 @@ def sweep(session, factors=None, seconds=30.0, nominal=None, on_progress=None,
 
     Returns {"factors": [{"factor", "label", "unit", "scale", "rows": [{
     "level", "nominal", "trained", "untrained"}]}], "nominal", "seconds",
-    "key", "images", "rule", "untrained_note", "stopped", "wall_s"}; each
-    run's dict is :func:`measure`'s."""
+    "key", "images", "rule", "untrained_note", "stopped", "wall_s", "mode"}
+    (retrain adds "train_seconds", "repeats", "train_key"); each run's dict
+    is :func:`measure`'s."""
     t_start = time.perf_counter()
     images = bool(session.given if images is None else images)
+    retrain = bool(retrain)
+    if retrain:
+        if session.device is not None:
+            raise ValueError(DEVICE_REFUSAL)
+        if train_seconds is None:
+            raise ValueError("retrain needs train_seconds (the GUI passes the "
+                             "seconds the network was trained)")
+        train_seconds = float(train_seconds)
+        if not math.isfinite(train_seconds) or train_seconds <= 0.0:
+            raise ValueError("train_seconds must be > 0")
+        repeats = int(repeats)
+        if repeats < 1:
+            raise ValueError("repeats must be >= 1")
     nom = nominal_settings(session, nominal)
     plan = _plan(session, factors, nom)
     note = "fresh copy at the start weights, same patterns"
@@ -194,11 +302,15 @@ def sweep(session, factors=None, seconds=30.0, nominal=None, on_progress=None,
         base, note = untrained(), "given by the caller"
     else:
         base, note = untrained, "given by the caller"
-    per_level = 1 + (base is not None)
+    per_level = (2 * repeats if retrain else 1) + (base is not None)
     n_runs = sum(len(lv) for _f, lv in plan) * per_level
     out = {"factors": [], "nominal": dict(nom), "seconds": float(seconds),
            "key": key, "images": images, "rule": sv.hit_rule(images),
-           "untrained_note": note, "stopped": False}
+           "untrained_note": note, "stopped": False,
+           "mode": RETRAIN if retrain else RECALL}
+    if retrain:
+        out.update(train_seconds=train_seconds, repeats=repeats,
+                   train_key=train_key)
     saved_kw = session.kw
     if not energy and "energy" in session.kw:
         session.kw = {k: v for k, v in session.kw.items() if k != "energy"}
@@ -215,21 +327,49 @@ def sweep(session, factors=None, seconds=30.0, nominal=None, on_progress=None,
                     return out
                 changes = dict(nom)
                 changes[f] = v
-                if on_progress:
-                    on_progress(done, n_runs, f"{label} {v * scale:g} {unit}"
-                                ": trained")
-                tr = measure(session, seconds, changes, key, images, stop)
-                if tr is None:
-                    out["stopped"] = True
-                    return out
-                done += 1
+                lvl = f"{label} {v * scale:g} {unit}"
+                extra = {}
+                if retrain:
+                    runs = []
+                    for r in range(repeats):
+                        rep = (f" (training {r + 1} of {repeats})"
+                               if repeats > 1 else "")
+
+                        def phase(what, rep=rep):
+                            nonlocal done
+                            if what == "testing":
+                                done += 1          # the training is done
+                            if on_progress:
+                                on_progress(done, n_runs,
+                                            f"{what}...: {lvl}{rep}")
+                        one = retrain_once(session, train_seconds, seconds,
+                                           changes, key, (train_key, r),
+                                           images, stop, phase)
+                        if one is None:
+                            out["stopped"] = True
+                            return out
+                        done += 1
+                        runs.append(one)
+                    tr = aggregate(runs)
+                    extra = {"repeats": [{k: x for k, x in one.items()
+                                          if k != "weights"} for one in runs],
+                             "weights": [one["weights"] for one in runs]}
+                else:
+                    if on_progress:
+                        on_progress(done, n_runs, f"{lvl}: trained")
+                    tr = measure(session, seconds, changes, key, images, stop)
+                    if tr is None:
+                        out["stopped"] = True
+                        return out
+                    done += 1
                 ut = None
                 if base is not None:
                     if base == "auto":
                         base = fresh_like(session)
                     if on_progress:
-                        on_progress(done, n_runs, f"{label} {v * scale:g} "
-                                    f"{unit}: untrained")
+                        on_progress(done, n_runs, (f"testing...: {lvl} "
+                                    "untrained") if retrain else
+                                    f"{lvl}: untrained")
                     ut = measure(base, seconds, changes, key, images, stop)
                     if ut is None:
                         out["stopped"] = True
@@ -239,7 +379,7 @@ def sweep(session, factors=None, seconds=30.0, nominal=None, on_progress=None,
                     "level": float(v),
                     "nominal": math.isclose(float(v), float(nom[f]),
                                             abs_tol=1e-12),
-                    "trained": tr, "untrained": ut})
+                    "trained": tr, "untrained": ut, **extra})
         if on_progress:
             on_progress(done, n_runs, "done")
         return out
@@ -250,12 +390,29 @@ def sweep(session, factors=None, seconds=30.0, nominal=None, on_progress=None,
 
 def format_table(result):
     """Plain-text table of a sweep result (one line per level)."""
-    lines = [f"robustness sweep: {result['seconds']:g} s per level, STDP off, "
-             f"stream key {result['key']}; hit = {result['rule']}; false = "
-             "other window with >= 1 output spike; whole run scored",
-             "nominal: " + ", ".join(f"{k} {v}" for k, v in
-                                     result["nominal"].items()),
-             f"untrained baseline: {result['untrained_note']}"]
+    retrain = result.get("mode") == RETRAIN
+    n_rep = int(result.get("repeats") or 1)
+    if retrain:
+        lines = [f"robustness sweep, RETRAIN at each level: a fresh copy "
+                 f"(start weights, same patterns, threshold held) trained "
+                 f"{result['train_seconds']:g} s with STDP on at the level "
+                 f"(training stream key ({result['train_key']}, r)), then "
+                 f"tested {result['seconds']:g} s STDP off at the same level "
+                 f"on stream key {result['key']}; "
+                 + ("one training run per level" if n_rep == 1 else
+                    f"{n_rep} training runs per level (counts summed, "
+                    "hit % / false % = mean [min-max])")
+                 + f"; hit = {result['rule']}; false = other window with "
+                 ">= 1 output spike; whole run scored"]
+    else:
+        lines = [f"robustness sweep (recall): {result['seconds']:g} s per "
+                 f"level, STDP off, stream key {result['key']}; hit = "
+                 f"{result['rule']}; false = other window with >= 1 output "
+                 "spike; whole run scored"]
+    lines += ["nominal: " + ", ".join(f"{k} {v}" for k, v in
+                                      result["nominal"].items()),
+              f"untrained baseline: {result['untrained_note']}"]
+
     def cell(r):
         if r is None:
             return f"{'-':>9s} {'-':>9s} {'-':>5s} {'-':>6s}"
@@ -263,19 +420,38 @@ def format_table(result):
                 f"{r['false_windows']:>4d}/{r['other_windows']:<4d} "
                 f"{r['balanced_accuracy']:5.2f} {r['post_spikes']:>6d}")
 
-    head = (f"{'factor':15s} {'level':>8s}  | {'TRAINED':>9s} {'false':>9s} "
+    def spread(r, what):
+        if r is None or f"{what}_min" not in r:
+            return ""
+        return (f"{r[f'{what}_pct']:5.1f} [{r[f'{what}_min']:.0f}-"
+                f"{r[f'{what}_max']:.0f}]")
+
+    who = "RETRAINED" if retrain else "TRAINED"
+    head = (f"{'factor':15s} {'level':>8s}  | {who:>9s} {'false':>9s} "
             f"{'bal':>5s} {'spikes':>6s} | {'UNTRAINED':>9s} {'false':>9s} "
             f"{'bal':>5s} {'spikes':>6s}")
+    if retrain and n_rep > 1:
+        head += f" | {'hit %':>15s} {'false %':>15s}"
     lines += [head, "-" * len(head)]
     for b in result["factors"]:
         for row in b["rows"]:
             lev = f"{row['level'] * b['scale']:g} {b['unit']}"
             mark = "*" if row["nominal"] else " "
-            lines.append(f"{b['label']:15s} {lev:>8s}{mark} | "
-                         f"{cell(row['trained'])} | {cell(row['untrained'])}")
-    lines.append("* = nominal level; hit (first column) and false as windows "
-                 "answered / windows; bal = balanced accuracy; spikes = "
-                 "output spikes of the run")
+            line = (f"{b['label']:15s} {lev:>8s}{mark} | "
+                    f"{cell(row['trained'])} | {cell(row['untrained'])}")
+            if retrain and n_rep > 1:
+                line += (f" | {spread(row['trained'], 'hit'):>15s} "
+                         f"{spread(row['trained'], 'false'):>15s}")
+            lines.append(line)
+    if retrain:
+        lines.append(f"* = {RETRAIN_NOMINAL}: an independent training on "
+                     "another stream, so it is not the network you trained")
+    else:
+        lines.append("* = nominal level")
+    lines[-1] += ("; hit (first column) and false as windows answered / "
+                  "windows; bal = balanced accuracy; spikes = output spikes "
+                  "of the test run" + (" (summed over the trainings)"
+                                       if retrain and n_rep > 1 else ""))
     if result.get("stopped"):
         lines.append("STOPPED: partial result")
     if "wall_s" in result:

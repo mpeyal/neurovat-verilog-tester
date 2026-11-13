@@ -233,7 +233,46 @@ def test_code_names_layouts_and_noise_defaults():
     assert sv.swapped_default(7.0, "row", "pixel") == 7.0
     assert sv.swapped_default(10.0, "pixel", "row") == 10.0   # edited to 10
     assert set(sv.CODE_TIPS) == set(sv.CODES)
-    assert "unreliable" in sv.CODE_TIPS["frozen Poisson"]
+    assert "unreliable" not in sv.CODE_TIPS["frozen Poisson"]
+    assert "0.5" in sv.CODE_TIPS["frozen Poisson"]
+
+
+def test_frozen_poisson_has_its_own_start_weight_and_noise_defaults():
+    # frozen Poisson: start weight 0.5 (from 1 the hits collapsed after
+    # training), noise 10 Hz (clean untrained below); the other codes keep
+    # the input / layout defaults
+    fp = "frozen Poisson"
+    assert sv.W0_CODE == {fp: 0.5} and sv.CODE_NOISE_HZ == {fp: 10.0}
+    assert sv.w0_default(sv.IMAGES, fp) == 0.5
+    assert sv.w0_default(sv.IMAGES, "poisson") == 0.5     # alias normalised
+    for code in ("column scan", "row scan", "latency", None):
+        assert sv.w0_default(sv.IMAGES, code) == sv.W0_DEFAULT[sv.IMAGES] == 1.0
+    assert sv.w0_default(sv.IMAGES, "morse") == 1.0       # unknown: input's
+    assert sv.w0_default(sv.POISSON, fp) == sv.W0_DEFAULT[sv.POISSON] == 0.475
+    assert sv.noise_default("pixel", fp) == 10.0
+    assert sv.noise_default("pixel", "latency") == sv.PIXEL_NOISE_HZ
+    assert sv.noise_default("row", "column scan") == sv.NOISE_HZ
+    assert sv.noise_default("pixel", "morse") == sv.PIXEL_NOISE_HZ
+    # latency <-> frozen Poisson: same layout, the code's default moves
+    assert sv.swapped_default(3.0, "pixel", "pixel", "latency", fp) == 10.0
+    assert sv.swapped_default(10.0, "pixel", "pixel", fp, "latency") == 3.0
+    assert sv.swapped_default(5.0, "pixel", "pixel", "latency", fp) == 5.0
+    assert sv.swapped_default(10.0, "pixel", "row", fp, "column scan") == 10.0
+
+
+def test_frozen_poisson_from_weight_half_keeps_its_clean_peak_threshold():
+    # the auto threshold scales with the start weight: 0.85 x the clean
+    # peak at 0.5 is half the one at 1, so the untrained answers are the same
+    bank = sv.image_bank("digits", 14)
+    img = sv.build_image_input(bank, "0", "", 14, 10.0, 0.5,
+                               code="frozen Poisson", seed=1)
+    n = img["n_afferents"]
+    thr = {}
+    for w0 in (1.0, sv.w0_default(sv.IMAGES, "frozen Poisson")):
+        P = MasquelierParams(n_afferents=n, n_pattern=n, w_init=w0,
+                             pattern_ms=img["pattern_ms"], threshold=1.0)
+        thr[w0] = sv.auto_threshold(img, P)
+    assert thr[0.5] == pytest.approx(0.5 * thr[1.0])
 
 
 def test_line_labels_timing_and_explainer():

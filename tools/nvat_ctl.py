@@ -27,7 +27,7 @@ Then drive it from any shell (this is what the agent / Claude Code calls):
     python tools/nvat_ctl.py set nt_st_input "scanned images"   # or "Poisson"; image rows:
                                                  # nt_st_imgset / _img_size / _img_pick / _img_distract
     python tools/nvat_ctl.py set nt_st_code latency  # image encoding: column scan | row scan |
-                                                 # latency | frozen Poisson (window: nt_st_code_win)
+                                                 # latency | frozen Poisson (window: nt_st_code_win; frozen Poisson sets nt_st_w0 0.5, noise 10 Hz)
     python tools/nvat_ctl.py tab nt_st_tab_raster  # stream views: _raster _net _pat _learn _weights _energy _robust
     python tools/nvat_ctl.py set nt_st_view_t 3  # replay position (s into the last run)
     python tools/nvat_ctl.py set nt_st_play 1    # play the replay (0 = pause)
@@ -38,7 +38,14 @@ Then drive it from any shell (this is what the agent / Claude Code calls):
     python tools/nvat_ctl.py set nt_st_rb_jitter "1,3,5"   # levels: _jitter ms, _delete %, _noise Hz
                                                  # ('' = paper levels + trained value); nt_st_rb_untrained 0/1
     python tools/nvat_ctl.py tab nt_st_tab_robust  # the Robustness tab (plots + table)
+    python tools/nvat_ctl.py nt_robust 30 retrain  # RETRAIN at each level: a fresh copy trained at the
+                                                 # level (STDP on), then tested there; positional:
+                                                 # seconds retrain train_s repeats (retrain 1/0 or
+                                                 # retrain/recall; train_s 0 = the trained seconds)
+    python tools/nvat_ctl.py nt_robust 30 1 60 3   # ... 60 s training per level, 3 trainings (mean, min-max)
+    python tools/nvat_ctl.py set nt_st_rb_mode recall  # show the kept recall result (or 'retrain ...')
     python tools/nvat_ctl.py nt_robust_raster 2  # show swept level #2 (or its text) in the Raster tab
+                                                 # (retrain mode: that level's retrained weights)
     python tools/nvat_ctl.py nt_power_save       # Power tab report -> results/energy_reports/
 
 Typical closed loop the driver runs:
@@ -62,7 +69,7 @@ _ARG_SPECS = {
     "get": ["tag"], "set": ["tag", "value"], "tab": ["name"],
     "shot": ["path"], "nt_load": ["path"],
     "fit": ["path"], "openvaf": ["path"],       # openvaf path optional
-    "nt_robust": ["seconds"], "nt_robust_raster": ["entry"],
+    "nt_robust": ["seconds", "retrain", "train_s", "repeats"], "nt_robust_raster": ["entry"],
 }
 
 

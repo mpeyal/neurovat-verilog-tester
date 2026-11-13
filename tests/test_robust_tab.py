@@ -97,3 +97,49 @@ def test_compact_series_entries_are_plain_and_drop_missing(trained):
     assert all(len(x) <= 80 or "|" in x or " " not in x.strip()
                for x in text.splitlines())
     assert text.split() == sr.format_table(res).split()   # nothing lost
+
+
+def test_mode_key_reads_the_radio_and_the_bridge():
+    for v in ("retrain at each level", "retrain", "1", "true", "ON"):
+        assert rb.mode_key(v) == sr.RETRAIN
+    for v in ("recall", "0", "false", "", "off"):
+        assert rb.mode_key(v) == sr.RECALL
+    assert rb.mode_key("sideways") is None
+    assert rb.MODE_KEYS[rb.MODES[1]] == sr.RETRAIN
+    tags = [t for t, _ in rb.ROBUST_CONTROLS]
+    for t in ("nt_st_rb_mode", "nt_st_rb_train_s", "nt_st_rb_repeats"):
+        assert t in tags
+
+
+def test_retrain_result_helpers(trained):
+    acc = None
+    for f, v in (("noise_hz", 10.0), ("spike_deletion", 0.3)):
+        acc = rb.merge(acc, sr.sweep(trained, {f: [v]}, seconds=1.0,
+                                     nominal=NOMINAL, retrain=True,
+                                     train_seconds=1.0, repeats=2,
+                                     untrained=False))
+    assert acc["mode"] == sr.RETRAIN and acc["repeats"] == 2
+    row = rb.find_row(acc, "spike_deletion", 0.3)
+    assert row is not None and len(row["weights"]) == 2
+    assert rb.find_row(acc, "jitter_ms", 1.0) is None
+    c = rb.compact(acc)
+    json.dumps(c, allow_nan=False)             # no weight arrays, no NaN
+    crow = c["factors"][0]["rows"][0]
+    assert "weights" not in crow and len(crow["repeats"]) == 2
+    assert crow["trained"]["n_runs"] == 2
+    assert crow["trained"]["hit_min"] <= crow["trained"]["hit_pct"] \
+        <= crow["trained"]["hit_max"]
+    band = rb.bands(c["factors"][1])
+    assert band["hit"][0] == [pytest.approx(30.0)]
+    assert band["false"][1][0] <= band["false"][2][0]
+    e = rb.entries(acc)
+    assert e[0][0] == f"extra spikes 10 Hz ({sr.RETRAIN_NOMINAL})"
+    lines = rb.summary_lines(acc)
+    assert "retrained" in lines[0] and "2 trainings" in lines[0]
+    assert "RETRAIN at each level" in rb.table_text(acc)
+    # one training: no band
+    one = sr.sweep(trained, {"noise_hz": [10.0]}, seconds=1.0,
+                   nominal=NOMINAL, retrain=True, train_seconds=1.0,
+                   untrained=False)
+    assert rb.bands(rb.compact(one)["factors"][0])["hit"] == ([], [], [])
+    assert "one training run per level" in rb.table_text(one)

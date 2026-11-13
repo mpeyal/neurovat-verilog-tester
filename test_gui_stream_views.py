@@ -73,9 +73,15 @@ def check_codes(app, set_):
         assert row_shown("nt_st_code_win") == (layout == "pixel")
         if label:
             assert row_label("nt_st_bin") == label
-        noise = sv.PIXEL_NOISE_HZ if layout == "pixel" else 10.0
+        noise = sv.noise_default(layout, code)
+        assert noise == {"latency": sv.PIXEL_NOISE_HZ,
+                         "frozen Poisson": 10.0}.get(code, 10.0)
         assert dpg.get_value("nt_st_noise") == noise, code
         assert dpg.get_value("nt_st_bg") == noise, code
+        # the start weight follows the code: 0.5 for frozen Poisson, else 1
+        w0 = 0.5 if code == "frozen Poisson" else 1.0
+        assert dpg.get_value("nt_st_w0") == w0, code
+        assert inp["rule"]["w_init"] == w0, code
         if layout == "pixel":
             assert arch["n_shown"] < n and arch["n_inked"] > 0
             vec = arch["vecs"][0]
@@ -108,6 +114,25 @@ def check_codes(app, set_):
     assert dpg.get_value("nt_st_noise") == 10.0
     assert set_("nt_st_input", "images")
     assert dpg.get_value("nt_st_noise") == sv.PIXEL_NOISE_HZ
+    # latency <-> frozen Poisson (same layout): noise and start weight move;
+    # a start weight the user changed stays
+    assert set_("nt_st_code", "frozen Poisson")
+    assert dpg.get_value("nt_st_noise") == dpg.get_value("nt_st_bg") == 10.0
+    assert dpg.get_value("nt_st_w0") == 0.5
+    assert set_("nt_st_code", "latency")
+    assert dpg.get_value("nt_st_noise") == sv.PIXEL_NOISE_HZ
+    assert dpg.get_value("nt_st_w0") == 1.0
+    set_("nt_st_w0", 0.8)
+    assert set_("nt_st_code", "frozen Poisson")
+    assert dpg.get_value("nt_st_w0") == 0.8
+    assert set_("nt_st_code", "latency")
+    assert dpg.get_value("nt_st_w0") == 0.8
+    set_("nt_st_w0", 1.0)
+    # Poisson input: back to the paper's 0.475
+    assert set_("nt_st_input", "Poisson")
+    assert dpg.get_value("nt_st_w0") == 0.475
+    assert set_("nt_st_input", "images")
+    assert dpg.get_value("nt_st_w0") == 1.0
     # a latency network: baseline, train, test; the pixel views
     set_("nt_st_seconds", 3)
     app.on_nt_stream_reset()

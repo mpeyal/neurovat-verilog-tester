@@ -37,7 +37,9 @@ Virtuoso** on a shared university host.
   was built") instead of replacing the trained network. With image input a
   neuron that answers the image windows *detects* the image; only "trained
   false windows below untrained false windows, hits held" says STDP
-  *learnt* something. Image input starts at weight 1.0 (Poisson 0.475). The
+  *learnt* something. Image input starts at weight 1.0 (Poisson 0.475,
+  frozen Poisson 0.5: `sv.w0_default`, swapped on an input / code change
+  unless edited). The
   auto threshold scales with the start weight, so the untrained network was
   the same at either (measured on the MNIST "0"); at 1.0 STDP can only prune, at 0.475 it potentiated
   the image rows and the false answers rose (MNIST "0"). Image encodings
@@ -47,8 +49,13 @@ Virtuoso** on a shared university host.
   comes from `img["n_afferents"]` (size for the scans, size² for the pixel
   codes). Learning shows on the MNIST "0" at size 28 with both scans (10 Hz
   noise) and with latency at 3-5 Hz noise after 60 s of training (30 s gave
-  only a partial drop); frozen Poisson is unreliable (the hits collapsed
-  after training at 1, 3 (a GUI run) and 5 Hz). The built-in images are clean untrained
+  only a partial drop). Frozen Poisson needs start weight 0.5 (`W0_CODE`)
+  and noise 10 Hz (`CODE_NOISE_HZ`, the noise defaults follow the code, not
+  only the layout): from 1.0 its hits collapsed after training (about 5
+  spikes per line, so STDP depresses the image's own lines below the
+  threshold); from 0.5 they held in all 16 cells of the 1-10 Hz x 2 seeds x
+  2 draws grid, and it learns at 10 Hz (clean untrained at 1-5 Hz). The
+  table is in `src/neurovat/README.md`. The built-in images are clean untrained
   (detection only). The Learning tab's "other windows answered (%)" line is
   the image learning signal.
 - Robustness tab (`vatester/network_stream_robust.py`, GUI-free core
@@ -63,7 +70,18 @@ Virtuoso** on a shared university host.
   (partial result) and always `nt_robust_done`. The session, its runs, the
   device and the energy meter are left unchanged. No untrained baseline for
   device synapses. "Show in Raster" replays one keyed level through the
-  Raster tab.
+  Raster tab. Mode radio `nt_st_rb_mode`: "recall" (above) | "retrain at
+  each level" (`sweep(retrain=True, train_seconds=, repeats=)`): per level
+  a `fresh_like` copy is trained (STDP on, keyed training stream
+  `(TRAIN_KEY, r)`, one key for every level) for `nt_st_rb_train_s`
+  (0 = the network's trained seconds), then tested there on the sweep key;
+  the user's session is never run. The nominal row is "retrained at
+  nominal" (an independent training, not the user's network). Repeats give
+  the mean and the min-max (shaded band). Each row keeps its retrained
+  weights, and Show in Raster replays them on a copy. The last result of each mode
+  is kept and the radio switches between them (held while a sweep runs).
+  Retrain is refused for device synapses (`sr.DEVICE_REFUSAL`). Bridge:
+  `nt_robust <seconds> <retrain 1/0> <train_s> <repeats>`.
 - Bridge note: the mailbox holds one command; while an async command
   (`nt_train`, ...) is pending, a second command (e.g. `shot`) is not served
   while it runs (a `shot` sent then came back black), so a mid-run screenshot
@@ -109,11 +127,15 @@ appears in the workspace. Drive it with the CLI client:
                                             # scanned images (afferents per nt_st_code)
     python tools/nvat_ctl.py set nt_st_code latency  # image encoding: column scan (one per pixel
                                             # row) | row scan (per column) | latency |
-                                            # frozen Poisson (one per pixel)
+                                            # frozen Poisson (one per pixel; sets
+                                            # start weight 0.5, noise 10 Hz)
     python tools/nvat_ctl.py tab nt_st_tab_raster   # stream views: nt_st_tab_raster / _net / _pat /
                                             # _learn / _weights / _energy / _robust
     python tools/nvat_ctl.py set nt_st_play 1       # replay the last run's raster (0 = pause)
     python tools/nvat_ctl.py nt_load_mnist          # load <workspace>/datasets/mnist.npz
+    python tools/nvat_ctl.py nt_robust 30 1 0 1     # RETRAIN at each level: seconds retrain(1/0)
+                                            # train_s (0 = trained seconds) repeats
+    python tools/nvat_ctl.py set nt_st_rb_mode recall   # show the kept result of a mode
     python tools/nvat_ctl.py nt_robust 30           # robustness sweep of the trained stream
                                             # network, 30 s per level; waits, returns the table.
                                             # Levels: set nt_st_rb_jitter / _delete / _noise

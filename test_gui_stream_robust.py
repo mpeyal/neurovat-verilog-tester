@@ -50,6 +50,144 @@ def series_points(stem, who, what):
     return dpg.get_value(f"nt_st_rb_{stem}_{who}_{what}")[0]
 
 
+def retrain_checks(app, s, recall, w0, runs0, stream0):
+    """Retrain mode: a tiny sweep, the mode toggle switching the plots,
+    Show in Raster with the retrained weights, Stop during training and a
+    worker exception. Leaves the tab in recall mode."""
+    set_ = app._nt_set_control
+    assert app._nt_rb_result is recall
+    assert set_("nt_st_rb_mode", "retrain")
+    assert dpg.get_value("nt_st_rb_mode") == rb.MODES[1]
+    # no retrain result yet: empty plots, labelled
+    assert app._nt_rb_result is None and not app._nt_rb_entries
+    assert not series_points("del", "trained", "hit")
+    assert "no sweep in this mode" in dpg.get_value("nt_st_rb_showing")
+    assert "RETRAIN" in dpg.get_value("nt_st_rb_showing")
+    assert set_("nt_st_rb_jitter", "3")
+    assert set_("nt_st_rb_delete", "30")
+    assert set_("nt_st_rb_noise", "40")
+    assert set_("nt_st_rb_seconds", 2)
+    assert set_("nt_st_rb_train_s", 0)          # = the trained seconds
+    assert set_("nt_st_rb_repeats", 2)
+    assert "2 training runs per level" in dpg.get_value("nt_st_rb_mode_note")
+    texts = []
+    handler = app._on_nt_robust_progress
+    app._on_nt_robust_progress = lambda d: (texts.append(d.get("text", "")),
+                                            handler(d))
+    assert app._nt_rb_start(), app._nt_rb_error
+    # the mode is held while it runs
+    assert not set_("nt_st_rb_mode", "recall")
+    assert dpg.get_value("nt_st_rb_mode") == rb.MODES[1]
+    pump(app)
+    del app._on_nt_robust_progress
+    rr = app._nt_rb_result
+    assert rr and rr["mode"] == sr.RETRAIN and not rr["stopped"], rr
+    assert rr["repeats"] == 2
+    assert rr["train_seconds"] == app._nt_stream_trained_s
+    assert any(t.startswith("level 1/3, training") for t in texts), texts
+    assert any(t.startswith("level 3/3, testing") for t in texts), texts
+    assert any("retrained at nominal" in e[0] for e in app._nt_rb_entries) \
+        is False                      # no nominal level in this sweep
+    showing = dpg.get_value("nt_st_rb_showing")
+    assert "RETRAIN" in showing and "2 training runs per level" in showing
+    assert dpg.get_value("nt_st_rb_leg_who") == "retrained: hits"
+    assert "RETRAIN at each level" in dpg.get_value("nt_st_rb_table")
+    assert series_points("del", "trained", "hit") == [30.0]
+    assert dpg.get_value("nt_st_rb_noi_band_hit")[0] == [40.0]
+    assert digest(s.weights) == w0 and s.runs == runs0
+    assert s.stream is stream0                    # the session is not run
+    # the GUI result is the core's
+    one = sr.sweep(s, {"spike_deletion": [0.3]}, seconds=2.0,
+                   nominal=app._nt_stream_trained_with, retrain=True,
+                   train_seconds=rr["train_seconds"], repeats=2)
+    a = one["factors"][0]["rows"][0]
+    b = rb.find_row(rr, "spike_deletion", 0.3)
+    for who in ("trained", "untrained"):
+        for k in ("hits", "false_windows", "post_spikes"):
+            assert a[who][k] == b[who][k], (who, k)
+    np.testing.assert_array_equal(a["weights"][0], b["weights"][0])
+
+    # toggle: the plots, table and Raster list switch between the results
+    assert set_("nt_st_rb_mode", "recall")
+    assert app._nt_rb_result is recall
+    assert series_points("del", "trained", "hit") == [0.0, 30.0]
+    assert not dpg.get_value("nt_st_rb_noi_band_hit")[0]
+    assert dpg.get_value("nt_st_rb_table").startswith("robustness sweep (recall)")
+    assert dpg.get_value("nt_st_rb_leg_who") == "trained: hits"
+    assert len(dpg.get_item_configuration("nt_st_rb_pick")["items"]) == \
+        len(rb.entries(recall))
+    assert set_("nt_st_rb_mode", "retrain at each level")
+    assert app._nt_rb_result is rr
+    assert series_points("del", "trained", "hit") == [30.0]
+    assert dpg.get_item_configuration("nt_st_rb_pick")["items"] == \
+        [e[0] for e in rb.entries(rr)]
+
+    # Show in Raster replays THAT level's retrained weights (first training):
+    # pick a level where they give another spike count than the session's
+    pick = None
+    for i, (_text, factor, level) in enumerate(rb.entries(rr)):
+        own = s.run(2.0, learn=False, stream_key=sr.SWEEP_KEY,
+                    **dict(app._nt_stream_trained_with, **{factor: level}))
+        row = rb.find_row(rr, factor, level)
+        if row["repeats"][0]["post_spikes"] != own["post_spikes"]:
+            pick = (i, row, own["post_spikes"])
+            break
+    assert pick is not None, "retrained == trained at every level"
+    assert set_("nt_st_rb_pick", pick[0])
+    assert app._nt_rb_show_raster(), app._nt_rb_error
+    pump(app)
+    want = pick[1]["repeats"][0]["post_spikes"]
+    assert app._nt_rb_raster_last == want, (app._nt_rb_raster_last, want)
+    assert app._nt_rb_raster_last != pick[2]       # not the session's network
+    assert "retrained network" in dpg.get_value("nt_st_rb_status")
+    assert app._nt_st_tab_is("nt_st_tab_raster")
+    assert digest(s.weights) == w0 and s.runs == runs0
+    assert set_("nt_st_tabs", "nt_st_tab_robust")
+
+    # Stop during the training of level 2: level 1 kept, level 2 dropped
+    seen = []
+    handler = app._on_nt_robust_progress
+    app._on_nt_robust_progress = lambda d: (seen.append(d.get("text", "")),
+                                            handler(d))
+
+    def stop_in_training():
+        if any(t.startswith("level 2/3, training") for t in seen):
+            app._nt_rb_stop()
+    set_("nt_st_rb_repeats", 1)
+    assert app._nt_rb_start(), app._nt_rb_error
+    pump(app, on_frame=stop_in_training)
+    del app._on_nt_robust_progress
+    rs = app._nt_rb_result
+    assert rs["stopped"] and rs["mode"] == sr.RETRAIN
+    assert sum(len(x["rows"]) for x in rs["factors"]) == 1
+    assert "stopped" in dpg.get_value("nt_st_rb_status")
+    assert not any(t.startswith("level 2/3, testing") for t in seen), seen
+    assert dpg.get_item_configuration("nt_st_rb_mode")["enabled"]
+
+    # a worker exception in retrain mode still ends the run
+    real = sr.retrain_once
+
+    def boom(*_a, **_k):
+        raise RuntimeError("injected retrain failure")
+    sr.retrain_once = boom
+    try:
+        assert app._nt_rb_start(), app._nt_rb_error
+        pump(app)
+    finally:
+        sr.retrain_once = real
+    assert not app.trainer_running
+    assert "injected retrain failure" in app._nt_rb_error
+    assert "retrain sweep failed" in dpg.get_value("nt_st_rb_status")
+    assert app._nt_rb_result is rs              # the kept result is shown
+    assert dpg.get_item_configuration("nt_st_rb_mode")["enabled"]
+    app._log_lines[:] = [x for x in app._log_lines if "injected" not in x]
+    assert set_("nt_st_rb_mode", "recall") and app._nt_rb_result is recall
+    assert set_("nt_st_rb_train_s", 0) and set_("nt_st_rb_repeats", 1)
+    assert digest(s.weights) == w0 and s.runs == runs0
+    return ("retrain sweep (repeats 2, toggle, Show in Raster with the "
+            "retrained weights, Stop in training, exception); ")
+
+
 def main():
     repo = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="stream_robust_") as temp:
@@ -168,6 +306,7 @@ def main():
             assert app._nt_st_rec is not None
             assert dpg.get_value("nt_st_r_bg")[0], "empty raster"
             assert digest(s.weights) == w0 and s.runs == runs0
+            retrain_txt = retrain_checks(app, s, r, w0, runs0, stream0)
 
             # Stop: a long sweep stopped after the first level
             assert set_("nt_st_tabs", "nt_st_tab_robust")
@@ -265,6 +404,14 @@ def main():
                 ds = app._nt_stream_session
                 assert ds is not None and ds.device is not None, \
                     app._nt_stream_error
+                # retrain is refused for device synapses (recall works)
+                assert set_("nt_st_rb_mode", "retrain")
+                assert not app._nt_rb_start()
+                assert app._nt_rb_error == rb.DEVICE_RETRAIN
+                assert sr.DEVICE_REFUSAL in dpg.get_value("nt_st_rb_status")
+                assert sr.DEVICE_REFUSAL in dpg.get_value("nt_st_rb_mode_note")
+                assert not app.trainer_running
+                assert set_("nt_st_rb_mode", "recall")
                 dev = ds.device
                 g0 = digest(dev.conductance())
                 meter = ds.kw["energy"]
@@ -295,7 +442,7 @@ def main():
                   "settings changed, busy), sweep with trained nominal, "
                   "progressive plots, table, session unchanged, merge == "
                   "single sweep, Show in Raster, Stop, worker exception; "
-                  + code_txt + device_txt)
+                  + retrain_txt + code_txt + device_txt)
         finally:
             app.virtuoso.disconnect()
             dpg.destroy_context()

@@ -51,6 +51,7 @@ from .network_visualization import NetworkVisualizationMixin
 from .network_data import NetworkDataMixin
 from .network_stream import NetworkStreamMixin, STREAM_CONTROLS, STREAM_MODE
 from .network_stream_robust import ROBUST_CONTROLS
+from .network_stream_robust import MODES as RB_MODES, mode_key as rb_mode_key
 from . import analysis, stdp_protocol
 from .stdp_panel import StdpControls
 
@@ -207,19 +208,20 @@ column c fires at c x nt_st_bin ms), "row scan" (one per pixel column, row r
 at r x nt_st_bin ms), "latency" (one per pixel; a pixel fires once, the
 brighter the earlier, within nt_st_code_win ms, default 50, after a 15 ms
 lead) or "frozen Poisson" (one per pixel; a fixed draw at 100 Hz x intensity
-over nt_st_code_win ms). Inputs = nt_st_img_size for the scans, size x size
+over nt_st_code_win ms; picking it sets nt_st_w0 to 0.5 and noise /
+background to 10 Hz unless changed). Inputs = nt_st_img_size for the scans, size x size
 for the pixel codes (784 at 28); section = ceil(size x bin) ms for the scans,
 window + 2 x 15 ms for the pixel codes. Images from nt_st_imgset, hidden ones
 nt_st_img_pick, distractors nt_st_img_distract, background nt_st_bg Hz
 between presentations; nt_st_noise adds to that background in the empty
 windows, which are the windows answered falsely. Both default to 10 Hz for
-the scans and 3 Hz for the pixel codes (swapped when the code changes,
+the scans and frozen Poisson and 3 Hz for latency (swapped when the code changes,
 unless edited). For images a window counts as answered by at least one output
 spike (measured on MNIST: about 1-5 spikes per answered image), for Poisson
 by exactly one; threshold 0 = auto (0.85 x the weakest clean image peak AT
 THE START WEIGHTS, or 0.25 x afferents), so the untrained network answered
 the same at start weight 0.475 and 1.0 (measured on the MNIST "0"). Image
-input sets nt_st_w0 to 1.0 (Poisson
+input sets nt_st_w0 to 1.0 (frozen Poisson 0.5, Poisson
 0.475) unless changed: at 1.0 STDP can only lower weights and prunes the
 answers to noise; at 0.475 (measured on the MNIST '0') it potentiated the
 digit's rows and the false answers rose. "test" when no network exists yet
@@ -238,10 +240,11 @@ last third). Counted over the whole 30 s test (60 s of training, untrained
 -> trained false windows, hits held): column scan 25-27 -> 2 of 54, row scan
 40-44 -> 2 of 54, latency at 3-5 Hz 188 -> 0-4 of 188 (2 seeds; at 10 Hz it
 fires in every window and learns nothing; 30 s of training gave only 63 ->
-39 of 63). Frozen Poisson is unreliable: the hits collapsed after training
-at 1, 3 (a GUI run) and 5 Hz and on 1 of 2 seeds at 10 Hz (each line fires about 5
-times per window, so STDP depresses the image's own lines below the
-threshold's reach). The built-in
+39 of 63). Frozen Poisson (start weight 0.5, noise 10 Hz): every empty
+window answered untrained -> none after 60 s of training, hits held (2
+seeds x 2 frozen draws); clean untrained at 1-5 Hz. From start weight 1 its
+hits collapsed after training (each line fires about 5 times per window, so
+STDP depressed the image's own lines below the threshold). The built-in
 28 x 28 digits and letters are already clean untrained, so they show
 detection, not learning. Known limit of the image input: several hidden
 images are not split one per neuron (MNIST "0", "1", "2" with 3 neurons:
@@ -289,6 +292,17 @@ so do not compare the two numbers directly. A repeat sweep gives identical
 numbers and leaves the network, its runs and the device unchanged. It is
 refused without a trained network or after a network setting changed. The
 result is in your context below once it finishes.
+nt_st_rb_mode = "retrain at each level" (default "recall") asks a different
+question: for every level a FRESH copy (start weights, same patterns,
+threshold held) is trained at that level with STDP on for nt_st_rb_train_s
+seconds (0 = the seconds the network was trained; one training stream for
+every level), then tested there with STDP off - what a network trained
+under that input learns. nt_st_rb_repeats (default 1) independent trainings
+per level give the mean and the min-max. The nominal row is "retrained at
+nominal", an independent training, so it does not equal the user's
+network. It takes about levels x (train + 2 x test) seconds of stream.
+Refused for device synapses (no device copy can be made); recall still
+works there. The last result of each mode is kept; setting the mode shows it.
 """
 
 
@@ -6079,6 +6093,14 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                 return False
             dpg.set_value(tag, val)
             return True
+        elif tag == "nt_st_rb_mode":              # recall | retrain at each level
+            mode = rb_mode_key(val)
+            if mode is None or (self.trainer_running
+                                and self._nt_rb_kind is not None):
+                return False
+            dpg.set_value(tag, RB_MODES[mode == "retrain"])
+            self._nt_rb_on_mode()
+            return True
         cur = dpg.get_value(tag)
         # tab bars store an int id but are switched by the tab's string alias
         if (isinstance(cur, int) and isinstance(val, str)
@@ -6117,6 +6139,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             self._nt_st_on_tab()
         elif tag in ("nt_st_view_t", "nt_st_view_win"):
             self._nt_st_on_slider()
+        elif tag in ("nt_st_rb_train_s", "nt_st_rb_repeats"):
+            self._nt_rb_mode_note()
         elif tag.startswith("nt_st_"):
             self._nt_st_changed(tag)
         return True

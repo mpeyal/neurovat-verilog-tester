@@ -65,7 +65,8 @@ RULE = [
      "LTD window time constant"),
     ("nt_st_w0", "Start weight", "w_init", 0.475, 0.0, 1.0,
      "initial weight of every synapse, 0-1 of the range. Image input sets it "
-     "to 1 (back to 0.475 for Poisson) unless you changed it. With the auto "
+     "to 1 (0.5 for frozen Poisson, back to 0.475 for Poisson input) unless "
+     "you changed it. With the auto "
      "threshold (scaled to the start weight) the untrained network answered "
      "the same at 0.475 and 1 (MNIST '0', 1 and 3 neurons); at 1 STDP can "
      "only lower weights, so it "
@@ -102,7 +103,8 @@ STREAM_CONTROLS = [
     ("nt_st_code", "stream (image input): encoding, column scan (one input "
                    "per pixel row) | row scan (per pixel column) | latency "
                    "(per pixel, brighter = earlier) | frozen Poisson (per "
-                   "pixel, unreliable)"),
+                   "pixel, a fixed rate draw; sets start weight 0.5 and "
+                   "noise 10 Hz unless changed)"),
     ("nt_st_code_win", "stream (image input, latency / frozen Poisson): "
                        "window ms the code spreads the spikes over"),
     ("nt_st_img_pick", "stream (image input): indices of the hidden images, "
@@ -121,8 +123,10 @@ STREAM_CONTROLS = [
     ("nt_st_noise", "stream: extra noise spikes Hz on every afferent, inside "
                     "the patterns too (image input: on top of nt_st_bg in "
                     "the empty windows, which are the ones answered falsely; "
-                    f"default {sv.NOISE_HZ:g}, {sv.PIXEL_NOISE_HZ:g} for the "
-                    "pixel codes, as is nt_st_bg)"),
+                    f"default {sv.NOISE_HZ:g}, {sv.PIXEL_NOISE_HZ:g} for "
+                    "latency, "
+                    f"{sv.CODE_NOISE_HZ['frozen Poisson']:g} for frozen "
+                    "Poisson, as is nt_st_bg)"),
     ("nt_st_delete", "stream: fraction of pattern spikes deleted 0-1"),
     ("nt_st_thr", "stream: neuron threshold (0 = auto: 0.25 x afferents for "
                   "Poisson, 0.85 x weakest clean image peak for images)"),
@@ -184,6 +188,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
     _nt_st_input_shown = sv.POISSON
     _nt_st_code_shown = sv.CODES[0]     # the encoding combo, normalised
     _nt_st_noise_layout = "row"         # layout the noise defaults are set for
+    _nt_st_noise_code = None            # ... and image code (None = Poisson)
+    _nt_st_w0_shown = sv.W0_DEFAULT[sv.POISSON]   # start-weight default set
 
     # ---- layout -----------------------------------------------------
 
@@ -242,10 +248,12 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                           dv=sv.CODES[0], callback=changed,
                           tip="How an image becomes spikes:\n"
                               + "\n".join(sv.CODE_TIPS[c] for c in sv.CODES)
-                              + f"\nThe pixel codes set noise and background "
-                              f"Hz to {sv.PIXEL_NOISE_HZ:g} (back to "
-                              f"{sv.NOISE_HZ:g} for the scans) unless you "
-                              "changed them.")
+                              + f"\nLatency sets noise and background Hz to "
+                              f"{sv.PIXEL_NOISE_HZ:g}, frozen Poisson to "
+                              f"{sv.CODE_NOISE_HZ['frozen Poisson']:g} (and "
+                              "start weight "
+                              f"{sv.W0_CODE['frozen Poisson']:g}), the scans "
+                              f"to {sv.NOISE_HZ:g}, unless you changed them.")
             from neurovat.encoding import STREAM_MARGIN_MS, STREAM_WINDOW_MS
             self._ctl_row("window ms", "nt_st_code_win",
                           default=STREAM_WINDOW_MS, callback=changed,
@@ -280,9 +288,10 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                           tip="Poisson rate per afferent in the sections "
                               "that show no image. Unused when there are "
                               f"distractors. Default {sv.NOISE_HZ:g}; "
-                              f"{sv.PIXEL_NOISE_HZ:g} for the pixel codes "
-                              "(set when you pick one, unless you changed "
-                              "it).")
+                              f"{sv.PIXEL_NOISE_HZ:g} for latency, "
+                              f"{sv.CODE_NOISE_HZ['frozen Poisson']:g} for "
+                              "frozen Poisson (set when you pick one, unless "
+                              "you changed it).")
             self._ctl_row("threshold", "nt_st_thr", default=0.0,
                           callback=changed,
                           tip="Neuron threshold in units of weight. 0 = auto: "
@@ -330,7 +339,9 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                              wrap=300)
             self._small("Start weight 1 for images (set when you pick image "
                         "input, unless you changed it): STDP can then only "
-                        "lower weights and prunes the answers to noise. Test "
+                        "lower weights and prunes the answers to noise. "
+                        "Frozen Poisson starts at 0.5 (set when you pick "
+                        "it): from 1 its hits collapsed after training. Test "
                         "before Train gives the untrained baseline; only a "
                         "trained Test with fewer false windows says it learnt.",
                         color=C_MUTED, wrap=340)
@@ -345,14 +356,16 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                     "row scan: 40-53 of 54 -> 2-4, hits held.",
                     "latency: learns at 3-5 Hz noise after 60 s of training "
                     "(188 of 188 false -> 0-4 of 188, hits held; the default "
-                    "3 Hz is set for the pixel codes); 30 s of training gave "
+                    "3 Hz is set for latency); 30 s of training gave "
                     "only a partial drop (63 -> 39 of 63); clean untrained "
                     "at 1 Hz; at 10 Hz it fires in every window.",
-                    "frozen Poisson (unreliable): the hits collapsed after "
-                    "training at 1, 3 (a GUI run) and 5 Hz, and on one of "
-                    "two seeds at 10 Hz. Each line fires about 5 times per "
-                    "window, so STDP depresses the image's own lines until "
-                    "their drive no longer reaches the threshold."):
+                    "frozen Poisson (start weight 0.5): learns at 10 Hz "
+                    "(every empty window answered untrained -> none, hits "
+                    "held; 2 seeds x 2 frozen draws); clean untrained at "
+                    "1-5 Hz, hits held. From start weight 1 the hits "
+                    "collapsed in 13 of 16 runs: each line fires about 5 "
+                    "times per window, so STDP depressed the image's own "
+                    "lines below the threshold."):
                 self._small("  - " + line, color=C_MUTED, wrap=340)
             self._small("The built-in 28 x 28 digits and letters are already "
                         "clean untrained (their peak sits far above the "
@@ -390,10 +403,12 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                                   "the empty windows, which are the windows "
                                   "a neuron answers falsely. Default "
                                   f"{sv.NOISE_HZ:g}; {sv.PIXEL_NOISE_HZ:g} for "
-                                  "the pixel codes (latency, frozen Poisson: "
-                                  "size x size afferents instead of size), "
-                                  "set when you pick one unless you changed "
-                                  "it.")
+                                  "latency (size x size afferents instead "
+                                  "of size); "
+                                  f"{sv.CODE_NOISE_HZ['frozen Poisson']:g} "
+                                  "for frozen Poisson (clean untrained "
+                                  "below it); set when you pick one unless "
+                                  "you changed it.")
                 self._ctl_row("spike deletion", "nt_st_delete", default=0.0,
                               tip="Fraction of the pattern's spikes dropped "
                                   "at each presentation.")
@@ -413,7 +428,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                            callback=self.on_nt_stream_rule_defaults)
             self._small("Defaults: Masquelier et al. 2008, the values the "
                         "benchmark is validated with (except the start "
-                        "weight of image input: 1). The two inhibition "
+                        "weight of image input: 1, frozen Poisson 0.5). The "
+                        "two inhibition "
                         "values are choices made here: a neuron that fires "
                         "resets the others and holds them back.",
                         color=C_MUTED, wrap=340)
@@ -459,18 +475,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
         try:
             if tag == "nt_st_input":
                 kind = sv.input_kind(self._nt_get("nt_st_input", sv.POISSON))
-                old = self._nt_st_input_shown
-                if kind != old:
+                if kind != self._nt_st_input_shown:
                     self._nt_st_input_shown = kind
-                    w0 = float(self._nt_get("nt_st_w0", sv.W0_DEFAULT[old]))
-                    if abs(w0 - sv.W0_DEFAULT[old]) < 1e-6 and \
-                            dpg.does_item_exist("nt_st_w0"):
-                        dpg.set_value("nt_st_w0", sv.W0_DEFAULT[kind])
-                        why = ("so STDP can only lower weights and prunes the "
-                               "answers to noise" if kind == sv.IMAGES
-                               else "the paper value")
-                        self.log(f"[stream] input: {kind}; start weight set "
-                                 f"to {sv.W0_DEFAULT[kind]:g} ({why})")
             if tag == "nt_st_code" and dpg.does_item_exist("nt_st_code"):
                 # a bridge / agent value ('row', 'ttfs', ...) -> the item name
                 raw = dpg.get_value("nt_st_code")
@@ -483,6 +489,7 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                     dpg.set_value("nt_st_code", code)
                 self._nt_st_code_shown = code
             if tag in ("nt_st_input", "nt_st_code", ""):
+                self._nt_st_swap_w0()
                 self._nt_st_swap_noise()
             if tag in ("nt_st_input", "nt_st_imgset", "nt_st_code"):
                 self._nt_st_show_input_rows()
@@ -491,42 +498,85 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
         except Exception as exc:                        # noqa: BLE001
             self.log(f"[stream] preview error: {exc!r}")
 
+    def _nt_st_code_now(self):
+        """The image code the defaults follow: None for Poisson input, the
+        normalised encoding combo for images (the last good one if the
+        combo holds an unknown name)."""
+        if not self._nt_st_is_images():
+            return None
+        try:
+            return sv.code_name(self._nt_get("nt_st_code", sv.CODES[0]))
+        except ValueError:
+            return self._nt_st_code_shown
+
     def _nt_st_noise_layout_now(self):
         """'pixel' when the input is images in a pixel code, else 'row' (the
         layout class the noise defaults follow; Poisson input counts as a
         scan)."""
-        if not self._nt_st_is_images():
+        code = self._nt_st_code_now()
+        if code is None:
             return "row"
-        try:
-            return ("pixel" if sv.code_layout(self._nt_get(
-                "nt_st_code", sv.CODES[0])) == "pixel" else "row")
-        except ValueError:
-            return self._nt_st_noise_layout
+        return "pixel" if sv.code_layout(code) == "pixel" else "row"
+
+    def _nt_st_swap_w0(self):
+        """The start weight follows the input and the image code
+        (``sv.w0_default``: 0.475 for Poisson input, 1 for images, 0.5 for
+        frozen Poisson); only a value that still holds the old default
+        moves."""
+        kind = sv.IMAGES if self._nt_st_is_images() else sv.POISSON
+        new = sv.w0_default(kind, self._nt_st_code_now())
+        old = self._nt_st_w0_shown
+        if abs(new - old) < 1e-9:
+            return
+        self._nt_st_w0_shown = new
+        if not dpg.does_item_exist("nt_st_w0"):
+            return
+        if abs(float(dpg.get_value("nt_st_w0")) - old) >= 1e-6:
+            return                              # the user changed it: kept
+        dpg.set_value("nt_st_w0", new)
+        if kind == sv.POISSON:
+            why = "the paper value"
+        elif new in sv.W0_CODE.values():
+            why = ("frozen Poisson: from 1 STDP depressed the image's own "
+                   "lines below the threshold and the hits collapsed")
+        else:
+            why = "so STDP can only lower weights and prunes the answers to noise"
+        self.log(f"[stream] start weight set to {new:g} ({why})")
 
     def _nt_st_swap_noise(self):
-        """Noise Hz and background Hz follow the layout (PIXEL_NOISE_HZ for
-        the pixel codes, NOISE_HZ otherwise), as the start weight follows
-        the input: only a control that still holds the old default moves."""
-        new, old = self._nt_st_noise_layout_now(), self._nt_st_noise_layout
+        """Noise Hz and background Hz follow the layout and code
+        (``sv.noise_default``: PIXEL_NOISE_HZ for the pixel codes, NOISE_HZ
+        otherwise, CODE_NOISE_HZ for a code that has its own), as the start
+        weight does: only a control that still holds the old default
+        moves."""
+        new = (self._nt_st_noise_layout_now(), self._nt_st_code_now())
+        old = (self._nt_st_noise_layout, self._nt_st_noise_code)
         if new == old:
             return
-        self._nt_st_noise_layout = new
+        self._nt_st_noise_layout, self._nt_st_noise_code = new
+        if sv.noise_default(*new) == sv.noise_default(*old):
+            return
         moved = []
         for tag in ("nt_st_noise", "nt_st_bg"):
             if not dpg.does_item_exist(tag):
                 continue
             cur = float(dpg.get_value(tag))
-            val = sv.swapped_default(cur, old, new)
+            val = sv.swapped_default(cur, old[0], new[0], old[1], new[1])
             if val != cur:
                 dpg.set_value(tag, val)
                 moved.append(tag)
         if moved:
             names = {"nt_st_noise": "noise Hz", "nt_st_bg": "background Hz"}
-            why = ("the pixel codes have size x size afferents, so the same "
-                   "rate per afferent is far more noise per window"
-                   if new == "pixel" else "the scan default")
+            if new[1] in sv.CODE_NOISE_HZ:
+                why = (f"{new[1]}: clean untrained below this, so nothing "
+                       "to learn")
+            elif new[0] == "pixel":
+                why = ("the pixel codes have size x size afferents, so the "
+                       "same rate per afferent is far more noise per window")
+            else:
+                why = "the scan default"
             self.log(f"[stream] {' and '.join(names[t] for t in moved)} set "
-                     f"to {sv.noise_default(new):g} ({why})")
+                     f"to {sv.noise_default(*new):g} ({why})")
 
     def _nt_st_refresh_previews(self):
         """Rebuild the architecture from the controls (no run) and redraw
@@ -599,7 +649,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
         kind = sv.input_kind(self._nt_get("nt_st_input", sv.POISSON))
         for tag, _label, _field, default, *_rest in RULE:
             if tag == "nt_st_w0":           # the start weight of this input
-                default = sv.W0_DEFAULT[kind]
+                default = sv.w0_default(kind, self._nt_st_code_now())
+                self._nt_st_w0_shown = default
             if dpg.does_item_exist(tag):
                 dpg.set_value(tag, default)
         self._nt_st_changed("")
