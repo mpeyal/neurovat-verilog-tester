@@ -2155,7 +2155,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                         dpg.add_spacer(height=5)
                         with dpg.group(horizontal=True):
                             badge = dpg.add_button(label=self.agent_model_label,
-                                                   tag="model_badge", small=True)
+                                                   tag="model_badge", small=True,
+                                                   callback=self._open_model_popup)
                             dpg.bind_item_theme(badge, self.themes["chip"])
                             if "small" in self.fonts:
                                 dpg.bind_item_font(badge, self.fonts["small"])
@@ -2163,9 +2164,13 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                                 dpg.add_text("Model used for agent replies - "
                                              "click to switch, or type /model "
                                              "or /provider in the chat")
-                            with dpg.popup(badge, tag="model_popup",
-                                           mousebutton=dpg.mvMouseButton_Left):
-                                pass
+                            # a popup window placed by _open_model_popup
+                            # under the badge (dpg.popup leaves the position
+                            # to ImGui, which opened it at the top-left)
+                            dpg.add_window(tag="model_popup", popup=True,
+                                           show=False, autosize=True,
+                                           no_title_bar=True, no_move=True,
+                                           no_saved_settings=True)
                             self._rebuild_model_popup()
                             acc = dpg.add_button(label="Account", small=True,
                                                  callback=self.on_account_open)
@@ -2371,6 +2376,25 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             self.append_chat("sys", f"Model list refreshed from {src}: "
                                     f"{n} models for "
                                     f"{PROVIDER_TITLES[self.agent.provider]}.")
+
+    def _open_model_popup(self, *_):
+        """Open the model menu just below the badge, right-aligned to it and
+        kept inside the viewport (the badge sits near the right edge)."""
+        try:
+            bx, by = dpg.get_item_rect_min("model_badge")
+            bw, bh = dpg.get_item_rect_size("model_badge")
+            w, h = dpg.get_item_rect_size("model_popup")
+            w = w or 440                   # not measured until first shown
+            h = h or 340
+            vw = dpg.get_viewport_client_width()
+            vh = dpg.get_viewport_client_height()
+            x = min(max(8, bx + bw - w), max(8, vw - w - 8))
+            y = by + bh + 4
+            if y + h > vh - 8:             # no room below: open above
+                y = max(8, by - h - 4)
+            dpg.configure_item("model_popup", pos=(int(x), int(y)), show=True)
+        except Exception as exc:           # never let a menu kill the frame
+            self.log(f"[agent] model menu: {exc}")
 
     def _rebuild_model_popup(self):
         if not dpg.does_item_exist("model_popup"):
