@@ -52,7 +52,7 @@ def load_twins(twins_dir):
     if not os.path.isdir(twins_dir):
         return out
     twins_dir = os.path.abspath(twins_dir)
-    # Sibling imports (e.g. `from twins.fecap_nls import FeCAPNLS`) must
+    # Sibling imports (e.g. `from twins.my_helper import MyModel`) must
     # resolve to the very same modules that the GUI watches and reloads.
     # Point the namespace at the selected workspace, not the application's
     # bundled twins, including when --workspace selects an external folder.

@@ -3,7 +3,7 @@
 Claude provider (default):
   - `claude` CLI headless (`claude -p --output-format json`): full agentic
     backend with real file tools / shell; conversation via --resume.
-  - Anthropic SDK fallback (claude-opus-4-8): chat + patterns only.
+  - Anthropic SDK fallback (claude-opus-5-5): chat + patterns only.
 
 OpenAI provider:
   - `codex` CLI headless (`codex exec`) when installed: agentic backend with
@@ -727,7 +727,7 @@ class ClaudeAgent:
         if self.cli:
             return f"claude CLI ({_cli_origin(self.cli)})"
         if self.sdk_ok:
-            return "Anthropic SDK (claude-opus-4-8)"
+            return "Anthropic SDK (claude-opus-5-5)"
         return "no backend - install claude CLI or set ANTHROPIC_API_KEY"
 
     def reset(self):
@@ -961,7 +961,7 @@ class ClaudeAgent:
             client = anthropic.Anthropic(api_key=self.override_value)
         else:
             client = anthropic.Anthropic()
-        model_id = model if model and model != "default" else "claude-opus-4-8"
+        model_id = model if model and model != "default" else "claude-opus-5-5"
         self._history.append({"role": "user", "content": text})
         try:
             resp = client.messages.create(

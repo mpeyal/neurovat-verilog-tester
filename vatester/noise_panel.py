@@ -102,7 +102,7 @@ class NoisePanel:
         enabled = list(self.app._enabled_keys())
         supported = [key for key in enabled if key in self.specs]
         if not supported:
-            raise ValueError('The checked model has no noise model. Check FeCAP_v2_dr.va in the left panel.'
+            raise ValueError('The checked model has no noise model. Check a model whose twin defines one in the left panel.'
                              if enabled else 'Check a model in the left panel to plot noise and dynamic range.')
         if len(supported) > 1:
             raise ValueError('Check one noise-capable model at a time to plot its noise budget.')

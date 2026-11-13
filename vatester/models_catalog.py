@@ -22,6 +22,7 @@ Design notes:
 
 import json
 import os
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -35,9 +36,11 @@ _FETCH_TIMEOUT = 15
 BUILTIN = {
     "claude": [
         ("Default", None, "your Claude Code default"),
-        ("Opus 5", "claude-opus-5", "most capable"),
-        ("Sonnet 5", "claude-sonnet-5", "fast + smart"),
-        ("Haiku 4.5", "claude-haiku-4-5", "fastest, cheapest"),
+        ("Opus 5.5", "claude-opus-5-5", "most capable everyday"),
+        ("Fable 5.2", "claude-fable-5-2", "most capable, priciest"),
+        ("Sonnet 5.5", "claude-sonnet-5-5", "fast + smart"),
+        ("Haiku 5.5", "claude-haiku-5-5", "fastest, cheapest"),
+        ("Opus 5", "claude-opus-5", "previous Opus"),
     ],
     "openai": [
         ("Default", None, "your codex default"),
@@ -52,6 +55,69 @@ BUILTIN = {
 }
 
 PROVIDERS = tuple(BUILTIN)
+
+
+# ------------------------------------------------------- default-model pin
+# The app pins Claude to the newest Opus it can see, so the pin follows the
+# list (builtin, cache or live) instead of a version hard-coded in app.py.
+
+_VERSION_RE = re.compile(
+    r"^claude-(?P<fam>[a-z]+)-(?P<major>\d{1,3})(?:-(?P<minor>\d{1,3}))?"
+    r"(?:-(?P<date>\d{8}))?$")
+
+
+def _parse_id(mid):
+    """'claude-opus-5-5' -> ('opus', (5, 5), None); dated snapshot ids keep
+    their 8-digit date separately so it is never read as a minor version."""
+    m = _VERSION_RE.match(mid or "")
+    if not m:
+        return None
+    ver = (int(m.group("major")), int(m.group("minor") or 0))
+    return m.group("fam"), ver, m.group("date")
+
+
+def newest(rows, family="opus"):
+    """Row (label, id, blurb) with the highest-versioned claude-<family> id,
+    or None. Versions compare numerically (5-10 > 5-9, 6 > 5-5). Dated
+    snapshot ids are used only when no undated id of that family exists."""
+    plain, dated = [], []
+    for row in rows or ():
+        p = _parse_id(row[1] if len(row) > 1 else None)
+        if not p or p[0] != family:
+            continue
+        (dated if p[2] else plain).append((p[1], p[2] or "", row))
+    pool = plain or dated
+    if not pool:
+        return None
+    return max(pool, key=lambda t: (t[0], t[1]))[2]
+
+
+def resolve_pin(current, rows, user_picked, family="opus"):
+    """Selection (label, id-or-None) after a model list arrives.
+
+    Not picked by hand this session -> the newest `family` model in `rows`.
+    Otherwise (or when the list has none) keep `current` while the list still
+    offers it, and fall back to Default when it no longer does - never send
+    an id the provider stopped listing."""
+    if not user_picked:
+        best = newest(rows, family)
+        if best:
+            return best[0], best[1]
+    label, mid = current or ("Default", None)
+    if mid is None or any(len(r) > 1 and r[1] == mid for r in rows or ()):
+        return label, mid
+    return "Default", None
+
+
+def source_note(source, provider="claude"):
+    """Human-readable reason for which model list is in use (for the log)."""
+    no_auth = ("no API key / ant profile" if provider == "claude"
+               else "no API key")
+    return {
+        "live": "live list from the provider",
+        "cache": "cached provider list",
+        "builtin": f"{no_auth}; built-in list used",
+    }.get(source, source)
 
 
 def _cache_file(workdir):

@@ -387,11 +387,16 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         self.virt_busy = False
         # per-provider model selection: provider -> (label, id-or-None).
         # Claude stays explicitly pinned (the CLI's own default may pick the
-        # priciest model); the id is checked against the live list on refresh
-        # and falls back to "Default" if the provider no longer offers it, so
-        # pinning here can't go stale the way the old hardcoded list did.
+        # priciest model) to the newest Opus in the built-in list - no version
+        # is hard-coded here. When a live/cached list arrives the pin moves to
+        # its newest Opus unless the user picked a model by hand this session
+        # (model_user_picked); an id the provider no longer lists falls back
+        # to "Default". The selection is not persisted across restarts.
         self.model_sel = {p: ("Default", None) for p in PROVIDER_ORDER}
-        self.model_sel["claude"] = ("Opus 5", "claude-opus-5")
+        self.model_user_picked = {p: False for p in PROVIDER_ORDER}
+        _pin = models_catalog.newest(models_catalog.BUILTIN["claude"], "opus")
+        if _pin:
+            self.model_sel["claude"] = (_pin[0], _pin[1])
         # live model lists, provider -> [(label, id, blurb)]. Seeded with the
         # offline fallback and replaced by _refresh_models_async once each
         # provider has been asked what it actually offers.
@@ -2344,18 +2349,25 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             self.model_choices[p] = rows
             self.model_source[p] = (sources or {}).get(p, "builtin")
         self.models_busy = False
-        # a selected model that the provider no longer lists falls back to
-        # Default rather than silently sending an unknown id
+        # Claude's pin follows the newest Opus in the list unless the user
+        # picked by hand; for every provider a selected model that is no
+        # longer listed falls back to Default rather than silently sending
+        # an unknown id. Written straight to model_sel (not _set_model) so
+        # the automatic move never counts as a hand pick.
         for p in PROVIDER_ORDER:
-            label, mid = self.model_sel.get(p, ("Default", None))
-            if mid and not any(r[1] == mid for r in self.model_choices[p]):
-                self.model_sel[p] = ("Default", None)
+            cur = self.model_sel.get(p, ("Default", None))
+            picked = self.model_user_picked.get(p, False) or p != "claude"
+            self.model_sel[p] = models_catalog.resolve_pin(
+                cur, self.model_choices[p], picked)
         self._rebuild_model_popup()
         if dpg.does_item_exist("model_badge"):
             dpg.configure_item("model_badge", label=self.agent_model_label)
-        src = self.model_source.get(self.agent.provider, "builtin")
+        prov = self.agent.provider
+        src = self.model_source.get(prov, "builtin")
         n = len(self._provider_models())
-        self.log(f"[agent] model list <- {src} ({n} entries)")
+        self.log(f"[agent] model list <- {src} "
+                 f"({models_catalog.source_note(src, prov)}; {n} entries; "
+                 f"model {self.agent_model_label})")
         if announce:
             self.append_chat("sys", f"Model list refreshed from {src}: "
                                     f"{n} models for "
@@ -2417,6 +2429,11 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
     def _match_model(self, query):
         q = query.lower().strip()
         q = q.replace("claude-", "")
+        # an exact label / id wins, so "/model opus 5" picks Opus 5, not the
+        # first label containing it (Opus 5.5)
+        for label, mid, _ in self._provider_models():
+            if q and q in (label.lower(), (mid or "").replace("claude-", "")):
+                return label, mid
         for label, mid, _ in self._provider_models():
             hay = label.lower() + " " + (mid or "")
             if q and q in hay:
@@ -2428,7 +2445,10 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         return None
 
     def _set_model(self, label, mid, announce=True):
+        # every caller is a user action (picker, /model); the automatic pin in
+        # _on_models_done writes model_sel directly and never comes here
         self.model_sel[self.agent.provider] = (label, mid)
+        self.model_user_picked[self.agent.provider] = True
         if dpg.does_item_exist("model_badge"):
             dpg.configure_item("model_badge", label=label)
         if announce:
