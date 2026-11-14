@@ -15,7 +15,7 @@ python validation/c5/make_deck.py                                        # -> sp
 #   spectre +escchars -format psfascii -raw train.raw +log train.log train.scs
 python validation/c5/compare_c5.py scrub <train.raw/tran.tran.tran> <train.log>
 python validation/c5/compare_c5.py score       # summary.csv, cost.json, figure
-python validation/c5/diagnose_engine.py        # why the engine's full read differs (no Spectre needed)
+python validation/c5/diagnose_engine.py        # (historical, run on ac92294) why the pre-fix engine read differed
 ```
 
 ## Setup (`data/c5/engine.json`)

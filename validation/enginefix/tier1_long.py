@@ -6,6 +6,9 @@ stream, against a fresh Spectre run of the schedule this run produced.
     python validation/c5/run_engine.py --afferents 16 --seconds 60 --seed 1 \
         --pattern-frac 0.1 --out results/c5_long
     python validation/c5/make_deck.py --data results/c5_long --strobe 1e-3
+    # make_deck writes validation/spice/spectre_c5/v3/train.scs, the COMMITTED
+    # C5 deck: move it away (e.g. results/c5_long/deck/train_long.scs) and
+    # `git checkout -- validation/spice/spectre_c5/v3/train.scs`
     # Spectre on the host; fetch the PSF-ascii tran file
     python validation/enginefix/tier1_long.py scrub <tran.tran.tran> <train.log>
     python validation/enginefix/tier1_long.py score
