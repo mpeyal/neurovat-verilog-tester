@@ -1,0 +1,6 @@
+case,points,nrmse_pct,max_pct
+"ECFET v3 - single +50 pA, 10 ms pulse",2104,0.0693,0.402
+ECFET v3 - LTP/LTD train (20 + 20 pulses),8662,0.0537,0.851
+"ECFET v3 - paired pulses, 5 ms to 1 s gaps",5936,0.0304,0.126
+Stanford-PKU RRAM - RESET pulse + read,2143,0.1162,0.116
+Stanford-PKU RRAM - +/-1.3 V train,5841,0.7148,3.156
