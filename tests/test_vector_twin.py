@@ -119,6 +119,31 @@ def test_idle_steps_equal_one_long_step(make):
     assert a.G == pytest.approx(b.G, rel=1e-12)
 
 
+@pytest.mark.parametrize("x0,I", [(0.2, 50e-12), (0.47, 1.5e-9),
+                                  (0.6, -1.3e-9), (0.995, 3e-9),
+                                  (0.004, -3e-9)])
+def test_driven_step_is_split_invariant(x0, I):
+    """One 10 ms driven step == 10 x 1 ms == 1e4 x 1 us (the pools decay
+    within the pulse, exponential integrator): full G and every pool to
+    5e-7 of the window, G_nv to 1e-9. Includes pulses into both rails."""
+    p = V3Params.paper(A_stdp=0.0)
+    span = p.Gmax - p.Gmin
+    out = []
+    for n in (1, 10, 10000):
+        d = EcfetV3(p)
+        d.x, d.G_nv = x0, p.G_of_x(x0)
+        d.step(0.0, 1.0, 0.0)
+        for k in range(n):
+            d.step(1.0 + k * 0.01 / n, 0.01 / n, I)
+        out.append((d.G, d.G_nv, list(d.pools)))
+    ref = out[-1]
+    for G, G_nv, pools in out[:-1]:
+        assert abs(G - ref[0]) < 5e-7 * span
+        assert abs(G_nv - ref[1]) < 1e-9 * span
+        for a, b in zip(pools, ref[2]):
+            assert abs(a - b) < 5e-7 * span
+
+
 def test_idle_gap_is_one_step_whatever_its_length():
     calls = []
 
@@ -150,9 +175,14 @@ def test_full_read_sees_the_volatile_pools_and_nv_read_does_not():
     early = float(full.read_at(0.010)[0, 0]) - g0
     late = float(full.read_at(200.0)[0, 0])
     p = make().p
-    # instantaneous excess = kappa_v / (1 - kappa_v) of the retained step
-    assert early / ret == pytest.approx(1.0 + p.kappa_v / (1 - p.kappa_v),
-                                        rel=0.02)
+    # excess at the pulse end = kappa_v / (1 - kappa_v) of the retained step,
+    # injected at a constant rate over the pulse T and decaying within it:
+    # pool i keeps phi_i = (1 - e^(-T/tau_i)) / (T/tau_i) of its share
+    T = 10e-3
+    keep = sum(c * -math.expm1(-T / tau) / (T / tau)
+               for c, tau in zip(p.pool_weights, p.taus))
+    assert early / ret == pytest.approx(
+        1.0 + p.kappa_v / (1 - p.kappa_v) * keep, rel=1e-3)
     assert late == pytest.approx(float(full.retained()[0, 0]), rel=1e-7)
     assert float(nv.read_at(0.010)[0, 0]) - g0 == pytest.approx(ret, rel=1e-9)
 

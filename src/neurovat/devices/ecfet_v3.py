@@ -136,16 +136,19 @@ class EcfetV3Array(DeviceArray):
                                              p.Gmin - self.G_nv[o],
                                              self.lock[o]))
 
-        # (C) volatile pools relax
-        for i in range(3):
-            self.pools[i, idx] *= np.exp(-dt / taus[i])
+        # (C) volatile pools relax (idle devices; a write integrates them in E)
+        wr = Ieff != 0.0
+        if not wr.all():
+            q, dq = idx[~wr], dt[~wr]
+            for i in range(3):
+                self.pools[i, q] *= np.exp(-dq / taus[i])
 
         # (D) retention: x relaxes toward x_eq
         self.x[idx] = p.x_eq + (self.x[idx] - p.x_eq) * np.exp(-dt / p.tau_ret)
         self.G_nv[idx] = self._G_of_x(self.x[idx])
 
-        # (E) conserved-x write, sub-stepped per device
-        wr = Ieff != 0.0
+        # (E) conserved-x write, sub-stepped per device; the pools decay and
+        # take the EDL inflow together (exponential integrator, see model_v3)
         if wr.any():
             w = idx[wr]
             Iw, dtw = Ieff[wr], dt[wr]
@@ -158,17 +161,39 @@ class EcfetV3Array(DeviceArray):
             h = dtw / n_sub
             dx_sub = sign * np.abs(Iw) * h / p.Q_full * eta * cf
             cw, edl = self._cw, self._edl
+            z = np.stack([h / tau for tau in taus])           # (3, n_w)
+            eh = np.exp(-z)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                phi = np.where(z > 0.0, -np.expm1(-z) / z, 1.0)
             for s in range(int(n_sub.max())):
                 act = s < n_sub
                 a = w[act]
-                x_new = np.minimum(np.maximum(self.x[a] + dx_sub[act], 0.0), 1.0)
+                dxa = dx_sub[act]
+                x_try = self.x[a] + dxa
+                x_new = np.minimum(np.maximum(x_try, 0.0), 1.0)
                 G_new = self._G_of_x(x_new)
                 dG = G_new - self.G_nv[a]
+                wgt = phi[:, act]
+                rail = x_new != x_try
+                if rail.any():                 # rail hit inside the sub-step
+                    wgt = wgt.copy()
+                    xo, dr = self.x[a][rail], dxa[rail]
+                    f = np.where(dr != 0.0, np.abs(x_new[rail] - xo)
+                                 / np.abs(np.where(dr != 0.0, dr, 1.0)), 0.0)
+                    zr = z[:, act][:, rail]
+                    fz = f * zr
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        wr_ = np.where(fz > 0.0, np.exp(-(1.0 - f) * zr)
+                                       * -np.expm1(-fz) / fz,
+                                       np.where(f > 0.0, 1.0, 0.0))
+                    wgt[:, rail] = wr_
                 self.x[a] = x_new
                 self.G_nv[a] = G_new
                 dG_edl = np.copysign(edl * np.abs(dG), dG)
+                e_a = eh[:, act]
                 for i in range(3):
-                    self.pools[i, a] += cw[i] * dG_edl
+                    self.pools[i, a] = (self.pools[i, a] * e_a[i]
+                                        + cw[i] * dG_edl * wgt[i])
 
         self.prev[idx] = drift
 
