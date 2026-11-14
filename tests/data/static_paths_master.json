@@ -54,5 +54,16 @@
    "0x1.9c511dc3a41e0p-25",
    "0x1.a40f9170a4165p-25"
   ]
+ },
+ "v3_static_scalar/3/2": {
+  "weights": "a98c5583890eca2d39a7a2ee1b04609ecc9ea10a137c3c564db89b28bf410e94",
+  "post_t": "0656bf5abab8c2b82659620b1e7bda5951518e4da1af6d7c3c2e69221311b7ae",
+  "post_spikes": 71,
+  "writes": 2766,
+  "retained": "a98c5583890eca2d39a7a2ee1b04609ecc9ea10a137c3c564db89b28bf410e94",
+  "cal": [
+   "0x1.9c511dc3a41e0p-25",
+   "0x1.a40f9170a4165p-25"
+  ]
  }
 }

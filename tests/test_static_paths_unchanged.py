@@ -22,8 +22,20 @@ DATA = Path(__file__).parent / "data" / "static_paths_master.json"
 sys.path[:0] = [str(ROOT / "src"), str(ROOT), str(ABL)]
 
 CASES = [(arm, seed, k) for arm in ("ideal", "neurosim", "v3_static")
-         for seed, k in ((1, 2), (2, 10))]
+         for seed, k in ((1, 2), (2, 10))] + [("v3_static_scalar", 3, 2)]
 AFFERENTS, PRESENTATIONS = 200, 12
+SMALL = 40          # afferents of the (slow) scalar-adapter case
+
+
+def _make(arm, n_pre, fit):
+    import run_ablation as ra
+    if arm == "v3_static_scalar":
+        # the legacy adapter over the scalar twin: serial timing, G_nv read
+        from neurovat.devices import ScalarTwinArray
+        from simulation_core.model_v3 import EcfetV3
+        return ScalarTwinArray(lambda: EcfetV3(ra.v3_params()), 1, n_pre,
+                               "serial", "nv")
+    return ra.make_array(arm, 1, n_pre, fit)
 
 
 def _h(a):
@@ -35,12 +47,13 @@ def fingerprint(arm, seed, k, fit):
     import argparse
     import run_ablation as ra
     from neurovat.masquelier import calibrate_write, run
-    P = replace(ra.base_params(argparse.Namespace(afferents=AFFERENTS)),
+    n = SMALL if arm == "v3_static_scalar" else AFFERENTS
+    P = replace(ra.base_params(argparse.Namespace(afferents=n)),
                 seed=seed, pattern_frac=1.0 / k,
                 base_s=PRESENTATIONS * k * 0.05)
     kw, dev = {}, None
     if arm != "ideal":
-        dev = ra.make_array(arm, 1, P.n_afferents, fit)
+        dev = _make(arm, P.n_afferents, fit)
         cal = calibrate_write(dev, P, ra.WIDTH, 30 * ra.I_UNIT)
         lo, hi = dev.g_min, dev.g_max
         dev.set_conductance(np.full(dev.shape, lo + P.w_init * (hi - lo)))
