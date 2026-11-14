@@ -157,20 +157,22 @@ def main(argv=None):
     ap.add_argument("--log")
     ap.add_argument("--wall-s", type=float)
     ap.add_argument("--dir", help="batch: <dir>/<stim>.raw/tran.tran")
+    ap.add_argument("--out-root", help="write <out-root>/spectre/<stim>.csv instead of "
+                    "validation/data/stanford/ (e.g. a fine-step reference set)")
     args = ap.parse_args(argv)
     try:
         if args.dir:
-            done, refused = batch(args.dir)
+            done, refused = batch(args.dir, out_root=args.out_root)
             for d in done:
-                print("wrote", d.relative_to(common.ROOT).as_posix())
+                print("wrote", d.resolve().relative_to(common.ROOT).as_posix())
             for name, why in refused:
                 print(f"REFUSED {name}: {why}", file=sys.stderr)
             print(f"{len(done)} Spectre result(s) imported, {len(refused)} refused")
             return 2 if refused else 0
         if not (args.src and args.stimulus):
             ap.error("give SRC --stimulus, or --dir")
-        d = scrub_one(args.stimulus, args.src, args.log, args.wall_s)
-        print("wrote", d.relative_to(common.ROOT).as_posix())
+        d = scrub_one(args.stimulus, args.src, args.log, args.wall_s, out_root=args.out_root)
+        print("wrote", d.resolve().relative_to(common.ROOT).as_posix())
         return 0
     except ScrubError as e:
         print(f"REFUSED: {e}", file=sys.stderr)

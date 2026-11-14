@@ -54,10 +54,14 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stimulus", nargs="*")
     ap.add_argument("--no-figures", action="store_true")
+    ap.add_argument("--ref", default="spectre",
+                    help="reference set under validation/data/stanford/ (default spectre; "
+                         "e.g. ref_1ps/spectre for the 1 ps runs)")
     args = ap.parse_args(argv)
+    tag = "" if args.ref == "spectre" else "_" + args.ref.split("/")[0]
     rows = []
     for st in S.get(args.stimulus):
-        sp = core.load("spectre", st.name)
+        sp = core.load(args.ref, st.name)
         if sp is None:
             continue
         tw = core.load("twin", st.name)
@@ -65,18 +69,18 @@ def main(argv=None):
             tw, _, _ = core.run_twin(st)
         r = {"stimulus": st.name, **core.score(tw, sp, st)}
         tm = common.read_meta(core.data_path("twin", st.name, ".json"))
-        sm = common.read_meta(core.data_path("spectre", st.name, ".json"))
+        sm = common.read_meta(core.data_path(args.ref, st.name, ".json"))
         r["twin_wall_s"], r["spectre_wall_s"] = tm.get("wall_s"), sm.get("wall_s")
         r["verdict"] = core.verdict(r)
         rows.append(r)
         if not args.no_figures:
-            overlay(core.FIGURES / f"spectre_{st.name}.png", st, tw, sp, r)
+            overlay(core.FIGURES / f"spectre{tag}_{st.name}.png", st, tw, sp, r)
     if not rows:
         print("no Spectre data under validation/data/stanford/spectre/ yet - run the decks "
               "in validation/spice/spectre_stanford/ and import them with "
               "validation/stanford/scrub.py (see validation/README.md)")
         return 0
-    compare.write_rows(core.DATA / "summary.csv", rows)
+    compare.write_rows(core.DATA / f"summary{tag}.csv", rows)
 
     def f(v, s):
         return "-" if v is None or (isinstance(v, float) and math.isnan(v)) else format(v, s)

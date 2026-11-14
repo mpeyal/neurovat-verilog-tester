@@ -18,3 +18,6 @@ spice/**/*.tran
 # summary tables (score_table, self_check, memtorch) stay tracked
 data/twin/
 data/*/twin/
+
+# fine-step Spectre reference sets (hundreds of MB): regenerate from the host runs; keep the .json provenance
+data/stanford/ref_*/spectre/*.csv

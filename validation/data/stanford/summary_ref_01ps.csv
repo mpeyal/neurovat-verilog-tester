@@ -1,0 +1,2 @@
+stimulus,n_points,n_reads,g_read_max_pct,g_read_mean_pct,i_nrmse_pct,i_maxerr_pct,i_range_mA,gap_nrmse_pct,gap_maxerr_pct,twin_wall_s,spectre_wall_s,verdict
+pulse_set_ref,2056,1,0,0,0.00500186,0.224994,300.922,0.00478332,0.155,0.0216,0.0002,PASS
