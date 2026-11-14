@@ -1,0 +1,50 @@
+NeuroSim fit to v3 retained curves: A_p/Pmax 1000.000 (rmse 7.19 % of range, max 10.09 %), A_d/Pmax 1000.000 (rmse 7.19 %, max 10.09 %)
+[1/40] v3_time_nv k=10 seed 4: success False hit 0.00 fa/s 0.04 (474 s)
+[2/40] v3_time_p2 k=10 seed 3: success False hit 0.00 fa/s 0.00 (485 s)
+[3/40] v3_time_p1 k=10 seed 2: success False hit 0.10 fa/s 0.00 (486 s)
+[4/40] v3_time_p2 k=10 seed 1: success False hit 0.00 fa/s 0.02 (488 s)
+[5/40] v3_time_p3 k=10 seed 1: success False hit 1.00 fa/s 0.00 (509 s)
+[6/40] v3_time_p3 k=10 seed 2: success False hit 1.00 fa/s 0.00 (515 s)
+[7/40] v3_time_nv k=10 seed 3: success False hit 0.00 fa/s 0.06 (527 s)
+[8/40] v3_time_p1 k=10 seed 3: success False hit 0.00 fa/s 0.02 (528 s)
+[9/40] v3_time_p3 k=10 seed 3: success False hit 1.00 fa/s 0.00 (529 s)
+[10/40] v3_time_nv k=10 seed 1: success False hit 0.00 fa/s 0.02 (529 s)
+[11/40] v3_time_p1 k=10 seed 1: success False hit 0.00 fa/s 0.02 (529 s)
+[12/40] v3_time_p2 k=10 seed 2: success False hit 0.00 fa/s 0.02 (536 s)
+[13/40] v3_time_nv k=10 seed 2: success False hit 0.00 fa/s 0.00 (536 s)
+[14/40] v3_time_p1 k=10 seed 4: success False hit 0.00 fa/s 0.02 (604 s)
+[15/40] v3_time_p3 k=10 seed 4: success False hit 1.00 fa/s 0.00 (570 s)
+[16/40] v3_time_nv k=10 seed 6: success False hit 0.00 fa/s 0.02 (534 s)
+[17/40] v3_time_nv k=10 seed 7: success False hit 0.00 fa/s 0.02 (533 s)
+[18/40] v3_time_nv k=10 seed 5: success False hit 1.00 fa/s 0.00 (584 s)
+[19/40] v3_time_p1 k=10 seed 5: success False hit 1.00 fa/s 0.00 (585 s)
+[20/40] v3_time_p2 k=10 seed 6: success False hit 0.00 fa/s 0.02 (545 s)
+[21/40] v3_time_p3 k=10 seed 5: success False hit 1.00 fa/s 0.00 (570 s)
+[22/40] v3_time_p1 k=10 seed 7: success False hit 0.00 fa/s 0.02 (551 s)
+[23/40] v3_time_p2 k=10 seed 5: success False hit 1.00 fa/s 0.00 (585 s)
+[24/40] v3_time_p3 k=10 seed 6: success False hit 0.95 fa/s 0.00 (580 s)
+[25/40] v3_time_p1 k=10 seed 6: success True hit 1.00 fa/s 0.00 (599 s)
+[26/40] v3_time_p3 k=10 seed 7: success False hit 1.00 fa/s 0.00 (559 s)
+[27/40] v3_time_p2 k=10 seed 7: success False hit 0.00 fa/s 0.00 (640 s)
+[28/40] v3_time_p2 k=10 seed 4: success False hit 0.00 fa/s 0.02 (747 s)
+[29/40] v3_time_nv k=10 seed 8: success False hit 0.00 fa/s 0.00 (500 s)
+[30/40] v3_time_p2 k=10 seed 8: success False hit 0.02 fa/s 0.02 (500 s)
+[31/40] v3_time_p1 k=10 seed 8: success False hit 0.00 fa/s 0.00 (512 s)
+[32/40] v3_time_nv k=10 seed 9: success False hit 0.00 fa/s 0.00 (502 s)
+[33/40] v3_time_p3 k=10 seed 8: success False hit 0.33 fa/s 0.00 (506 s)
+[34/40] v3_time_nv k=10 seed 10: success False hit 0.01 fa/s 0.04 (490 s)
+[35/40] v3_time_p3 k=10 seed 9: success False hit 0.00 fa/s 0.04 (500 s)
+[36/40] v3_time_p2 k=10 seed 9: success False hit 0.02 fa/s 0.02 (506 s)
+[37/40] v3_time_p1 k=10 seed 9: success False hit 1.00 fa/s 0.00 (519 s)
+[38/40] v3_time_p1 k=10 seed 10: success False hit 0.00 fa/s 0.02 (493 s)
+[39/40] v3_time_p2 k=10 seed 10: success False hit 0.00 fa/s 0.00 (479 s)
+[40/40] v3_time_p3 k=10 seed 10: success False hit 0.01 fa/s 0.06 (455 s)
+Network: 1000 afferents (500 in the pattern), 1 neuron, Masquelier 2008 rule and neuron; 300 evenly spaced presentations per run; 10 seeds (streams shared by the arms); scored on the last third. Device arms: 10 ms pulses, 10 ms write window, calibrated on the retained step. mean ± sd over seeds; success = runs meeting hit > 98 %, no false alarm, latency < 10 ms.
+
+| gap (ms) | arm | success | hit % | false alarms /s | latency ms | pattern w>0.9 % (read / stored) | background w<0.1 % (read / stored) | mean background w (read / stored) |
+|---|---|---|---|---|---|---|---|---|
+| 450 | v3_time_nv | 0/10 | 10.1 ± 31.6 | 0.02 ± 0.02 | 16.7 ± 8.0 | 1.1 ± 3.6 / 1.1 ± 3.6 | 22.5 ± 18.8 / 22.5 ± 18.8 | 0.203 ± 0.048 / 0.203 ± 0.048 |
+| 450 | v3_time_p1 | 1/10 | 31.0 ± 47.7 | 0.01 ± 0.01 | 17.6 ± 14.6 | 6.2 ± 9.9 / 6.2 ± 9.9 | 38.9 ± 37.9 / 38.9 ± 38.0 | 0.160 ± 0.094 / 0.160 ± 0.094 |
+| 450 | v3_time_p2 | 0/10 | 10.4 ± 31.5 | 0.01 ± 0.01 | 28.4 ± 14.5 | 2.2 ± 7.0 / 2.2 ± 7.0 | 24.1 ± 25.0 / 24.1 ± 25.0 | 0.199 ± 0.063 / 0.199 ± 0.063 |
+| 450 | v3_time_p3 | 0/10 | 72.9 ± 43.4 | 0.01 ± 0.02 | 22.7 ± 11.7 | 14.3 ± 10.5 / 12.9 ± 10.2 | 70.7 ± 34.7 / 69.0 ± 34.5 | 0.082 ± 0.088 / 0.087 ± 0.087 |
+wall 1620 s -> validation\ablation\out\attribution_gap450
