@@ -66,9 +66,40 @@ def v3_params():
     return V3Params.paper(A_stdp=0.0)
 
 
+# Diagnostic arms (attribution only, not part of the four-arm ablation): the
+# v3 device evolves exactly as in v3_time (physical time, same state), but
+# the neuron reads only part of it - G_nv alone (v3_time_nv: what is left
+# of time is retention), or G_nv + ONE volatile pool (v3_time_p1/p2/p3:
+# the 22 ms / 312 ms / 19 s pool). The model physics and parameters are
+# unchanged; only the read-out differs.
+DIAG = {"v3_time_nv": (), "v3_time_p1": (0,), "v3_time_p2": (1,),
+        "v3_time_p3": (2,)}
+
+
+def _pool_read_array(pools_read, n_post, n_pre):
+    from neurovat.devices import EcfetV3Array
+
+    class PoolRead(EcfetV3Array):
+        def peek(self, t):
+            p = self.p
+            dt = np.maximum(float(t) - self.t_dev, 0.0)
+            x = p.x_eq + (self.x - p.x_eq) * np.exp(-dt / p.tau_ret)
+            tot = self._G_of_x(x) + self.lock
+            for i in pools_read:
+                tot = tot + self.pools[i] * np.exp(-dt / self._taus[i])
+            return np.minimum(np.maximum(tot, p.Gmin),
+                              p.Gmax).reshape(self.shape)
+
+        def nominal(self):
+            return _pool_read_array(pools_read, 1, 1)
+    return PoolRead(v3_params(), n_post, n_pre, "physical", "full")
+
+
 def make_array(arm, n_post, n_pre, fit):
     from neurovat.devices import EcfetV3Array
     from neurosim_curve import array_from_fit
+    if arm in DIAG:
+        return _pool_read_array(DIAG[arm], n_post, n_pre)
     if arm == "neurosim":
         return array_from_fit(fit, n_post, n_pre)
     if arm == "v3_static":
@@ -118,7 +149,7 @@ def one_job(job):
                 "mean_bg": float(x[npat:].mean()),
                 "hist": np.histogram(x, bins=10, range=(0, 1))[0].tolist()}
     pools = None
-    if arm == "v3_time":
+    if arm == "v3_time" or arm in DIAG:
         # the read - stored difference at the end of the run, split by pool
         # (weight units): which time constant carries it
         span = dev.g_max - dev.g_min
@@ -147,7 +178,7 @@ def summarise(rows):
         out.setdefault((r["k"], r["arm"]), []).append(r)
     table = []
     for (k, arm), rs in sorted(out.items(), key=lambda x: (x[0][0],
-                                                          ARMS.index(x[0][1]))):
+                                                          (ARMS + tuple(DIAG)).index(x[0][1]))):
         def ms(vals):
             v = np.array([x for x in vals if x is not None], float)
             return (float(v.mean()) if v.size else float("nan"),
