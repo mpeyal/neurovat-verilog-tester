@@ -172,6 +172,7 @@ def score(figures=True):
             e = e if mask is None else e[mask]
             return 100 * math.sqrt(float(np.mean(e * e))) / rng, 100 * float(np.max(np.abs(e))) / rng
         eng_all, eng_out, eng_nv = em(e_full), em(e_full, ~inp), em(e_nv, ~inp)
+        eng_nv_all = em(e_nv)
         g_sp_end = sp["G_full_at_t_end_S"][k]
         gnv_sp_end = sp["G_nv_at_t_end_S"][k]
         row = {
@@ -182,6 +183,7 @@ def score(figures=True):
             "engine_nrmse_pct": eng_all[0], "engine_max_pct": eng_all[1],
             "engine_out_nrmse_pct": eng_out[0], "engine_out_max_pct": eng_out[1],
             "engine_nv_out_max_pct": eng_nv[1],
+            "engine_nv_nrmse_pct": eng_nv_all[0], "engine_nv_max_pct": eng_nv_all[1],
             "final_G_spectre_uS": 1e6 * g_sp_end,
             "final_G_twin_err_pct": 100 * (G[-1] - g_sp_end) / rng,
             "final_G_engine_err_pct": 100 * (meta["final_G_full_S"][k] - g_sp_end) / rng,
@@ -193,7 +195,9 @@ def score(figures=True):
                                         and abs(sp["charge_rel_err"][k]) <= compare.CHARGE_TOL)
                              else "FAIL"),
             "engine_verdict": ("PASS" if eng_all[0] <= 100 * NRMSE_LIMIT
-                               and eng_all[1] <= 100 * MAXERR_LIMIT else "FAIL")}
+                               and eng_all[1] <= 100 * MAXERR_LIMIT else "FAIL"),
+            "engine_nv_verdict": ("PASS" if eng_nv_all[0] <= 100 * NRMSE_LIMIT
+                                  and eng_nv_all[1] <= 100 * MAXERR_LIMIT else "FAIL")}
         rows.append(row)
         curves.append((tg, gs, np.interp(tg, ts, G), ns))
     with open(DATA / "summary.csv", "w", newline="") as f:
@@ -213,7 +217,10 @@ def score(figures=True):
               f"{r['g_range_uS']:8.1f} | {r['twin_nrmse_pct']:11.4f} {r['twin_max_pct']:6.3f} | "
               f"{r['engine_nrmse_pct']:13.3f} {r['engine_max_pct']:6.2f} "
               f"{r['engine_out_max_pct']:14.2f} | {r['final_G_twin_err_pct']:17.4f} "
-              f"{r['final_G_engine_err_pct']:7.3f} | {r['twin_verdict']}/{r['engine_verdict']}")
+              f"{r['final_G_engine_err_pct']:7.3f} | {r['twin_verdict']}/{r['engine_verdict']}"
+              f"  | G_nv engine {r['engine_nv_nrmse_pct']:.3f}/{r['engine_nv_max_pct']:.2f}% "
+              f"out-pulse max {r['engine_nv_out_max_pct']:.2e}% final "
+              f"{r['final_Gnv_engine_err_pct']:.2e}% [{r['engine_nv_verdict']}]")
     print(json.dumps(cost, indent=1))
     if figures:
         figure(meta, per, rows, curves, t_r, rd, n)
@@ -251,8 +258,10 @@ def figure(meta, per, rows, curves, t_r, rd, n):
         ax.plot(t_r[::20], 1e6 * rd[::20, 1 + k], ".", ms=1.5, color="tab:red",
                 label="engine read")
         r = rows[k]
-        ax.set_title(f"syn {k}{' (pattern)' if r['pattern'] else ''}: "
-                     f"{r['twin_nrmse_pct']:.3f}% / {r['twin_max_pct']:.2f}%", fontsize=7)
+        ax.set_title(f"syn {k}{' (pat)' if r['pattern'] else ''}: engine "
+                     f"{r['engine_nrmse_pct']:.1f}/{r['engine_max_pct']:.0f}% "
+                     f"[{r['engine_verdict']}], twin {r['twin_nrmse_pct']:.2f}/"
+                     f"{r['twin_max_pct']:.1f}% [{r['twin_verdict']}]", fontsize=6)
         ax.tick_params(labelsize=6)
     axs[0][0].legend(fontsize=5, loc="best")
     for ax in axs[-1]:
@@ -260,7 +269,9 @@ def figure(meta, per, rows, curves, t_r, rd, n):
     for row in axs:
         row[0].set_ylabel("G (uS)", fontsize=7)
     fig.suptitle(f"C5 tier 1: {n} v3 synapses, {meta['n_pulses']} engine write pulses "
-                 "replayed in Spectre (title: twin NRMSE / max, % of range)", fontsize=8)
+                 "replayed in Spectre (titles: NRMSE / max, % of the synapse's G range;\n"
+                 "engine = what the network read during training, twin = fine-grid replay)",
+                 fontsize=8)
     fig.tight_layout()
     fig.savefig(FIG / "tier1_synapses.png", dpi=150)
     plt.close(fig)
@@ -276,7 +287,9 @@ def main(argv=None):
         scrub(a.src, a.log)
         return 0
     rows = score()
-    return 0 if all(r["twin_verdict"] == "PASS" for r in rows) else 1
+    # the primary C5 verdict is the ENGINE's read (what the network saw);
+    # the fine-grid twin replay is the model-equivalence diagnostic
+    return 0 if all(r["engine_verdict"] == "PASS" for r in rows) else 1
 
 
 if __name__ == "__main__":
