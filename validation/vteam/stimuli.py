@@ -179,7 +179,8 @@ def _sine_memtorch():
     f, amp, step = 50e6, 1.0, 100
     for k in range(1, 2001):
         b._add(k * step, amp * math.sin(2 * math.pi * f * k * step * PS))
-    pts = [(t, 0.0 if abs(v) < 1e-12 else round(v, 12)) for t, v in b.pts]
+    # 9 significant digits: exactly the values the Spectre PWL text carries
+    pts = [(t, 0.0 if abs(v) < 1e-12 else float(f"{v:.9g}")) for t, v in b.pts]
     b.pts = pts
     return b.build("sine_memtorch", "MemTorch hysteresis default: 1 V, 50 MHz sine for "
                    "200 ns (PWL, 100 ps points) from ON; -1 V crosses d in ~5 ps", 0, DT,
