@@ -1,2 +1,2 @@
 test,seed,seconds,n_afferents,input_spikes,dropped_same_bin,spk_n_ref,spk_n_test,spk_matched,spk_match_frac,spk_mean_abs_dt_ms,spk_max_abs_dt_ms,first_divergence_ms,membrane_nrmse,membrane_max_abs,nan_mask_mismatch,nv_wall_s,b2_wall_s
-a_fixed_weights,11,5,2000,638966,765,329,329,329,1,1.06182e-13,9.09495e-13,,1.0085e-08,1.52583e-05,0,4.2536,68.6813
+a_fixed_weights,11,5,2000,638966,765,329,329,329,1,1.06182e-13,9.09495e-13,,1.0085e-08,1.52583e-05,0,19.8704,228.284
