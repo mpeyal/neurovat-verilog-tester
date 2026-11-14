@@ -209,6 +209,12 @@ first places to look if Spectre FAILs:
   each time step and splits the pool decay from the write (first order in dt;
   see `self_check.csv`). Spectre integrates the same ODEs with its own
   adaptive steps.
+* **v3 rail taper.** At x = 0 and x = 1, `ecfet_v3.va` tapers the outward
+  write continuously over the last `x_soft` (1e-5) of the window. The twin
+  clamps x hard instead, which is the x_soft -> 0 limit. The difference is at
+  most about 3e-6 of the G window. Without the taper, Spectre chattered on the
+  upper rail and its step collapsed. `bound/README.md` has the decks and the
+  scores.
 * **Gate source orientation.** The existing hand-written
   `tools/ecfet_v3_tb.scs` wires `igate (n_igsc 0)` with `val1=50p`. By the
   SPICE/Spectre isource convention (positive current flows from the first node

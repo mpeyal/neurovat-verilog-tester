@@ -1,0 +1,9 @@
+{
+  "drive_measured": true,
+  "model": "v3",
+  "n_points": 17467,
+  "source": "Spectre 24.1",
+  "stimulus": "hi_50pA",
+  "stimulus_set": "bound-1",
+  "wall_s": 0.2382
+}

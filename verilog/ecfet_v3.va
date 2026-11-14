@@ -7,7 +7,8 @@
 //
 //   state:  d(x)/dt = sgn * |I|/Q_full        (x integrated on node n_x; 1V==1x)
 //                     - x/tau_ret              (self-discharge toward x_eq=0)
-//           x is HARD-clamped to [0,1] (the delithiated and LiC6 rails).
+//           x is clamped to [0,1] (the delithiated and LiC6 rails); the
+//           outward write tapers continuously over the last x_soft (1e-5).
 //   map:    G_nv = Gmin + (Gmax-Gmin) * S(x)
 //           S(x) = (sig(k*(x-0.5)) - sig(-k/2)) / (sig(k/2) - sig(-k/2)),
 //           sig(t) = 1/(1+exp(-t)),  so  S(0)=0, S(1)=1.
@@ -129,6 +130,12 @@ parameter real t_on    = 0.01 from (0:inf);   // s, pulse high-time used by eta(
 // ---- gate threshold / leak (same semantics as v1/v2) ---------------------
 parameter real I_drift_th       = 1p  from [0:inf);
 parameter real leak_drift_scale = 0.0 from [0:1];
+
+// ---- rail taper (simulator regularisation only; no twin counterpart) -----
+// Width of the band next to x = 0 / x = 1 over which the outward write is
+// tapered to zero (see rail_taper below).  G error vs the twin's hard clamp
+// <= ~0.3*x_soft of the window; 1e-5 -> 3e-6 of the window.
+parameter real x_soft = 1e-5 from (0:0.1];
 
 real Gmin, Gmax, span, sa, sb, sden, eta, x_init;
 real tau1, tau2, tau3v, csum, cn1, cn2, cn3;
@@ -258,9 +265,25 @@ analog begin
         else
             sgn = polarity;
         u_x = sgn * abs(Ieff) / Q_full * eta;
-        // hard-stop x at the rails (no write past [0,1])
-        if ((xc >= 1.0 && u_x > 0.0) || (xc <= 0.0 && u_x < 0.0))
-            u_x = 0.0;
+        // stop x at the rails (no write past [0,1]) with a CONTINUOUS taper of
+        // the OUTWARD drive over the last x_soft of the window:
+        //   u_x *= w(z),  z = clip(dist_to_rail/x_soft, 0, 1),  w = z*(2-z)
+        // (w = 1 with w' = 0 at the band entry, so C1 there; w ~ 2z at the rail).
+        // A hard on/off switch here made dx/dt jump across x = 1 while
+        // retention pulls x back, and Spectre chattered on the rail with its
+        // step collapsed to ~1e-10 s.  With the taper the rail is a smooth
+        // stable fixed point ~1e-5*x_soft inside the window.  The twin's hard
+        // clamp is the x_soft -> 0 limit; off the band (and for all inward
+        // drive) the equations are unchanged.  Uses the raw node voltage.
+        begin : rail_taper
+            real xr, z;
+            xr = V(n_x,ignd);
+            if (u_x > 0.0) z = (1.0 - xr) / x_soft;
+            else           z = xr / x_soft;
+            if (z < 0.0) z = 0.0;
+            if (z > 1.0) z = 1.0;
+            u_x = u_x * z * (2.0 - z);
+        end
         dGnv_dt = dSdx * span * u_x;
         if (dGnv_dt >= 0.0)
             u_edl = edl_factor * dGnv_dt;
