@@ -147,8 +147,18 @@ out-of-pulse max 4.89 %, final G 3.93 %).
 | final G error | - | <= 0.0017 | |
 | twin replay (fine grid), full G | 0.0023 - 0.0066 | 0.0076 - 0.026 | 16/16 PASS |
 
-A closed-loop check (new schedule, new Spectre run) is in
-`validation/enginefix/` (tier-1 long run).
+**Closed-loop long run** (`validation/enginefix/tier1_long.py`, results in
+`validation/data/c5_long/`): the fixed engine trained on the C6 ablation's
+450 ms gap configuration (k = 10), 16 afferents, seed 1, 60 s of stream
+(54308 pulses, 6866 output spikes); its own schedule was then run in
+Spectre (28.3 s transient, 509854 steps, 0.029 s per synapse-second, gate
+charge to 1.4e-11). Every synapse was driven into the x = 1 rail (110496
+reads at the rail in total), so the `.va` taper is exercised. Engine read vs
+Spectre, full G, all reads: NRMSE 0.0001 - 0.00015 %, max 0.0009 - 0.0013 %
+of range (inside pulses max 0.0013 %, outside 0.0007 %), **16/16 PASS**;
+G_nv max 0.0003 %; final G 1e-5 %. With 16 afferents and this threshold
+the neuron fires at ~114 Hz and every weight saturates: a device-model
+check, not a learning result.
 
 ## Spectre cost
 

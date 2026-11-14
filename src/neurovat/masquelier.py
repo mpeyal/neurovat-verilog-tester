@@ -512,14 +512,15 @@ class Synapses:
 
     def finish(self, t_ms):
         """End of a run: write what is pending; a time-dynamic device is
-        advanced to the end of the run, or of its last write pulse if that
-        is later (every pulse completed; its clock carries to the next)."""
+        read at the end of the run, then advanced to the end of its last
+        write pulse (every pulse completed; its clock carries to the next)."""
         if self.device is None:
             return
         self.flush(t_ms)
         if self.dynamic:
-            self.device.advance(max(self.dev_time(t_ms), self.device.clock))
+            self.device.advance(self.dev_time(t_ms))
             self._read(t_ms)
+            self.device.advance(self.device.clock)
 
 
 def _section_rasters(S, a, b, off_in, n_bins, bin_ms, posts, n_out):

@@ -63,7 +63,7 @@ def main(argv):
         cc.scrub(argv[1], argv[2] if len(argv) > 2 else None)
         return 0
     import replay_c5 as rc
-    rows, summ = rc.score(out=WORK, figures=True)
+    rows, summ = rc.score(out=WORK, figures=False)
     summ["rails"] = rail_report(WORK)
     KEEP.mkdir(parents=True, exist_ok=True)
     for f in ("acceptance.json", "summary.csv", "engine.json", "spectre.json",
