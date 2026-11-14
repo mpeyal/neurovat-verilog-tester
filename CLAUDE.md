@@ -137,6 +137,11 @@ Virtuoso** on a shared university host.
   v3 regression can't mask v2.
 - Keep each `.va` and its Python twin in sync — a change to one should be
   mirrored into the other (the models are meant to be equivalent).
+  One deliberate exception: `verilog/ecfet_v3.va` tapers the outward write
+  within `x_soft = 1e-5` of each rail (smooth stable fixed point; without it
+  Spectre's step collapsed at x = 1, see `validation/bound/`). The twin keeps
+  the hard clamp (the x_soft -> 0 limit; G differs by <= ~3e-6 of the
+  window); `check_va` lists `x_soft` as ".va only".
 - The models are used across runs via `simulate()`, which calls `model.reset()`
   at entry. Preserve that; don't introduce cross-run state leaks.
 
