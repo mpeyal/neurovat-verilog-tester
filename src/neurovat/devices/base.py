@@ -56,13 +56,17 @@ class DeviceArray:
     # ---- optional: physical time ----------------------------------------
     #
     # A *time-dynamic* array (``time_dynamic = True``) keeps a clock per
-    # device and evolves between writes: ``advance(t)`` steps every device
-    # with zero drive (idle) up to time ``t`` (s), ``read_at(t, cols)`` is the
-    # read conductance of columns ``cols`` at ``t`` (devices advanced first),
-    # and ``program`` starts each pulse at ``max(t, that device's clock)``,
-    # all pulses of one call in parallel. ``retained()`` is the stored
-    # (non-volatile) part only, used to size write pulses. The defaults below
-    # are those of a device with no dynamics between writes.
+    # device and evolves between writes: ``advance(t)`` integrates every
+    # device up to time ``t`` (s) (idle, or driven by a scheduled pulse),
+    # ``read_at(t, cols)`` is the read conductance of columns ``cols`` at
+    # ``t`` (devices advanced first), and ``program`` SCHEDULES each pulse at
+    # ``max(t, the end of that device's last pulse)``, all pulses of one call
+    # in parallel; a pulse acts as the device is advanced through it, so a
+    # read during a pulse is the state at the read time. ``conductance()`` /
+    # ``retained()`` are the state at the time the device was advanced to;
+    # ``advance(clock)`` completes every scheduled pulse. ``retained()`` is
+    # the stored (non-volatile) part only, used to size write pulses. The
+    # defaults below are those of a device with no dynamics between writes.
 
     time_dynamic = False
 
@@ -108,6 +112,7 @@ class DeviceArray:
         probe = self.nominal()
         g0 = float(probe.retained()[0, 0])
         probe.program(np.array([0]), np.array([0]), np.array([abs(amp)]), width)
+        probe.advance(probe.clock)        # complete a scheduled (physical) pulse
         return 1.0 if float(probe.retained()[0, 0]) - g0 >= 0.0 else -1.0
 
 

@@ -60,7 +60,9 @@ e.g. ``vector_twin_factory(...)`` or ``ScalarTwinArray(timing="physical")``)
 runs on a device clock that continues across runs: stream time ``t_ms`` of a
 run maps to device time ``t0 + t_ms / 1000`` s, ``t0`` = the device clock when
 the run starts. Writes are programmed at that time (all cells of one flush in
-parallel), the devices relax between writes (volatile pools, retention), and
+parallel; a pulse acts as device time runs through it, so a read during a
+pulse is the state at the read time), the devices relax between writes
+(volatile pools, retention), and
 the efficacy the neuron integrates is re-read from the device every
 ``read_ms`` (default 1 ms) with ``device.peek`` - with ``read="full"`` that is
 the full conductance, non-volatile plus volatile. Conductance -> weight
@@ -510,13 +512,15 @@ class Synapses:
 
     def finish(self, t_ms):
         """End of a run: write what is pending; a time-dynamic device is
-        advanced to the end of the run (its clock carries to the next)."""
+        read at the end of the run, then advanced to the end of its last
+        write pulse (every pulse completed; its clock carries to the next)."""
         if self.device is None:
             return
         self.flush(t_ms)
         if self.dynamic:
             self.device.advance(self.dev_time(t_ms))
             self._read(t_ms)
+            self.device.advance(self.device.clock)
 
 
 def _section_rasters(S, a, b, off_in, n_bins, bin_ms, posts, n_out):
@@ -723,6 +727,7 @@ def pulse_step(device, amp, width, w):
     probe.set_conductance(np.full((1, 1), lo + w * (hi - lo)))
     g0 = float(probe.retained()[0, 0])
     probe.program(np.array([0]), np.array([0]), np.array([float(amp)]), width)
+    probe.advance(probe.clock)        # complete a scheduled (physical) pulse
     return (float(probe.retained()[0, 0]) - g0) / (hi - lo)
 
 

@@ -70,7 +70,8 @@ def instrument(dev):
     def program_logged(rows, cols, amps, width, t=0.0):
         idx = dev._flat(rows, cols)
         dev._idle(idx, float(t))                  # what program() does first
-        start = dev.t_dev[idx].copy()             # = max(t, busy until)
+        # the start program() schedules: max(t, busy until, device time)
+        start = np.maximum(np.maximum(float(t), dev.busy[idx]), dev.t_dev[idx])
         for c, s, a in zip(np.asarray(cols).ravel(), start,
                            np.asarray(amps, float).ravel()):
             log["pulses"].append((int(c), float(s), float(width), float(a)))

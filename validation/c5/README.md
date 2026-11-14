@@ -15,7 +15,7 @@ python validation/c5/make_deck.py                                        # -> sp
 #   spectre +escchars -format psfascii -raw train.raw +log train.log train.scs
 python validation/c5/compare_c5.py scrub <train.raw/tran.tran.tran> <train.log>
 python validation/c5/compare_c5.py score       # summary.csv, cost.json, figure
-python validation/c5/diagnose_engine.py        # why the engine's full read differs (no Spectre needed)
+python validation/c5/diagnose_engine.py        # (historical, run on ac92294) why the pre-fix engine read differed
 ```
 
 ## Setup (`data/c5/engine.json`)
@@ -119,10 +119,46 @@ same time. Against the twin at that pulse's end they are off by at most 5.2 %,
 which is the splitting error at its worst point. So the in-pulse gap is the
 `peek` look-ahead, and the rest is splitting.
 
-This is reported, not fixed. Changing `EcfetV3Array` / `model_v3.step`
-(sub-stepping a pulse, or a causal in-pulse read) would move the Gate B and
-C6 numbers and needs its own decision. Gate A did not catch it, because
-`simulate()` steps the twin on a fine grid inside each pulse.
+This was reported here and is now fixed (next section). Gate A did not
+catch it, because `simulate()` steps the twin on a fine grid inside each
+pulse.
+
+## After the engine fix (`validation/enginefix/`)
+
+Both causes are fixed: the v3 driven step integrates the pools exactly
+(exponential integrator per x sub-step, so the EDL decays within the pulse),
+and in physical time `program` schedules a pulse that `advance` / `peek`
+integrate up to the read time (a read inside a pulse is the state at that
+time). A closed-loop re-run changes the reads, hence the spikes and the
+schedule, so the committed Spectre run is compared with an OPEN-LOOP replay
+of this schedule through the fixed engine's device code (`program` at each
+write time, `peek` every 1 ms): `python validation/enginefix/replay_c5.py`
+writes `validation/data/c5_fixed/` (`acceptance.json`, `summary.csv`). The
+same replay run on the master code reproduces the table above
+(`validation/enginefix/c5_replay_master.json`: in-pulse max 51.6 %,
+out-of-pulse max 4.89 %, final G 3.93 %).
+
+| engine read vs Spectre, full G (% of range) | NRMSE | max | verdict |
+|---|---|---|---|
+| all reads | 0.0004 - 0.0010 | 0.0010 - 0.0029 | **16/16 PASS** |
+| inside pulses | 0.0004 - 0.0013 | 0.0010 - 0.0029 | |
+| outside pulses | 0.0001 - 0.0003 | 0.0007 - 0.0019 | |
+| G_nv, all reads | 0.0001 - 0.0003 | 0.0003 - 0.0007 | PASS |
+| final G error | - | <= 0.0017 | |
+| twin replay (fine grid), full G | 0.0023 - 0.0066 | 0.0076 - 0.026 | 16/16 PASS |
+
+**Closed-loop long run** (`validation/enginefix/tier1_long.py`, results in
+`validation/data/c5_long/`): the fixed engine trained on the C6 ablation's
+450 ms gap configuration (k = 10), 16 afferents, seed 1, 60 s of stream
+(54308 pulses, 6866 output spikes); its own schedule was then run in
+Spectre (28.3 s transient, 509854 steps, 0.029 s per synapse-second, gate
+charge to 1.4e-11). Every synapse was driven into the x = 1 rail (110496
+reads at the rail in total), so the `.va` taper is exercised. Engine read vs
+Spectre, full G, all reads: NRMSE 0.0001 - 0.00015 %, max 0.0009 - 0.0013 %
+of range (inside pulses max 0.0013 %, outside 0.0007 %), **16/16 PASS**;
+G_nv max 0.0003 %; final G 1e-5 %. With 16 afferents and this threshold
+the neuron fires at ~114 Hz and every weight saturates: a device-model
+check, not a learning result.
 
 ## Spectre cost
 

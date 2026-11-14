@@ -91,6 +91,7 @@ def _pool_read_array(pools_read, n_post, n_pre):
     class PoolRead(EcfetV3Array):
         def peek(self, t):
             p = self.p
+            self._pulses_to(float(t))      # in-flight pulses up to t (causal)
             dt = np.maximum(float(t) - self.t_dev, 0.0)
             x = p.x_eq + (self.x - p.x_eq) * np.exp(-dt / p.tau_ret)
             tot = self._G_of_x(x) + self.lock

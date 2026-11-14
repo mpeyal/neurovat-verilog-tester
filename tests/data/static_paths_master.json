@@ -1,0 +1,69 @@
+{
+ "ideal/1/2": {
+  "weights": "2a344a0613bc63a8a9a989ef43b3eb75ca59314f69d2ad3b7a9e5e628065017a",
+  "post_t": "01a948ff039d9ab946a4ad129b59bdd33279d8095b214fbc7eb13b7c1d952b87",
+  "post_spikes": 71,
+  "writes": 17815
+ },
+ "ideal/2/10": {
+  "weights": "23d3840882d7d4f9e001a1610e681ad0d13947875029558d30d8c5161ee77bcf",
+  "post_t": "3ed1ff17e3a2ccede5187059d5d80e8187a8628797ae85905cbb7bc37df49a68",
+  "post_spikes": 363,
+  "writes": 92692
+ },
+ "neurosim/1/2": {
+  "weights": "029bb572bed20ce8f40ad444b1a9949a318f76fd82fdecb1ac4300ca68620a73",
+  "post_t": "2d2eaf084954199ca4981054f8aa43a650966864f050030b8982fc55ffb90bd0",
+  "post_spikes": 71,
+  "writes": 13644,
+  "retained": "029bb572bed20ce8f40ad444b1a9949a318f76fd82fdecb1ac4300ca68620a73",
+  "cal": [
+   "0x1.55278d06259afp-24",
+   "0x1.5b8fd936d120fp-24"
+  ]
+ },
+ "neurosim/2/10": {
+  "weights": "f6b7884ac5c2d3822845ba6f20df8ffe40c4dda69b68e7e3d0bc6dc930e9ab50",
+  "post_t": "519f998a413ef78c50d5cbb0e91100bf14bed742c1d4f7aae8032c7fb8c79f11",
+  "post_spikes": 341,
+  "writes": 69364,
+  "retained": "f6b7884ac5c2d3822845ba6f20df8ffe40c4dda69b68e7e3d0bc6dc930e9ab50",
+  "cal": [
+   "0x1.55278d06259afp-24",
+   "0x1.5b8fd936d120fp-24"
+  ]
+ },
+ "v3_static/1/2": {
+  "weights": "6a2e38f961ced56d4656cc1b24456208ca785e0eda8a2c14ca6c4fdb4b22907b",
+  "post_t": "c20c7bdeebef165a97d21714502cbec3701d5adc7f247727b4e69720bf2015fb",
+  "post_spikes": 71,
+  "writes": 13747,
+  "retained": "6a2e38f961ced56d4656cc1b24456208ca785e0eda8a2c14ca6c4fdb4b22907b",
+  "cal": [
+   "0x1.9c511dc3a41e0p-25",
+   "0x1.a40f9170a4165p-25"
+  ]
+ },
+ "v3_static/2/10": {
+  "weights": "1ec3ce6ff601a9a9d4818878f71816a2e30c778cea39d62307bfd19e78f2de7f",
+  "post_t": "2ac3d648d8b75c03816aa74e3b664ad4472ee5fa59a543fbdaee41dcb8d83921",
+  "post_spikes": 350,
+  "writes": 69575,
+  "retained": "1ec3ce6ff601a9a9d4818878f71816a2e30c778cea39d62307bfd19e78f2de7f",
+  "cal": [
+   "0x1.9c511dc3a41e0p-25",
+   "0x1.a40f9170a4165p-25"
+  ]
+ },
+ "v3_static_scalar/3/2": {
+  "weights": "a98c5583890eca2d39a7a2ee1b04609ecc9ea10a137c3c564db89b28bf410e94",
+  "post_t": "0656bf5abab8c2b82659620b1e7bda5951518e4da1af6d7c3c2e69221311b7ae",
+  "post_spikes": 71,
+  "writes": 2766,
+  "retained": "a98c5583890eca2d39a7a2ee1b04609ecc9ea10a137c3c564db89b28bf410e94",
+  "cal": [
+   "0x1.9c511dc3a41e0p-25",
+   "0x1.a40f9170a4165p-25"
+  ]
+ }
+}

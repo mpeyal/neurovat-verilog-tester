@@ -16,6 +16,12 @@ Two effects:
    pulse's end time.
 
 Writes validation/data/c5/diagnose.json.
+
+HISTORICAL: this diagnoses the engine of master ac92294, before the
+physical-time engine fix (validation/enginefix/). Both effects are fixed
+since, and the array semantics it relies on (a pulse applied at once by
+``program``) no longer hold, so re-running it on later code does not
+reproduce ``diagnose.json``; run it from a checkout of ac92294.
 """
 import json
 import sys
