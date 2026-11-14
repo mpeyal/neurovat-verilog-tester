@@ -11,6 +11,14 @@ from neurovat import masquelier as M
 from validation.engine import common as C
 
 
+def _need(name):
+    """Skip unless the optional package imports (works on pytest >= 7)."""
+    try:
+        __import__(name)
+    except ImportError as e:
+        pytest.skip(f"{name} not available: {e}")
+
+
 # ---- helpers (no optional dependency) -------------------------------------
 def test_on_grid_times_bin_back_to_their_step():
     k = np.arange(0, 200000, 7)
@@ -47,7 +55,7 @@ def _small(seconds=1.0, seed=3):
 
 @pytest.mark.parametrize("learn", [False, True])
 def test_brian2_reproduces_the_stream_engine_on_grid_input(learn):
-    pytest.importorskip("brian2", exc_type=ImportError)
+    _need("brian2")
     from validation.engine import brian2_model as B
     P, S = _small()
     w0 = None if learn else np.random.default_rng(5).uniform(0, 1, P.n_afferents)
@@ -65,7 +73,7 @@ def test_brian2_reproduces_the_stream_engine_on_grid_input(learn):
 
 
 def test_brian2_pair_window_matches_neurovat_and_the_analytic_rule():
-    pytest.importorskip("brian2", exc_type=ImportError)
+    _need("brian2")
     from validation.engine import brian2_compare as BC
     summ, rows = BC.test_b()
     assert summ["post_match"] == 1.0
@@ -76,7 +84,7 @@ def test_brian2_pair_window_matches_neurovat_and_the_analytic_rule():
 
 
 def test_brian2_v3_port_tracks_the_twin_on_a_single_pulse():
-    pytest.importorskip("brian2", exc_type=ImportError)
+    _need("brian2")
     from validation import common, stimuli
     from validation.compare import metrics
     from validation.engine import brian2_v3 as V
@@ -89,7 +97,7 @@ def test_brian2_v3_port_tracks_the_twin_on_a_single_pulse():
 
 # ---- snnTorch ----------------------------------------------------------------
 def test_snntorch_euler_map_is_the_neurovat_lif_and_exact_map_differs_by_euler_error():
-    pytest.importorskip("snntorch", exc_type=ImportError)
+    _need("snntorch")
     from dataclasses import replace
     from neurovat.config import NeuronParams
     from neurovat.lif import probe_lif_wave
