@@ -305,10 +305,14 @@ def render(key, cols, info):
 
 
 def wall_from_log(text):
-    pats = [r"tran\S*\s+analysis.*?elapsed\s*=\s*([\d.]+)\s*(ms|us|s)\b",
-            r"Time used:.*?elapsed\s*=\s*([\d.]+)\s*(ms|us|s)\b"]
+    # Spectre 24.1: "Total time required for tran analysis `tran': CPU = ..., elapsed = 3.53 s"
+    # (transient only, excludes AHDL compilation); single-line matches only, so a
+    # pattern can never run on into an unrelated "elapsed" further down the log.
+    pats = [r"Total time required for tran analysis[^\n]*?elapsed\s*=\s*([\d.]+)\s*(ms|us|s)\b",
+            r"Intrinsic tran analysis time:[^\n]*?elapsed\s*=\s*([\d.]+)\s*(ms|us|s)\b",
+            r"Time used:[^\n]*?elapsed\s*=\s*([\d.]+)\s*(ms|us|s)\b"]
     for p in pats:
-        m = re.search(p, text, re.I | re.S)
+        m = re.search(p, text, re.I)
         if m:
             return float(m.group(1)) * {"s": 1.0, "ms": 1e-3, "us": 1e-6}[m.group(2).lower()]
     return None

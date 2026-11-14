@@ -5,5 +5,5 @@
   "source": "Spectre 24.1",
   "stimulus": "amplitude_sweep",
   "stimulus_set": "gateA-1",
-  "wall_s": 0.0002
+  "wall_s": 0.0609
 }
