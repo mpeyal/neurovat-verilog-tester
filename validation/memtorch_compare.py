@@ -28,6 +28,16 @@ normalised by the reference current range), and wall time.
 
 Writes validation/data/stanford/memtorch/{param_map.csv, memtorch_compare.csv}
 and validation/figures/stanford/memtorch_<stim>.png.
+
+Optional Spectre reference (--spectre-ref-dir DIR): DIR/<stim>.csv are
+imported fine-step Spectre runs of the .va (stanford/scrub.py output, e.g. a
+1 ps set; the files are large and not part of the repo, so the directory is
+given on the command line).  MemTorch, both matched twins and the .va-semantics
+twin (exact PWL) are then ALSO scored against Spectre's gap(t) with the same
+metrics -> memtorch_vs_spectre.csv.  Spectre ran the real .va (idt wind-up,
+q = `P_Q, gamma_ini = 16 for V < 0), so MemTorch and the matched twins carry
+the .va-vs-MemTorch model difference (the "semantic gap", ~1 %) on top of
+their numerical error; the .va-semantics twin row is the like-for-like one.
 """
 
 import argparse
@@ -161,6 +171,17 @@ def metrics(stim, dt, I, V, ts_ref, gap_ref, P):
             "g_last_pct": 100 * float(rel[-1]), "i_nrmse_pct": 100 * nrmse}, g_tool, g_ref
 
 
+def spectre_gap(path):
+    """(t, gap) from an imported Spectre CSV.  The gap is inverted from I and V
+    only where |V| >= 50 mV; it cannot move below that voltage (the field is
+    under threshold), so the NaN stretches are filled by interpolation."""
+    from validation import common
+    cols, _ = common.read_csv(path)
+    t, g = np.asarray(cols["t_s"], float), np.asarray(cols["gap_m"], float)
+    ok = np.isfinite(g)
+    return t, np.interp(t, t[ok], g[ok])
+
+
 def figure(path, stim, curves):
     import matplotlib
     matplotlib.use("Agg")
@@ -187,6 +208,37 @@ def write(path, rows):
             w.writerow({k: (f"{v:.6g}" if isinstance(v, float) else v) for k, v in r.items()})
 
 
+def spectre_rows(stim, ref_dir, kept, Pm, matched_ref, va_ref):
+    """Score the kept tool runs and both twin references against Spectre."""
+    path = ref_dir / f"{stim.name}.csv"
+    if not path.is_file():
+        print(f"  no Spectre reference {path.name} in --spectre-ref-dir; skipped")
+        return []
+    ts_sp, gap_sp = spectre_gap(path)
+    label = f"Spectre {ref_dir.parent.name if ref_dir.name == 'spectre' else ref_dir.name}"
+    out = []
+    for dt, V, tool, I, wall in kept:
+        m, _, _ = metrics(stim, dt, I, V, ts_sp, gap_sp, Pm)
+        out.append({"stimulus": stim.name, "reference": label, "tool": tool, "dt_s": dt,
+                    "n_steps": len(V), **m, "wall_s": wall, "us_per_step": 1e6 * wall / len(V)})
+    for tool, (ts, gap) in (("twin matched (clamp, q=1.6e-19), exact PWL", matched_ref[:2]),
+                            ("twin .va semantics, exact PWL", va_ref)):
+        kr = stim.read_times
+        g_t = Pm.I0 * np.exp(-np.interp(kr, ts, gap) / Pm.g0) * math.sinh(0.1 / Pm.V0) / 0.1
+        g_s = Pm.I0 * np.exp(-np.interp(kr, ts_sp, gap_sp) / Pm.g0) * math.sinh(0.1 / Pm.V0) / 0.1
+        rel = np.abs(g_t - g_s) / g_s
+        v = stim.v(ts)
+        i_t = Pm.I0 * np.exp(-gap / Pm.g0) * np.sinh(v / Pm.V0)
+        i_s = Pm.I0 * np.exp(-np.interp(ts, ts_sp, gap_sp) / Pm.g0) * np.sinh(v / Pm.V0)
+        out.append({"stimulus": stim.name, "reference": label, "tool": tool, "dt_s": 0.0,
+                    "n_steps": len(ts) - 1, "g_max_pct": 100 * float(rel.max()),
+                    "g_mean_pct": 100 * float(rel.mean()), "g_last_pct": 100 * float(rel[-1]),
+                    "i_nrmse_pct": 100 * float(np.sqrt(np.mean((i_t - i_s) ** 2)) /
+                                               (np.max(i_s) - np.min(i_s))),
+                    "wall_s": math.nan, "us_per_step": math.nan})
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -194,6 +246,9 @@ def main(argv=None):
     ap.add_argument("--dts", nargs="*", type=float, default=[1e-9, 1e-10, 1e-11])
     ap.add_argument("--memtorch-ref-dt", type=float, default=1e-12,
                     help="extra MemTorch run checking its own convergence (0 = skip)")
+    ap.add_argument("--spectre-ref-dir", default=None,
+                    help="directory with imported fine-step Spectre CSVs <stim>.csv "
+                         "(e.g. a 1 ps set); also score everything against them")
     args = ap.parse_args(argv)
     try:
         import memtorch  # noqa: F401  (lazy: GPL-3, optional)
@@ -221,13 +276,14 @@ def main(argv=None):
               F_min=P.F_min, vel_0=P.Vel0, E_a=P.Ea, a_0=P.a0, delta_g_init=P.deltaGap0,
               model_switch=0, T_crit=P.T_crit, T_smth=P.T_smth)
     matched = dict(clamp_state=1, q=Q_MEMTORCH)
-    rows = []
+    rows, sp_rows = [], []
     for name in args.stimulus:
         stim = S.BY_NAME[name]
         ts_ref, gap_ref, wall_ref = reference(stim, **matched)
         Pm = core.twin_module().StanfordPKUParams(**matched)
         curves = []
         k_ref = None
+        kept = []                                # (dt, V, tool, I, wall) for --spectre-ref-dir
         for dt in args.dts:
             t_mid, V = sample(stim, dt)
             runs = [("MemTorch", *run_memtorch(memtorch, kw, P.gap_min, P.gap_max, V, dt)),
@@ -239,6 +295,7 @@ def main(argv=None):
             k_rd = read_index(stim, dt, len(V))
             g_same = i_same[k_rd] / V[k_rd]
             rng_same = float(np.max(i_same) - np.min(i_same))
+            kept += [(dt, V, tool, I, wall) for tool, I, wall in runs]
             for tool, I, wall in runs:
                 m, g_tool, g_ref = metrics(stim, dt, I, V, ts_ref, gap_ref, Pm)
                 rel_s = np.abs(I[k_rd] / V[k_rd] - g_same) / g_same
@@ -255,6 +312,7 @@ def main(argv=None):
             dt = args.memtorch_ref_dt
             t_mid, V = sample(stim, dt)
             I, wall = run_memtorch(memtorch, kw, P.gap_min, P.gap_max, V, dt)
+            kept.append((dt, V, "MemTorch (convergence check)", I, wall))
             m, g_tool, _ = metrics(stim, dt, I, V, ts_ref, gap_ref, Pm)
             rows.append({"stimulus": name, "tool": "MemTorch (convergence check)", "dt_s": dt,
                          "n_steps": len(V), **m, "g_max_pct_same_samples": math.nan,
@@ -272,9 +330,20 @@ def main(argv=None):
                      "i_nrmse_pct": math.nan, "g_max_pct_same_samples": math.nan,
                      "i_nrmse_pct_same_samples": math.nan, "wall_s": wall_ref,
                      "us_per_step": math.nan})
+        if args.spectre_ref_dir:
+            sp_rows += spectre_rows(stim, Path(args.spectre_ref_dir), kept, Pm,
+                                    (ts_ref, gap_ref, wall_ref), (ts_va, gap_va))
         curves.append(("reference (twin adaptive, exact PWL)", k_ref, "k-"))
         figure(core.FIGURES / f"memtorch_{name}.png", stim, curves)
     write(OUT / "memtorch_compare.csv", rows)
+    if sp_rows:
+        write(OUT / "memtorch_vs_spectre.csv", sp_rows)
+        print(f"== vs Spectre ({len(sp_rows)} rows -> memtorch_vs_spectre.csv) ==")
+        print(f"{'stimulus':9s} {'tool':44s} {'dt':>7s} {'Gmax%':>8s} {'Gmean%':>8s} "
+              f"{'Glast%':>8s} {'I NRMSE%':>9s}")
+        for r in sp_rows:
+            print(f"{r['stimulus']:9s} {r['tool']:44s} {r['dt_s']:7.0e} {r['g_max_pct']:8.3f} "
+                  f"{r['g_mean_pct']:8.3f} {r['g_last_pct']:8.3f} {r['i_nrmse_pct']:9.4f}")
     print(f"{'stimulus':9s} {'tool':48s} {'dt':>7s} {'Gmax%':>8s} {'Gmean%':>8s} {'Glast%':>8s} "
           f"{'I NRMSE%':>9s} {'Gmax%ss':>8s} {'wall s':>8s}")
     for r in rows:
