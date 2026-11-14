@@ -64,8 +64,8 @@ Ranges over the 16 synapses, in % of each synapse's Spectre G range
 | comparison | NRMSE % | max % | final G error % | verdict |
 |---|---|---|---|---|
 | twin replay, full G | 0.021 - 0.063 | 0.065 - 0.178 | <= 0.13 | **16/16 PASS** |
-| engine read, full G, all reads | 5.1 - 14.5 | 18 - 52 | <= 3.9 | **16/16 FAIL** |
-| engine read, full G, outside pulses | (<= 1.45) | 1.96 - 4.89 | - | max fails on 12/16 |
+| engine read, full G, all reads | 5.1 - 14.5 | 18 - 52 | <= 3.93 | **16/16 FAIL** |
+| engine read, full G, outside pulses | 0.64 - 1.50 | 1.96 - 4.89 | - | NRMSE > 1 % on 8/16, max > 3 % on 10/16 |
 | engine read, G_nv, outside pulses | - | <= 7.3e-4 | <= 6.6e-4 | exact |
 | engine read, G_nv, all reads | 1.4 - 4.1 | 5.3 - 14.6 | - | FAIL (read timing) |
 
@@ -81,8 +81,11 @@ Reading the table:
 - **The full read does not match.** What the network *reads* during training,
   the full G, does not meet the Gate A rule. The cause is the engine, not the
   model; see below. A claim of the form "training with a device synapse in
-  NeuroVAT matches Spectre" holds for the stored state (G_nv), but not yet
-  for the full read the neuron uses.
+  NeuroVAT matches Spectre" holds for the stored state (G_nv) outside write
+  pulses and at the end of the run. It does not hold inside pulses: the engine
+  applies each stored step at the pulse start, up to 10 ms early, and the
+  devices are in a pulse about 56 % of the time. It does not yet hold for the
+  full read the neuron uses.
 
 ## Why the engine's full read is off (`diagnose_engine.py`, `data/c5/diagnose.json`)
 

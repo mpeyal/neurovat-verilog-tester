@@ -62,6 +62,11 @@ its own Rinit.
 | lo_50pA | Rinit 8000, 120 x -50 pA into the lower rail, then 40 x +50 pA | 0.007 | 0.077 | 13.85 | 0.211 |
 | lo_500pA | Rinit 8000, 30 x -500 pA, then 20 x +500 pA | 0.016 | 0.061 | 83.56 | 0.089 |
 
+Two more decks were run once, outside the committed set, at the C5 training's
+write amplitude: 2 nA, 20 pulses into each rail, then 15 off it. Both pass:
+the upper rail scores NRMSE 0.023 % and max 0.10 % (0.08 s), and the lower
+rail 0.022 % and 0.10 % (0.07 s).
+
 The Sharbati `ltp_ltd` deck, unchanged, now finishes. Its transient takes
 5.96 s (8.6 s including the AHDL compile), with 430016 accepted steps. Against
 the twin it scores NRMSE 0.19 % and max 0.35 % over the whole 1029 uS window

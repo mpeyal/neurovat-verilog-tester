@@ -10,9 +10,10 @@ fixes the design. Nothing here has been built yet.
 
 These results determine choices (c) and (d) below.
 
-**Stored state matches exactly.** For the same pulse schedule, the stored
-state G_nv (from x) matches between the engine's device, the fine-grid twin
-and Spectre. The engine and the twin agree to about 3e-9 of each synapse's G
+**Stored state matches exactly outside write pulses and at the end.** For
+the same pulse schedule, the stored state G_nv (from x) matches between the
+engine's device, the fine-grid twin and Spectre at those times. Inside a
+pulse the engine already holds the post-pulse value (see 2 below). The engine and the twin agree to about 3e-9 of each synapse's G
 range. The `README.md` table has the Spectre numbers.
 
 **The full read (G_nv + volatile pools) does not match.** The engine reads
@@ -98,8 +99,14 @@ vectorised module). It reproduces `masquelier.run` exactly:
 
 - **Primary: read G_nv (`read="nv"`, and `X.n_x` mapped through S(x) in
   Spectre).** Tier 1 shows that the stored state is identical across the
-  engine, the twin and Spectre. With this read, any closed-loop difference is
-  spike-timing chaos plus the SRM port, and nothing else.
+  engine, the twin and Spectre outside write pulses and at the end. This read
+  removes the splitting error. It does NOT remove the read-timing error: the
+  engine still applies each stored step at the pulse start, up to 10 ms early.
+  In tier 1 the engine's G_nv over all reads was 1.4-4.1 % NRMSE and
+  5.3-14.6 % max against Spectre, at about 56 % pulse duty. So even with this
+  read, a closed-loop difference = spike chaos + the SRM port + that 10 ms
+  look-ahead. That holds until the engine reads causally during a pulse, or
+  until the `.va` side copies the look-ahead, which it should not.
 - **Secondary: the full read, `1/V(Rmem)` in Spectre against
   `read="full"`.** Report it separately, and expect it to be biased until the
   engine's pulse sub-stepping and causal in-pulse read are fixed. Run it once
