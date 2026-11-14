@@ -1,0 +1,6 @@
+stimulus,Rinit_ohm,n_pulses,nrmse_pct,maxerr_pct,g_range_uS,x_ref_min,x_ref_max,spectre_points,spectre_wall_s,drive_check,verdict
+hi_short,872,30,0.0317997,0.387523,2.63633,0.99164,1,3343,0.0474,ok,PASS
+hi_50pA,880,160,0.00934332,0.0521279,13.0617,0.961836,1,17467,0.2382,ok,PASS
+hi_500pA,900,50,0.02152,0.0695427,72.9005,0.875528,1,7848,0.106,ok,PASS
+lo_50pA,8000,160,0.00701266,0.0770472,13.8508,0,0.0248942,15660,0.2107,ok,PASS
+lo_500pA,8000,50,0.0160946,0.0607842,83.5583,0,0.124471,6498,0.089,ok,PASS
