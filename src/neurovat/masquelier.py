@@ -558,6 +558,13 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
                 tj = S.t[a:b] + off
                 if learn:
                     lt = ltd_open[:, idx]
+                    if lt.any() and idx.size > 1:
+                        # an afferent twice in one step: only its FIRST
+                        # spike since the post is depressed (spikes are
+                        # time-sorted, np.unique returns first indices)
+                        first = np.zeros(idx.size, bool)
+                        first[np.unique(idx, return_index=True)[1]] = True
+                        lt = lt & first
                     if lt.any():
                         jj, ii = np.nonzero(lt)
                         d = tj[ii] - t_post[jj]
