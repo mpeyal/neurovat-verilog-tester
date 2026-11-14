@@ -117,7 +117,16 @@ def one_job(job):
                 "mean_pat": float(x[:npat].mean()),
                 "mean_bg": float(x[npat:].mean()),
                 "hist": np.histogram(x, bins=10, range=(0, 1))[0].tolist()}
-    return {"arm": arm, "seed": int(seed), "k": int(k),
+    pools = None
+    if arm == "v3_time":
+        # the read - stored difference at the end of the run, split by pool
+        # (weight units): which time constant carries it
+        span = dev.g_max - dev.g_min
+        pools = {name: [float(dev.pools[i][:npat].mean() / span),
+                        float(dev.pools[i][npat:].mean() / span)]
+                 for i, name in enumerate(("tau1_22ms", "tau2_312ms",
+                                           "tau3_19s"))}
+    return {"arm": arm, "seed": int(seed), "k": int(k), "pools_end": pools,
             "gap_ms": (k - 1) * P.pattern_ms, "seconds": P.base_s,
             "success": bool(r["success"]), "hit_rate": r["hit_rate_last"],
             "false_alarms": int(r["false_alarms_last"]),
