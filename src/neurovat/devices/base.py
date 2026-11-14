@@ -79,6 +79,12 @@ class DeviceArray:
         G = np.asarray(self.conductance(), float)
         return G if cols is None else G[:, cols]
 
+    def peek(self, t):
+        """Read conductance of every device at ``t``; an array may answer
+        without changing its state (the default advances it: exact for a
+        twin whose idle step composes)."""
+        return self.read_at(t)
+
     def retained(self):
         """Non-volatile (stored) conductance, shape ``self.shape`` (S)."""
         return self.conductance()
