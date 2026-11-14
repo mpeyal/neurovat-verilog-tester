@@ -60,7 +60,9 @@ e.g. ``vector_twin_factory(...)`` or ``ScalarTwinArray(timing="physical")``)
 runs on a device clock that continues across runs: stream time ``t_ms`` of a
 run maps to device time ``t0 + t_ms / 1000`` s, ``t0`` = the device clock when
 the run starts. Writes are programmed at that time (all cells of one flush in
-parallel), the devices relax between writes (volatile pools, retention), and
+parallel; a pulse acts as device time runs through it, so a read during a
+pulse is the state at the read time), the devices relax between writes
+(volatile pools, retention), and
 the efficacy the neuron integrates is re-read from the device every
 ``read_ms`` (default 1 ms) with ``device.peek`` - with ``read="full"`` that is
 the full conductance, non-volatile plus volatile. Conductance -> weight

@@ -119,10 +119,36 @@ same time. Against the twin at that pulse's end they are off by at most 5.2 %,
 which is the splitting error at its worst point. So the in-pulse gap is the
 `peek` look-ahead, and the rest is splitting.
 
-This is reported, not fixed. Changing `EcfetV3Array` / `model_v3.step`
-(sub-stepping a pulse, or a causal in-pulse read) would move the Gate B and
-C6 numbers and needs its own decision. Gate A did not catch it, because
-`simulate()` steps the twin on a fine grid inside each pulse.
+This was reported here and is now fixed (next section). Gate A did not
+catch it, because `simulate()` steps the twin on a fine grid inside each
+pulse.
+
+## After the engine fix (`validation/enginefix/`)
+
+Both causes are fixed: the v3 driven step integrates the pools exactly
+(exponential integrator per x sub-step, so the EDL decays within the pulse),
+and in physical time `program` schedules a pulse that `advance` / `peek`
+integrate up to the read time (a read inside a pulse is the state at that
+time). A closed-loop re-run changes the reads, hence the spikes and the
+schedule, so the committed Spectre run is compared with an OPEN-LOOP replay
+of this schedule through the fixed engine's device code (`program` at each
+write time, `peek` every 1 ms): `python validation/enginefix/replay_c5.py`
+writes `validation/data/c5_fixed/` (`acceptance.json`, `summary.csv`). The
+same replay run on the master code reproduces the table above
+(`validation/enginefix/c5_replay_master.json`: in-pulse max 51.6 %,
+out-of-pulse max 4.89 %, final G 3.93 %).
+
+| engine read vs Spectre, full G (% of range) | NRMSE | max | verdict |
+|---|---|---|---|
+| all reads | 0.0004 - 0.0010 | 0.0010 - 0.0029 | **16/16 PASS** |
+| inside pulses | 0.0004 - 0.0013 | 0.0010 - 0.0029 | |
+| outside pulses | 0.0001 - 0.0003 | 0.0007 - 0.0019 | |
+| G_nv, all reads | 0.0001 - 0.0003 | 0.0003 - 0.0007 | PASS |
+| final G error | - | <= 0.0017 | |
+| twin replay (fine grid), full G | 0.0023 - 0.0066 | 0.0076 - 0.026 | 16/16 PASS |
+
+A closed-loop check (new schedule, new Spectre run) is in
+`validation/enginefix/` (tier-1 long run).
 
 ## Spectre cost
 
