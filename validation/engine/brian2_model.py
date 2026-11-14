@@ -89,8 +89,8 @@ def run(P, S, weights=None, learn=True, dt_ms=None, record_u=False,
     dem/dt = -em / tau_m : 1
     des/dt = -es / tau_s : 1
     tpost : second
-    u = K * (xm - xs) + thr * (K1 * em - K2 * (em - es)) * int((t - tpost) < eta_win) : 1
-    ready = int((t - tpost) > t_ref + 1e-3 * dt) : 1
+    u = K * (xm - xs) + thr * (K1 * em - K2 * (em - es)) * int((t - tpost) < eta_win - 1e-6 * dt) : 1
+    ready = int((t - tpost) > t_ref + 1e-6 * dt) : 1
     """
     G = b2.NeuronGroup(1, eqs, threshold="ready > 0.5 and u >= thr",
                        reset="xm = 0; xs = 0; em = 1; es = 1; tpost = t",

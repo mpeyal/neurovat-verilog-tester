@@ -108,12 +108,16 @@ def run(stim, p=None, dt=1e-4, method="rk4"):
     grp = b2.NeuronGroup(1, EQS, method=method, namespace=ns)
     grp.x = p.x_of_G(min(max(1 / p.Rinit, p.Gmin), p.Gmax))
     grp.run_regularly(ONSET, when="start", order=0)
-    mon = b2.StateMonitor(grp, "G", record=0, when="start", order=1)
+    g0 = float(grp.G[0])
+    # recorded at the END of each step = the state at t + dt (the twin's and
+    # Spectre's convention: an onset at t shows from the next sample on)
+    mon = b2.StateMonitor(grp, "G", record=0, when="end")
     net = b2.Network(grp, mon)
     t0 = time.perf_counter()
     net.run(len(I) * dt * b2.second)
     wall = time.perf_counter() - t0
-    return np.asarray(mon.t / b2.second), np.asarray(mon.G[0]), wall
+    t = np.r_[0.0, np.asarray(mon.t / b2.second) + dt]
+    return t, np.r_[g0, np.asarray(mon.G[0])], wall
 
 
 def source_lines():

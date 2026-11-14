@@ -523,6 +523,11 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
     a_minus = P.a_minus_ratio * P.a_plus
     ltp_win, ltd_win = P.cutoff_tau * P.tau_plus, P.cutoff_tau * P.tau_minus
     eta_win = P.cutoff_tau * tm
+    # time-since-spike comparisons on the step grid: t_end - t_post carries
+    # rounding of the absolute times, so an exact multiple of dt (1 ms =
+    # 10 steps) came out above or below by chance; tol makes the boundary
+    # step the same at every absolute time (refractory = 11 steps at 0.1 ms)
+    tol = 1e-6 * dt
     dm, ds = math.exp(-dt / tm), math.exp(-dt / ts)
     di = math.exp(-dt / P.tau_inh)
     thr = P.threshold
@@ -581,10 +586,10 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
                 As += W @ np.exp(-(t_end - tj) / ts)
             syn.tick(t_end)
             sp = t_end - t_post
-            ready = sp > P.t_ref_ms
+            ready = sp > P.t_ref_ms + tol
             if ready.any():
                 u = K * (Am - As) - inh
-                near = sp < eta_win
+                near = sp < eta_win - tol
                 if near.any():
                     em, es = np.exp(-sp[near] / tm), np.exp(-sp[near] / ts)
                     u[near] += thr * (P.K1 * em - P.K2 * (em - es))
