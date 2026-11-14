@@ -1,0 +1,25 @@
+stimulus,reference,tool,dt_s,n_steps,g_max_pct,g_mean_pct,g_last_pct,i_nrmse_pct,wall_s,us_per_step
+s1_pm1p3,Spectre ref_1ps,MemTorch,1e-09,407,21.639,2.35542,21.639,0.989362,0.0131741,32.3688
+s1_pm1p3,Spectre ref_1ps,twin adaptive,1e-09,407,1.75528,1.36233,0.0299651,0.0921516,0.018426,45.2727
+s1_pm1p3,Spectre ref_1ps,twin Euler,1e-09,407,29.106,6.21138,29.106,1.31527,0.0071337,17.5275
+s1_pm1p3,Spectre ref_1ps,MemTorch,1e-10,4070,3.09744,1.33829,3.09744,0.138236,0.136783,33.6076
+s1_pm1p3,Spectre ref_1ps,twin adaptive,1e-10,4070,1.75528,1.36233,0.0299645,0.0714982,0.193918,47.6456
+s1_pm1p3,Spectre ref_1ps,twin Euler,1e-10,4070,4.3027,1.92226,4.3027,0.191734,0.044816,11.0113
+s1_pm1p3,Spectre ref_1ps,MemTorch,1e-11,40700,1.14615,0.889488,0.324501,0.0393751,1.14178,28.0537
+s1_pm1p3,Spectre ref_1ps,twin adaptive,1e-11,40700,1.14807,0.86653,0.0299651,0.035361,2.03495,49.9988
+s1_pm1p3,Spectre ref_1ps,twin Euler,1e-11,40700,1.16508,0.921289,0.426759,0.0423151,0.469867,11.5446
+s1_pm1p3,Spectre ref_1ps,MemTorch (convergence check),1e-12,407000,1.17377,0.889038,0.0060425,0.0367583,13.0699,32.1128
+s1_pm1p3,Spectre ref_1ps,"twin matched (clamp, q=1.6e-19), exact PWL",0,40700,1.17247,0.887605,0.0299651,0.036335,nan,nan
+s1_pm1p3,Spectre ref_1ps,"twin .va semantics, exact PWL",0,40700,0.0299651,0.00614356,0.0299651,0.00125018,nan,nan
+s1_pm1p4,Spectre ref_1ps,MemTorch,1e-09,407,68.5532,7.63015,68.5532,2.71354,0.018823,46.2482
+s1_pm1p4,Spectre ref_1ps,twin adaptive,1e-09,407,1.41191,1.26802,0.379031,0.0743693,0.0302779,74.3929
+s1_pm1p4,Spectre ref_1ps,twin Euler,1e-09,407,74.4044,11.7251,74.4044,2.8633,0.0063261,15.5432
+s1_pm1p4,Spectre ref_1ps,MemTorch,1e-10,4070,20.434,2.56542,20.434,0.420198,0.158115,38.8488
+s1_pm1p4,Spectre ref_1ps,twin adaptive,1e-10,4070,1.41194,1.26804,0.379031,0.0854555,0.2568,63.0957
+s1_pm1p4,Spectre ref_1ps,twin Euler,1e-10,4070,24.0545,3.14376,24.0545,0.500644,0.0508433,12.4922
+s1_pm1p4,Spectre ref_1ps,MemTorch,1e-11,40700,2.44227,0.940419,2.44227,0.0439919,1.54149,37.8745
+s1_pm1p4,Spectre ref_1ps,twin adaptive,1e-11,40700,0.861983,0.789807,0.379031,0.0131343,2.21493,54.4209
+s1_pm1p4,Spectre ref_1ps,twin Euler,1e-11,40700,2.92583,0.987395,2.92583,0.0502242,0.501024,12.3102
+s1_pm1p4,Spectre ref_1ps,MemTorch (convergence check),1e-12,407000,0.890212,0.802218,0.086331,0.0134324,14.0492,34.519
+s1_pm1p4,Spectre ref_1ps,"twin matched (clamp, q=1.6e-19), exact PWL",0,40700,0.887237,0.811124,0.36708,0.0132795,nan,nan
+s1_pm1p4,Spectre ref_1ps,"twin .va semantics, exact PWL",0,40700,0.367177,0.0276973,0.367177,0.00596832,nan,nan

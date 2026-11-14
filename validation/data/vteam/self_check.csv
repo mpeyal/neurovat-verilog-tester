@@ -1,0 +1,11 @@
+stimulus,n_points,g_read_max_pct_dt_vs_dt4,i_nrmse_pct_dt_vs_dt4,x_nrmse_pct_dt_vs_dt4,state_maxdiff_dt_dt4,verdict
+off_train,4141,4.28752e-12,1.22558e-13,1.53014e-12,3.56382e-14,PASS
+on_train,4141,3.45432e-11,4.59848e-12,2.21632e-12,4.95159e-14,PASS
+s1_vteam,4141,3.21381e-10,6.37966e-12,1.39811e-11,1.75415e-13,PASS
+s2_vteam,3341,1.13606e-10,1.31867e-12,5.35355e-12,7.41629e-14,PASS
+amplitude_sweep,2101,3.30277e-11,1.96921e-12,8.18335e-12,4.78645e-14,PASS
+pulse_width_sweep,1861,3.07983e-12,1.22263e-13,1.27806e-12,6.46705e-15,PASS
+read_disturb_hold,5287,1.61409e-11,9.80938e-14,5.05584e-12,7.01661e-14,PASS
+saturate_reverse,3715,1.32612e-11,1.85159e-13,5.40198e-12,9.57012e-14,PASS
+dc_loop,2182,nan,1.54865e-14,8.18348e-14,1.11022e-15,PASS
+sine_memtorch,2001,nan,5.81643e-15,5.66047e-14,2.22478e-16,PASS

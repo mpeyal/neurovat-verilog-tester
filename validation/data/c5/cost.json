@@ -1,0 +1,11 @@
+{
+ "spectre_tran_wall_s": 2.12327,
+ "accepted_steps": 34153,
+ "synapses": 16,
+ "stream_s": 4.01,
+ "pulses": 3608,
+ "s_per_pulse": 0.000588489467849224,
+ "s_per_synapse_second": 0.03309336034912719,
+ "steps_per_pulse": 9.465909090909092,
+ "engine_wall_s": 10.424
+}

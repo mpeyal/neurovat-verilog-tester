@@ -330,8 +330,11 @@ class EcfetV3:
             self.t_evt = t
 
         # (C) volatile pools relax (exact exponential update) -------------------
-        decay = [math.exp(-dt / tau) for tau in taus]
-        self.pools = [g * d for g, d in zip(self.pools, decay)]
+        #     Idle step only; under a write the decay is integrated together
+        #     with the EDL inflow, sub-step by sub-step, in (E).
+        if Ieff == 0.0:
+            decay = [math.exp(-dt / tau) for tau in taus]
+            self.pools = [g * d for g, d in zip(self.pools, decay)]
 
         # (D) nonvolatile retention / self-discharge: x relaxes toward x_eq -----
         #     (conserved-state relaxation; G_nv is recomputed from x below).
@@ -348,6 +351,15 @@ class EcfetV3:
         # over the 3 pools -> the observed instantaneous step is -30 ohm relaxing
         # to the retained -11 ohm, and the EDL tapers at the rails because dG_nv
         # does.
+        # Pools under the write (the .va's dG_vi/dt = c_i*u_edl - G_vi/tau_i):
+        # within one sub-step of length h the inflow rate is constant (x moves
+        # linearly in time, and S(x) is ~linear over dx <= 0.002), so the exact
+        # update is  G_vi <- G_vi*e^(-h/tau_i) + c_i*dG_edl*phi_i,
+        # phi_i = (1 - e^(-h/tau_i)) / (h/tau_i): the injected EDL decays
+        # WITHIN the pulse as it does in Spectre, and a pulse split at any
+        # time into shorter steps gives the same pools (to the sub-step
+        # quadrature).  If x hits a rail after a fraction f of the sub-step
+        # the inflow stops there: weight e^(-(1-f)z) (1 - e^(-fz)) / (fz).
         if Ieff != 0.0:
             eta = self._eta()
             sign = -math.copysign(1.0, Ieff) * p.polarity   # +1 pot, -1 dep
@@ -361,16 +373,27 @@ class EcfetV3:
             dx_sub = sign * abs(Ieff) * h / p.Q_full * eta * cf
             cw = p.pool_weights
             edl_factor = p.kappa_v / max(1.0 - p.kappa_v, 1e-9)
+            z = [h / tau for tau in taus]
+            eh = [math.exp(-zi) for zi in z]
+            phi = [(-math.expm1(-zi) / zi) if zi > 0.0 else 1.0 for zi in z]
             for _ in range(n_sub):
-                x_new = min(max(self.x + dx_sub, 0.0), 1.0)
+                x_try = self.x + dx_sub
+                x_new = min(max(x_try, 0.0), 1.0)
                 G_new = p.G_of_x(x_new)
                 dG_nv = G_new - self.G_nv               # retained step (signed)
+                if x_new == x_try:
+                    wgt = phi
+                else:                                   # rail hit inside the sub-step
+                    f = abs(x_new - self.x) / abs(dx_sub) if dx_sub != 0.0 else 0.0
+                    wgt = [(math.exp(-(1.0 - f) * zi) * (-math.expm1(-f * zi))
+                            / (f * zi)) if f * zi > 0.0 else
+                           (1.0 if f > 0.0 else 0.0) for zi in z]
                 self.x = x_new
                 self.G_nv = G_new
                 # volatile EDL: proportional to |retained step|, signed by dG_nv
                 dG_edl = math.copysign(edl_factor * abs(dG_nv), dG_nv)
                 for i in range(3):
-                    self.pools[i] += cw[i] * dG_edl
+                    self.pools[i] = self.pools[i] * eh[i] + cw[i] * dG_edl * wgt[i]
 
         self.prev_drift_on = drift_on
 

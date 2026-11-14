@@ -1,0 +1,95 @@
+// vteam.va - VTEAM voltage-controlled memristor, the variant MemTorch 1.1.6
+// implements (memtorch/bh/memristor/VTEAM.py), written for Spectre.
+//
+// Model: S. Kvatinsky, M. Ramadan, E. G. Friedman, A. Kolodny, "VTEAM: A
+// General Model for Voltage-Controlled Memristors", IEEE Trans. Circuits Syst.
+// II 62(8), 786-790, 2015.  Equations restated from the paper (no MemTorch
+// code copied; MemTorch is GPL-3):
+//
+//   (6a) dx/dt = k_off (v/v_off - 1)^alpha_off f_off(x),  0 < v_off < v
+//   (6b) dx/dt = 0,                                      v_on < v < v_off
+//   (6c) dx/dt = k_on  (v/v_on  - 1)^alpha_on  f_on(x),   v < v_on < 0
+//   (7)  i = [R_on + (R_off - R_on)/(x_off - x_on) (x - x_on)]^-1 v
+//
+// The MemTorch variant (the one this file and twins/vteam.py implement):
+//   * window: the paper's "ideal rectangular window" (Sec. III: dx/dt = 0
+//     outside (x_on, x_off)).  MemTorch realises it by clipping the STATE to
+//     [0, d] after every Euler step (no integrator wind-up); there is no
+//     Joglekar/Biolek window.
+//   * I-V: eq. (7) with x_on = 0 and x_off - x_on replaced by d:
+//       R(x) = r_off x/d + r_on (1 - x/d)
+//     (the exponential I-V, eq. (8), is not used).
+//   * x_on is only the initial state, x_off is unused; the state bounds are
+//     [0, d].  These coincide with the paper only for x_on = 0, x_off = d
+//     (the defaults, = paper Table II, column "TEAM [9]").
+//   * parameter names and defaults are MemTorch's.
+//
+// Continuous-time form (what Spectre integrates).  The state is held on an
+// internal node as s = x/d in [0, 1] (a 3e-9 m state would sit below vabstol)
+// and is read back implicitly:  V(ws) <+ idt(win(s, rate) * rate / d, x_init/d).
+// The rectangular window is applied to the RATE (not to the idt output, which
+// would wind up), and its edge is a linear ramp of width w_eps (fraction of
+// d): for rate > 0, win = clip((1 - s)/w_eps, 0, 1); for rate < 0,
+// win = clip(s/w_eps, 0, 1).  w_eps -> 0 is MemTorch's hard clip; a non-zero
+// edge keeps the implicit step solvable at the bounds (with a hard gate the
+// backward-Euler equation has no solution on the step that reaches a bound).
+// The twin uses the same window, so twin == .va for any w_eps.  R uses the
+// state clipped to [0, 1] (an integration overshoot past a bound never moves
+// R outside [r_on, r_off]).
+//
+// The voltage thresholds v_off / v_on are inherent: dx/dt switches on within
+// the few ps of a pulse edge that lie past the threshold, and its slope jumps
+// at the PWL corners.  A fixed-order integrator (Spectre's errpreset=
+// conservative selects gear2only) is under-resolved there, so the state change
+// per pulse edge, and thus edge timing, is step-sensitive (measured: +3 % of an
+// ON edge's move at maxstep 1 ps; see validation/README.md, VTEAM).
+//
+// Uses only idt on an implicit node (no $bound_step, no previous-evaluation
+// variables, no events).
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module vteam(p, n);
+    inout p, n;
+    electrical p, n;
+    electrical ws;                        // internal: normalised state s = x/d
+
+    parameter real r_off = 1000 from (0:inf);       // ohm, at x = d
+    parameter real r_on = 50 from (0:inf);          // ohm, at x = 0
+    parameter real d = 3e-9 from (0:inf);           // m, device length
+    parameter real k_on = -10 from (-inf:0];        // m/s
+    parameter real k_off = 5e-4 from [0:inf);       // m/s
+    parameter real alpha_on = 3 from (0:inf);
+    parameter real alpha_off = 1 from (0:inf);
+    parameter real v_on = -0.2 from (-inf:0);       // V, negative threshold
+    parameter real v_off = 0.02 from (0:inf);       // V, positive threshold
+    parameter real x_on = 0;                        // m (MemTorch: initial state only)
+    parameter real x_off = 3e-9;                    // m (MemTorch: unused)
+    parameter real x_init = 0 from [0:inf);         // m, initial state (MemTorch: x_on)
+    parameter real w_eps = 1e-4 from (0:1);         // window edge width, fraction of d
+
+    real v, s, sc, rate, win, r;
+
+    analog begin
+        v = V(p, n);
+        s = V(ws);
+        // eq. (6): strict inequalities, so pow() never sees a zero base
+        if (v > v_off)
+            rate = k_off * pow(v / v_off - 1.0, alpha_off);
+        else if (v < v_on)
+            rate = k_on * pow(v / v_on - 1.0, alpha_on);
+        else
+            rate = 0.0;
+        // rectangular window on the rate, linear edge of width w_eps
+        if (rate > 0.0)
+            win = min(max((1.0 - s) / w_eps, 0.0), 1.0);
+        else
+            win = min(max(s / w_eps, 0.0), 1.0);
+        V(ws) <+ idt(win * rate / d, x_init / d);
+        // eq. (7), MemTorch form
+        sc = min(max(s, 0.0), 1.0);
+        r = r_off * sc + r_on * (1.0 - sc);
+        I(p, n) <+ v / r;
+    end
+endmodule

@@ -1,0 +1,8 @@
+{
+  "model": "vteam",
+  "n_points": 407883,
+  "source": "Spectre 24.1",
+  "stimulus": "off_train",
+  "stimulus_set": "vteam-1",
+  "wall_s": 3.4175
+}

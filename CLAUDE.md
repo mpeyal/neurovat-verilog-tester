@@ -94,8 +94,16 @@ Virtuoso** on a shared university host.
   (default, the old contract: a twin is stepped only during its write
   pulses, pulses of one call one after another) or `"physical"` (per-device
   clock; idle time is ONE zero-drive `step()` call, exact for v2/v3 since
-  their idle updates are exact exponentials; pulses of one call start
-  together; a pulse arriving while one is on starts when it ends);
+  their idle updates are exact exponentials; `program` only SCHEDULES its
+  pulses - those of one call start together, a pulse arriving while one is
+  on or queued starts when it ends (per-device FIFO, `busy`); a pulse is
+  driven as the device is advanced through it: `advance(t)` / `read_at(t)`
+  / `peek(t)` integrate it up to `t`, so a read inside a pulse is the state
+  AT `t` (the pulse split at every 1 ms read), never the post-pulse state
+  early; `conductance()` / `retained()` are the state at the time advanced
+  to; `clock` = end of the last scheduled pulse, `advance(clock)` completes
+  them (pulse probes and `Synapses.finish` do); EcfetV3Array `peek` steps
+  only devices in a pulse, idle ones are read by the closed form);
   `read="nv"` (G_nv, old) or `"full"` (`dev.G`: G_nv + v3 stdp_lock +
   volatile pools, clamped). `retained()` is always the stored part and
   pulse sizing (`pulse_step`, `calibrate_write`, `potentiation_sign`) uses
@@ -105,7 +113,15 @@ Virtuoso** on a shared university host.
   only for an unmodified `model_v3.EcfetV3` with `sigma_c2c == 0` after a
   self-check against the scalar twin, else the scalar adapter (an edited /
   hot-reloaded v3 is therefore never silently out of sync). If you change
-  `model_v3.step`, mirror it in `EcfetV3Array._step`. In
+  `model_v3.step`, mirror it in `EcfetV3Array._step`. A v3 driven step
+  integrates the EDL pools with an exponential integrator per x sub-step
+  (decay within the pulse, as the `.va`), so splitting a pulse anywhere
+  changes G by <= ~1e-7 of the window (`test_driven_step_is_split_invariant`);
+  the x / G_nv arithmetic is the old one, so serial / G_nv paths are
+  bit-identical to before (`tests/test_static_paths_unchanged.py`). The C5
+  schedule replayed through the engine reads what Spectre computes (Gate A
+  16/16, max 0.003 % of range, `validation/enginefix/replay_c5.py`,
+  `tests/test_c5_engine_read.py`). In
   `masquelier.Synapses` a time-dynamic array runs on a device clock that
   carries across runs (`t0 = device.clock`), and the efficacy is re-read
   every `read_ms` (1 ms) with `device.peek(t)`; weight = `clip((G - g_min)
@@ -137,6 +153,11 @@ Virtuoso** on a shared university host.
   v3 regression can't mask v2.
 - Keep each `.va` and its Python twin in sync — a change to one should be
   mirrored into the other (the models are meant to be equivalent).
+  One deliberate exception: `verilog/ecfet_v3.va` tapers the outward write
+  within `x_soft = 1e-5` of each rail (smooth stable fixed point; without it
+  Spectre's step collapsed at x = 1, see `validation/bound/`). The twin keeps
+  the hard clamp (the x_soft -> 0 limit; G differs by <= ~3e-6 of the
+  window); `check_va` lists `x_soft` as ".va only".
 - The models are used across runs via `simulate()`, which calls `model.reset()`
   at entry. Preserve that; don't introduce cross-run state leaks.
 
