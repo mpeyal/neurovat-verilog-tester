@@ -14,7 +14,7 @@
 simulator lang=spectre
 global 0
 
-ahdl_include "../../../verilog/stanford_pku_rram.va"
+ahdl_include "../../../verilog/stanford_pku_rram_spectre.va"
 
 simOpts options reltol=1e-5 vabstol=1e-9 iabstol=1e-15 gmin=1e-15
 saveOpts options save=selected

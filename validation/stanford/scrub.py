@@ -134,7 +134,9 @@ def batch(root, out_root=None):
     done, refused = [], []
     for st in S.STIMULI:
         d = Path(root)
-        cands = [d / f"{st.name}.raw" / "tran.tran", d / f"{st.name}.csv"]
+        cands = [d / f"{st.name}.raw" / "tran.tran",
+                     d / f"{st.name}.raw" / "tran.tran.tran",  # Spectre 24.1 name
+                     d / f"{st.name}.csv"]
         src = next((c for c in cands if c.is_file()), None)
         if src is None:
             continue

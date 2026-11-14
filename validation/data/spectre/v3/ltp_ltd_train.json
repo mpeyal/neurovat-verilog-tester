@@ -1,0 +1,9 @@
+{
+  "drive_measured": true,
+  "model": "v3",
+  "n_points": 8662,
+  "source": "Spectre 24.1",
+  "stimulus": "ltp_ltd_train",
+  "stimulus_set": "gateA-1",
+  "wall_s": 0.0002
+}

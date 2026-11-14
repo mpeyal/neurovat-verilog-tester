@@ -1,0 +1,9 @@
+{
+  "drive_measured": true,
+  "model": "v3",
+  "n_points": 3533,
+  "source": "Spectre 24.1",
+  "stimulus": "amplitude_sweep",
+  "stimulus_set": "gateA-1",
+  "wall_s": 0.0002
+}
