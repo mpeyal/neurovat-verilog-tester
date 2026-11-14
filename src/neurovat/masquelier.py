@@ -510,12 +510,13 @@ class Synapses:
 
     def finish(self, t_ms):
         """End of a run: write what is pending; a time-dynamic device is
-        advanced to the end of the run (its clock carries to the next)."""
+        advanced to the end of the run, or of its last write pulse if that
+        is later (every pulse completed; its clock carries to the next)."""
         if self.device is None:
             return
         self.flush(t_ms)
         if self.dynamic:
-            self.device.advance(self.dev_time(t_ms))
+            self.device.advance(max(self.dev_time(t_ms), self.device.clock))
             self._read(t_ms)
 
 
@@ -723,6 +724,7 @@ def pulse_step(device, amp, width, w):
     probe.set_conductance(np.full((1, 1), lo + w * (hi - lo)))
     g0 = float(probe.retained()[0, 0])
     probe.program(np.array([0]), np.array([0]), np.array([float(amp)]), width)
+    probe.advance(probe.clock)        # complete a scheduled (physical) pulse
     return (float(probe.retained()[0, 0]) - g0) / (hi - lo)
 
 

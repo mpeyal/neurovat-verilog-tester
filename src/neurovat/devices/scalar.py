@@ -9,14 +9,19 @@ Two timing modes:
 * ``timing="serial"`` (default, the original contract): a twin is stepped
   ONLY while a write pulse is on it; the pulses of one ``program`` call are
   applied one after another (``t += width``); nothing happens between writes.
-* ``timing="physical"``: every twin keeps its own clock. Before a pulse, and
-  on ``advance(t)`` / ``read_at(t)``, the twin is stepped with zero drive
-  from its clock to ``t`` in ONE ``step`` call (the twins integrate an idle
+* ``timing="physical"``: every twin keeps its own clock. On ``advance(t)`` /
+  ``read_at(t)`` / ``peek(t)`` the twin is integrated up to ``t``: an idle
+  interval is ONE zero-drive ``step`` call (the twins integrate an idle
   interval exactly, so a long gap costs O(1)); volatile relaxation and
-  retention therefore act between spikes. The pulses of one call start
-  together at ``t`` (a crossbar writes its cells in parallel); a pulse that
-  arrives while that device's previous pulse is still on starts when it
-  ends.
+  retention therefore act between spikes. ``program`` SCHEDULES its pulses:
+  those of one call start together at ``t`` (a crossbar writes its cells in
+  parallel); a pulse that arrives while that device's previous pulse is
+  still on (or scheduled) starts when it ends. A scheduled pulse is driven
+  when the device is advanced past its start, up to the advance time, so a
+  read inside a pulse sees the device at the read time (the pulse is split
+  there) - never the post-pulse state early. ``clock`` is the end of the
+  last scheduled pulse (or the latest advance); ``advance(clock)``
+  completes every pulse.
 
 Two read modes, the conductance ``conductance()`` / ``read_at`` return:
 
@@ -90,6 +95,8 @@ class ScalarTwinArray(DeviceArray):
         self.g_max = float(getattr(probe.p, "Gmax", None) or (1./probe.p.Rmin if hasattr(probe.p, "Rmin") else max(probe.G, 1e-9)))
         self.g_min = float(getattr(probe.p, "Gmin", None) or (1./probe.p.Rmax if hasattr(probe.p, "Rmax") else 0.0))
         self.t_dev = np.zeros(self.shape)  # per-device clock (physical timing)
+        self.busy = np.zeros(self.shape)   # scheduled until (physical timing)
+        self.queue = {}                    # (j, i) -> [[start, end, amp], ...]
         self._G = None                # read cache; twins change only when stepped
 
     def nominal(self):
@@ -117,15 +124,47 @@ class ScalarTwinArray(DeviceArray):
 
     @property
     def clock(self):
-        return float(self.t_dev.max()) if self.time_dynamic else 0.0
+        if not self.time_dynamic:
+            return 0.0
+        return float(max(self.t_dev.max(), self.busy.max()))
+
+    def _pulses_to(self, j, i, t):
+        """Integrate device (j, i)'s scheduled pulses that start before
+        ``t``, up to ``t`` (same rule as ``EcfetV3Array._pulses_to``)."""
+        q = self.queue.get((j, i))
+        moved = False
+        dev = self.devices[j][i]
+        while q and q[0][0] < t:
+            s, e, a = q[0]
+            t0 = float(self.t_dev[j, i])
+            if t0 < s:                               # idle up to the start
+                dev.step(t0, s - t0, 0.0)
+                self.t_dev[j, i] = t0 = s
+                moved = True
+            te = min(e, t)
+            if te > t0:                              # drive up to min(end, t)
+                dev.step(t0, te - t0, a)
+                self.t_dev[j, i] = te
+                moved = True
+            if self.t_dev[j, i] >= e:
+                q.pop(0)
+            else:
+                break
+        if not q:
+            self.queue.pop((j, i), None)
+        return moved
 
     def _idle(self, j, i, t):
+        moved = self._pulses_to(j, i, t)
         t0 = float(self.t_dev[j, i])
         if t > t0:
             self.devices[j][i].step(t0, t - t0, 0.0)
             self.t_dev[j, i] = t
             return True
-        return False
+        return moved
+
+    def peek(self, t):
+        return self.read_at(t)
 
     def advance(self, t, cols=None):
         if not self.time_dynamic:
@@ -149,17 +188,19 @@ class ScalarTwinArray(DeviceArray):
             return t
         t = float(t)
         for j, i, a in zip(rows.tolist(), cols.tolist(), amps.tolist()):
-            self._idle(j, i, t)                      # relax up to the pulse
-            start = float(self.t_dev[j, i])          # = max(t, busy until)
-            dev = self.devices[j][i]
-            dev.step(start, width, a)
-            self.t_dev[j, i] = start + width
-            G[j, i] = self._read_one(dev)
+            if self._idle(j, i, t):                  # relax up to the call
+                G[j, i] = self._read_one(self.devices[j][i])
+            start = max(t, float(self.busy[j, i]), float(self.t_dev[j, i]))
+            self.queue.setdefault((j, i), []).append(
+                [start, start + width, float(a)])     # scheduled, not applied
+            self.busy[j, i] = start + width
         return t + width
 
     def set_conductance(self, G):
         self._G = None
         self.t_dev[:] = 0.0
+        self.busy[:] = 0.0
+        self.queue = {}
         for j, row in enumerate(self.devices):
             for i, dev in enumerate(row):
                 g = float(np.clip(G[j, i], self.g_min, self.g_max))
@@ -188,13 +229,18 @@ class ScalarTwinArray(DeviceArray):
                  for d in row] for row in self.devices]
         if not self.time_dynamic:
             return rows
-        return {"devices": rows, "t_dev": self.t_dev.copy()}
+        q = np.array([[j, i, s, e, a] for (j, i), pl in sorted(self.queue.items())
+                      for s, e, a in pl], float).reshape(-1, 5)
+        return {"devices": rows, "t_dev": self.t_dev.copy(),
+                "busy": self.busy.copy(), "queue": q}
 
     def load_state_dict(self, state):
         t_dev = None
         if isinstance(state, dict):
+            busy = np.asarray(state.get("busy", state["t_dev"]), float)
+            qrows = np.asarray(state.get("queue", np.zeros((0, 5))), float)
             state, t_dev = state["devices"], np.asarray(state["t_dev"], float)
-            if t_dev.shape != self.shape:
+            if t_dev.shape != self.shape or busy.shape != self.shape:
                 raise ValueError("Checkpoint architecture mismatch")
         if len(state) != self.shape[0] or any(len(row) != self.shape[1] for row in state):
             raise ValueError("Checkpoint architecture mismatch")
@@ -207,4 +253,8 @@ class ScalarTwinArray(DeviceArray):
                 device.__dict__.update(copy.deepcopy(values))
         if t_dev is not None:
             self.t_dev = t_dev.copy()
+            self.busy = busy.copy()
+            self.queue = {}
+            for j, i, s, e, a in qrows.reshape(-1, 5).tolist():
+                self.queue.setdefault((int(j), int(i)), []).append([s, e, a])
         self._G = None

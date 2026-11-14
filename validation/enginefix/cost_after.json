@@ -1,0 +1,23 @@
+{
+ "v3_time": {
+  "wall_s": 25.24,
+  "stream_s": 4.0,
+  "s_per_stream_s": 6.311,
+  "post_spikes": 224,
+  "writes": 227795
+ },
+ "v3_static": {
+  "wall_s": 16.76,
+  "stream_s": 4.0,
+  "s_per_stream_s": 4.189,
+  "post_spikes": 233,
+  "writes": 230791
+ },
+ "ideal": {
+  "wall_s": 16.44,
+  "stream_s": 4.0,
+  "s_per_stream_s": 4.111,
+  "post_spikes": 235,
+  "writes": 301777
+ }
+}

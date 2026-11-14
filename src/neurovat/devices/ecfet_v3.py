@@ -10,7 +10,11 @@ differences are ``np.exp`` vs ``math.exp`` rounding (~1 ulp).
 
 Timing and read modes are those of :class:`~neurovat.devices.ScalarTwinArray`
 (``timing="physical"`` | ``"serial"``, ``read="full"`` | ``"nv"``). An idle
-interval is one exact-exponential step (O(1) whatever its length).
+interval is one exact-exponential step (O(1) whatever its length). In
+physical time a pulse is scheduled, not applied, by ``program``: it is
+integrated when the device is advanced or read past its start, up to that
+time (a read inside a pulse sees the state at the read time, the pulse
+split there), with the same queue semantics as the scalar adapter.
 
 Not reproduced: the scalar twin's cycle-to-cycle noise stream
 (``sigma_c2c > 0`` draws from ``random.Random`` per device). This array draws
@@ -72,7 +76,15 @@ class EcfetV3Array(DeviceArray):
         self.trd = np.zeros((3, n))
         self.prev = np.zeros(n, bool)
         self.cf = np.ones(n)
-        self.t_dev = np.zeros(n)
+        self.t_dev = np.zeros(n)      # time each device has been integrated to
+        # physical time: scheduled pulses not yet (fully) integrated, a FIFO
+        # per device in slots 0..q_n-1 (start, end, amplitude), and the time
+        # each device is scheduled until (end of its last pulse)
+        self.q_s = np.zeros((1, n))
+        self.q_e = np.zeros((1, n))
+        self.q_a = np.zeros((1, n))
+        self.q_n = np.zeros(n, np.int64)
+        self.busy = np.zeros(n)
         self.rng = np.random.default_rng(self.seed)
 
     def nominal(self):
@@ -214,18 +226,68 @@ class EcfetV3Array(DeviceArray):
 
     @property
     def clock(self):
-        return float(self.t_dev.max()) if self.time_dynamic else 0.0
+        """Device time: the end of the last scheduled pulse or the latest
+        time a device was advanced to, whichever is later."""
+        if not self.time_dynamic:
+            return 0.0
+        return float(max(self.t_dev.max(), self.busy.max()))
 
     def _flat(self, rows, cols):
         return (np.asarray(rows, np.int64) * self.shape[1]
                 + np.asarray(cols, np.int64))
 
+    def _pulses_to(self, t, idx=None):
+        """Integrate the scheduled pulses of devices ``idx`` (default all)
+        that start before ``t``, up to ``t``: the idle gap to each pulse
+        start is one idle step, the pulse is driven up to min(end, t). A
+        device inside a pulse at ``t`` is left at ``t_dev == t``."""
+        while True:
+            pend = self.q_n > 0 if idx is None else None
+            cand = (np.nonzero(pend & (self.q_s[0] < t))[0] if idx is None
+                    else idx[(self.q_n[idx] > 0) & (self.q_s[0, idx] < t)])
+            if not cand.size:
+                return
+            s = self.q_s[0, cand]
+            late = self.t_dev[cand] < s
+            if late.any():                       # idle up to the pulse start
+                i = cand[late]
+                self._step(i, s[late] - self.t_dev[i], 0.0)
+                self.t_dev[i] = s[late]
+            te = np.minimum(self.q_e[0, cand], t)
+            go = te > self.t_dev[cand]
+            if go.any():                         # drive up to min(end, t)
+                i = cand[go]
+                self._step(i, te[go] - self.t_dev[i], self.q_a[0, i])
+                self.t_dev[i] = te[go]
+            done = cand[self.t_dev[cand] >= self.q_e[0, cand]]
+            if not done.size:
+                return
+            for q in (self.q_s, self.q_e, self.q_a):   # pop slot 0
+                q[:-1, done] = q[1:, done]
+                q[-1, done] = 0.0
+            self.q_n[done] -= 1
+
     def _idle(self, idx, t):
+        self._pulses_to(t, idx)
         late = self.t_dev[idx] < t
         if late.any():
             i = idx[late]
             self._step(i, t - self.t_dev[i], 0.0)
             self.t_dev[i] = t
+
+    def _schedule(self, idx, amps, width, t):
+        start = np.maximum(np.maximum(t, self.busy[idx]), self.t_dev[idx])
+        slot = self.q_n[idx]
+        k = int(slot.max()) + 1 if slot.size else 1
+        if k > self.q_s.shape[0]:                # grow the queue
+            pad = np.zeros((k - self.q_s.shape[0], self.q_s.shape[1]))
+            self.q_s, self.q_e, self.q_a = (np.vstack([q, pad]) for q in (
+                self.q_s, self.q_e, self.q_a))
+        self.q_s[slot, idx] = start
+        self.q_e[slot, idx] = start + width
+        self.q_a[slot, idx] = amps
+        self.q_n[idx] += 1
+        self.busy[idx] = start + width
 
     def advance(self, t, cols=None):
         if not self.time_dynamic:
@@ -252,11 +314,15 @@ class EcfetV3Array(DeviceArray):
         return np.minimum(np.maximum(tot, self.p.Gmin), self.p.Gmax)
 
     def peek(self, t):
-        """Read conductance of every device at time ``t`` WITHOUT changing
-        the state: the closed form of one idle step from each device's clock
-        (devices still in a pulse are read as they are)."""
+        """Read conductance of every device at time ``t``. Scheduled pulses
+        that started before ``t`` are integrated up to ``t`` (a device in a
+        pulse is read at ``t``, mid-pulse); idle devices are not stepped:
+        their read is the closed form of one idle step from their clock."""
         p = self.p
-        dt = np.maximum(float(t) - self.t_dev, 0.0)
+        t = float(t)
+        if self.time_dynamic:
+            self._pulses_to(t)
+        dt = np.maximum(t - self.t_dev, 0.0)
         x = p.x_eq + (self.x - p.x_eq) * np.exp(-dt / p.tau_ret)
         G_nv = self._G_of_x(x)
         if self.read == "nv":
@@ -276,10 +342,9 @@ class EcfetV3Array(DeviceArray):
             self._step(idx, width, amps)
             return t + width * len(amps)
         t = float(t)
-        self._idle(idx, t)                 # relax up to the pulse
-        start = self.t_dev[idx]            # = max(t, busy until)
-        self._step(idx, width, amps)
-        self.t_dev[idx] = start + width
+        self._idle(idx, t)                 # relax up to the call time
+        # scheduled at max(t, busy until); integrated by advance / read / peek
+        self._schedule(idx, amps, width, t)
         return t + width
 
     def set_conductance(self, G):
@@ -289,17 +354,25 @@ class EcfetV3Array(DeviceArray):
         self.G_nv = g.copy()
         self.x = np.array([p.x_of_G(float(v)) for v in g])
 
+    _STATE = ("x", "G_nv", "lock", "pools", "trp", "trd", "cf", "t_dev",
+              "q_s", "q_e", "q_a", "busy")
+
     def state_dict(self):
-        return {k: getattr(self, k).copy() for k in (
-            "x", "G_nv", "lock", "pools", "trp", "trd", "prev", "cf", "t_dev")
-                } | {"rng": self.rng.bit_generator.state}
+        return {k: getattr(self, k).copy() for k in self._STATE + (
+            "prev", "q_n")} | {"rng": self.rng.bit_generator.state}
 
     def load_state_dict(self, state):
-        if np.asarray(state["x"]).shape != (self.shape[0] * self.shape[1],):
+        n = self.shape[0] * self.shape[1]
+        if np.asarray(state["x"]).shape != (n,):
             raise ValueError("Checkpoint architecture mismatch")
-        for k in ("x", "G_nv", "lock", "pools", "trp", "trd", "cf", "t_dev"):
+        if "q_n" not in state:             # checkpoint from before the queue
+            state = dict(state, q_s=np.zeros((1, n)), q_e=np.zeros((1, n)),
+                         q_a=np.zeros((1, n)), q_n=np.zeros(n, np.int64),
+                         busy=np.array(state["t_dev"], float))
+        for k in self._STATE:
             setattr(self, k, np.array(state[k], float))
         self.prev = np.array(state["prev"], bool)
+        self.q_n = np.array(state["q_n"], np.int64)
         self.rng.bit_generator.state = state["rng"]
 
 
