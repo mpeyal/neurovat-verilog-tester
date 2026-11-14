@@ -26,7 +26,8 @@ from neurovat.patterns import (make_patterns, _fit, _letter_glyphs,
                                _digit_glyphs, _bits)
 from neurovat.metrics import confusion, prf1
 from neurovat.devices import (ScalarTwinArray, device_weight,
-                              calibrate_pot_sign, twin_factory)
+                              calibrate_pot_sign, twin_factory,
+                              vector_twin_factory)
 from neurovat.lif import (probe_lif, probe_lif_wave, fi_curve, probe_lif_psp,
                           fi_curve_psp)
 from neurovat.network import CrossbarSNN

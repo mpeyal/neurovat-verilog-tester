@@ -28,12 +28,16 @@ Test-before-Train baseline, so a curve shows what training bought.
   the hit share and the share of quiet other windows. The engine's own
   per-neuron window counts (the last third of the run, "fires at least
   once") are kept alongside as ``engine_windows``.
-* Device sessions: ``learn=False`` sends no write pulse, so the device does
-  not change (conductances are only read). The read energy of the sweep is
-  NOT added to the session's energy meter unless ``energy=True``. An
-  untrained device baseline needs a fresh device, which only the caller can
-  build: pass ``untrained=`` (a Session or a callable that returns one), else
-  that row is skipped.
+* Device sessions: ``learn=False`` sends no write pulse, but a time-dynamic
+  device (Gate B physical time) still relaxes and its clock moves during a
+  run, so every recall run starts from a deep copy of the device state and
+  the device is put back afterwards (:func:`device_preserved`): each level
+  sees the same device and the session's device is unchanged. The read
+  energy of the sweep is NOT added to the session's energy meter unless
+  ``energy=True``. The untrained device baseline is a deep copy of the
+  device as the session placed it at the start weight
+  (``Session.device_start``); a session without one (built elsewhere) skips
+  that row unless ``untrained=`` is given.
 
 RETRAIN mode (``retrain=True``) asks a different question: not "how does the
 trained network cope with a worse input" but "what does a network trained
@@ -50,9 +54,14 @@ per level (keys ``(train_key, 0..N-1)``): the row holds the mean hit % /
 false % (counts summed over the trainings) and their min-max. Each
 training's final weights are kept (``row["weights"]``) so a level can be
 replayed. The caller's session is never run: its weights, runs and stream
-stay as they were. Device sessions are refused (a device copy cannot be
-made).
+stay as they were. Device sessions retrain a deep copy of
+``Session.device_start`` (same device kind, parameters, write calibration);
+each training's device is kept (``row["devices"]``) so a level can be
+replayed; ``row["weights"]`` then holds the normalised device read at the end
+of training.
 """
+import contextlib
+import copy
 import math
 import time
 
@@ -78,8 +87,8 @@ SWEEP_KEY = 2008                 # default stream key (any fixed int)
 TRAIN_KEY = 2009                 # retrain: training streams (TRAIN_KEY, r)
 RECALL, RETRAIN = "recall", "retrain"
 RETRAIN_NOMINAL = "retrained at nominal"
-DEVICE_REFUSAL = ("retraining needs ideal weights: a device copy cannot be "
-                  "made")
+DEVICE_REFUSAL = ("retraining needs a fresh device: this device session kept "
+                  "no start state")
 
 
 def factor_name(name):
@@ -113,20 +122,52 @@ def nominal_settings(session, nominal=None):
     return out
 
 
-def fresh_like(session):
-    """An untrained copy of an ideal-synapse session: same parameters, the
-    same frozen patterns (and pattern afferents), start weights. None for a
-    device session (it needs a fresh device; see the module note)."""
+def can_copy(session):
+    """True when :func:`fresh_like` can build an untrained copy."""
+    return (session.device is None
+            or getattr(session, "device_start", None) is not None)
+
+
+@contextlib.contextmanager
+def device_preserved(session):
+    """Run something on ``session`` and put its device back exactly as it
+    was (state, clock, read cache): a recall run of a time-dynamic device
+    relaxes it. No-op for ideal synapses."""
+    dev = session.device
+    if dev is None:
+        yield
+        return
+    saved = copy.deepcopy(dev.__dict__)
+    try:
+        yield
+    finally:
+        dev.__dict__.clear()
+        dev.__dict__.update(saved)
+
+
+def fresh_like(session, device=None):
+    """An untrained copy of a session: same parameters, the same frozen
+    patterns (and pattern afferents), start weights. A device session gets
+    a deep copy of its start device (``Session.device_start``); ``device``
+    (e.g. a retrained row's device) replaces that with a copy of the given
+    state. None for a device session without a start device."""
     from neurovat.masquelier import Session
-    if session.device is not None:
-        return None
     kw = {k: v for k, v in session.kw.items() if k != "energy"}
+    if session.device is not None:
+        start = getattr(session, "device_start", None)
+        if start is None and device is None:
+            return None
+        kw["device"] = copy.deepcopy(start if start is not None else device)
     if session.given:
-        return Session(session.P, patterns=session.copies,
-                       distractors=session.distractors, **kw)
-    u = Session(session.P, n_patterns=len(session.members), **kw)
-    u.members = np.array(session.members, bool)
-    u.copies = session.copies
+        u = Session(session.P, patterns=session.copies,
+                    distractors=session.distractors, **kw)
+    else:
+        u = Session(session.P, n_patterns=len(session.members), **kw)
+        u.members = np.array(session.members, bool)
+        u.copies = session.copies
+    if device is not None:              # Session placed it at w_init: undo
+        u.device.__dict__.clear()
+        u.device.__dict__.update(copy.deepcopy(device.__dict__))
     return u
 
 
@@ -147,8 +188,9 @@ def measure(session, seconds, changes, key=SWEEP_KEY, images=None,
         return not (stop and stop())
 
     t0 = time.perf_counter()
-    res = session.run(seconds, learn=False, on_section=on_section,
-                      stream_key=key, **changes)
+    with device_preserved(session):
+        res = session.run(seconds, learn=False, on_section=on_section,
+                          stream_key=key, **changes)
     if res.get("stopped"):
         return None
     hit = acc["hit"] / acc["pat"] if acc["pat"] else float("nan")
@@ -171,13 +213,13 @@ def retrain_once(session, train_seconds, seconds, changes, key=SWEEP_KEY,
     final weights) and ``train_post_spikes``, or None when ``stop()``
     became true. ``on_phase("training" | "testing")`` is called before each
     part."""
-    if session.device is not None:
+    if not can_copy(session):
         raise ValueError(DEVICE_REFUSAL)
-    copy = fresh_like(session)
+    twin = fresh_like(session)
     if on_phase:
         on_phase("training")
     t0 = time.perf_counter()
-    res = copy.run(float(train_seconds), learn=True, stream_key=train_key,
+    res = twin.run(float(train_seconds), learn=True, stream_key=train_key,
                    on_section=lambda _t, _i: not (stop and stop()),
                    **changes)
     if res.get("stopped") or (stop and stop()):
@@ -185,10 +227,14 @@ def retrain_once(session, train_seconds, seconds, changes, key=SWEEP_KEY,
     t_train = time.perf_counter() - t0
     if on_phase:
         on_phase("testing")
-    m = measure(copy, seconds, changes, key, images, stop)
+    m = measure(twin, seconds, changes, key, images, stop)
     if m is None:
         return None
-    m["weights"] = np.array(copy.weights, float)
+    if twin.device is None:
+        m["weights"] = np.array(twin.weights, float)
+    else:
+        m["weights"] = np.array(res["weights"], float)
+        m["device"] = twin.device       # restored to its trained state
     m["train_post_spikes"] = int(res["post_spikes"])
     m["train_wall_s"] = t_train
     return m
@@ -209,7 +255,8 @@ def aggregate(runs):
     the min-max (``hit_min``, ``hit_max``, ``false_min``, ``false_max``).
     One run: that run's dict with the min-max fields added."""
     if len(runs) == 1:
-        out = {k: v for k, v in runs[0].items() if k != "weights"}
+        out = {k: v for k, v in runs[0].items()
+               if k not in ("weights", "device")}
     else:
         out = {k: int(sum(r[k] for r in runs)) for k in (
             "pattern_windows", "hits", "other_windows", "false_windows",
@@ -254,14 +301,16 @@ def sweep(session, factors=None, seconds=30.0, nominal=None, on_progress=None,
     ``retrain=True``: for each level train ``repeats`` fresh copies for
     ``train_seconds`` (required) at that level on the training streams
     ``(train_key, r)``, then test them (see the module note); ``session``
-    itself is not run. ValueError for a device session. A level stopped
+    itself is not run. ValueError for a device session without a start
+    device (see :func:`can_copy`). A level stopped
     half-way (also during training) is dropped. Rows then also hold
     ``repeats`` (each training's test dict) and ``weights`` (each
     training's final weights); ``trained`` is their :func:`aggregate`.
 
     ``factors``: None (jitter_ms, spike_deletion, noise_hz at
     :func:`default_levels`), a list of factor names, or {name: levels}.
-    ``untrained``: None = :func:`fresh_like` (skipped for a device session),
+    ``untrained``: None = :func:`fresh_like` (skipped for a device session
+    without a start device),
     False = no baseline, a Session, or a callable returning one.
     ``on_progress(i, n, text)`` is called before each run (i of n done);
     ``stop()`` is checked during and between runs - the result then holds
@@ -277,7 +326,7 @@ def sweep(session, factors=None, seconds=30.0, nominal=None, on_progress=None,
     images = bool(session.given if images is None else images)
     retrain = bool(retrain)
     if retrain:
-        if session.device is not None:
+        if not can_copy(session):
             raise ValueError(DEVICE_REFUSAL)
         if train_seconds is None:
             raise ValueError("retrain needs train_seconds (the GUI passes the "
@@ -294,10 +343,13 @@ def sweep(session, factors=None, seconds=30.0, nominal=None, on_progress=None,
     if untrained is False:
         base, note = None, "not run"
     elif untrained is None:
-        base = None if session.device is not None else "auto"
+        base = "auto" if can_copy(session) else None
         if base is None:
-            note = ("skipped: a device network needs a fresh device "
+            note = ("skipped: this device network kept no start device "
                     "(pass untrained=)")
+        elif session.device is not None:
+            note = ("fresh copy of the start device at the start weights, "
+                    "same patterns")
     elif callable(untrained) and not hasattr(untrained, "run"):
         base, note = untrained(), "given by the caller"
     else:
@@ -352,8 +404,11 @@ def sweep(session, factors=None, seconds=30.0, nominal=None, on_progress=None,
                         runs.append(one)
                     tr = aggregate(runs)
                     extra = {"repeats": [{k: x for k, x in one.items()
-                                          if k != "weights"} for one in runs],
+                                          if k not in ("weights", "device")}
+                                         for one in runs],
                              "weights": [one["weights"] for one in runs]}
+                    if session.device is not None:
+                        extra["devices"] = [one["device"] for one in runs]
                 else:
                     if on_progress:
                         on_progress(done, n_runs, f"{lvl}: trained")

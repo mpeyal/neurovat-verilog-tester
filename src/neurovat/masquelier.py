@@ -54,8 +54,25 @@ clipped to [0, 1]) or a :class:`neurovat.devices.DeviceArray` of shape
 (n_out, n_afferents) programmed by the requested weight changes.
 ``write_window_ms`` accumulates the changes and writes each synapse once per
 window; 0 writes every pairing, as the paper's rule does.
+
+Physical time (Gate B). A *time-dynamic* device array (``device.time_dynamic``,
+e.g. ``vector_twin_factory(...)`` or ``ScalarTwinArray(timing="physical")``)
+runs on a device clock that continues across runs: stream time ``t_ms`` of a
+run maps to device time ``t0 + t_ms / 1000`` s, ``t0`` = the device clock when
+the run starts. Writes are programmed at that time (all cells of one flush in
+parallel), the devices relax between writes (volatile pools, retention), and
+the efficacy the neuron integrates is re-read from the device every
+``read_ms`` (default 1 ms) with ``device.peek`` - with ``read="full"`` that is
+the full conductance, non-volatile plus volatile. Conductance -> weight
+mapping, for every device: ``w = clip((G - g_min) / (g_max - g_min), 0, 1)``
+with the array's nominal bounds (for ECFET v3 ``g_min = 1/Rmax``, ``g_max =
+1/Rmin``), and an input spike adds ``w`` to the neuron's kernel sums, so
+efficacy is linear in conductance. Write pulses are sized on the RETAINED
+step (``device.retained()``, see :func:`pulse_step`). A static device (the
+default) takes none of these paths, so ideal and legacy runs are unchanged.
 """
 from dataclasses import dataclass, field, asdict, replace
+import copy
 import math
 
 import numpy as np
@@ -404,7 +421,7 @@ class Synapses:
 
     def __init__(self, P, device=None, write_window_ms=0.0, write_gain=1.0,
                  dep_gain=None, pot_sign=1.0, pulse_width=None, energy=None,
-                 phase="train", weights=None):
+                 phase="train", weights=None, read_ms=1.0):
         self.P, self.device = P, device
         self.window = float(write_window_ms)
         self.pot_gain = float(write_gain)
@@ -414,6 +431,10 @@ class Synapses:
                            else getattr(device, "pulse_width", 1e-3))
         self.energy, self.phase = energy, phase
         self.writes = 0
+        self.dynamic = bool(getattr(device, "time_dynamic", False))
+        self.t0 = float(device.clock) if self.dynamic else 0.0
+        self.read_ms = float(read_ms)
+        self._next_read = self.read_ms
         shape = (P.n_out, P.n_afferents)
         if device is None:
             self.w = (np.full(shape, P.w_init) if weights is None else
@@ -430,9 +451,21 @@ class Synapses:
         return None if self.device is None else np.asarray(
             self.device.conductance(), float)
 
-    def _read(self):
-        G = self.conductance()
+    def dev_time(self, t_ms):
+        """Device time (s) of stream time ``t_ms`` in this run."""
+        return self.t0 + t_ms * 1e-3
+
+    def _read(self, t_ms=0.0):
+        if self.dynamic:
+            G = np.asarray(self.device.peek(self.dev_time(t_ms)), float)
+        else:
+            G = self.conductance()
         self.w = np.clip((G - self.g_lo) / (self.g_hi - self.g_lo), 0.0, 1.0)
+
+    def retained_weights(self):
+        """Stored (non-volatile) part of the device weights, normalised."""
+        G = np.asarray(self.device.retained(), float)
+        return np.clip((G - self.g_lo) / (self.g_hi - self.g_lo), 0.0, 1.0)
 
     def update(self, rows, cols, dw, t_ms):
         if self.device is None:
@@ -453,10 +486,12 @@ class Synapses:
         current = None
         if self.energy is not None and hasattr(self.device, "write_current"):
             current = self.device.write_current(rows, cols, amps, self.width)
-        self.device.program(rows, cols, amps, self.width, t_ms * 1e-3)
+        self.device.program(rows, cols, amps, self.width,
+                            self.dev_time(t_ms) if self.dynamic
+                            else t_ms * 1e-3)
         self.pending[rows, cols] = 0.0
         self.writes += int(rows.size)
-        self._read()
+        self._read(t_ms)
         if self.energy is not None:
             self.energy.record_write(self.phase, 0, rows, cols, amps,
                                      self.width, g0,
@@ -466,6 +501,19 @@ class Synapses:
         if self.device is not None and self.window > 0.0 and t_ms >= self._next_flush:
             self.flush(t_ms)
             self._next_flush = t_ms + self.window
+        if self.dynamic and t_ms >= self._next_read:
+            self._read(t_ms)
+            self._next_read = t_ms + self.read_ms
+
+    def finish(self, t_ms):
+        """End of a run: write what is pending; a time-dynamic device is
+        advanced to the end of the run (its clock carries to the next)."""
+        if self.device is None:
+            return
+        self.flush(t_ms)
+        if self.dynamic:
+            self.device.advance(self.dev_time(t_ms))
+            self._read(t_ms)
 
 
 def _section_rasters(S, a, b, off_in, n_bins, bin_ms, posts, n_out):
@@ -484,7 +532,7 @@ def _section_rasters(S, a, b, off_in, n_bins, bin_ms, posts, n_out):
 def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
         stream=None, progress=None, members=None, dep_gain=None, pot_sign=1.0,
         pulse_width=None, energy=None, phase="train", on_section=None,
-        learn=True, weights=None, record_u=False):
+        learn=True, weights=None, record_u=False, read_ms=1.0):
     """Simulate one run. Returns a dict with every postsynaptic spike (time,
     neuron, pattern it fell in or -1, latency after that pattern's onset),
     the final weights and the success metrics of the paper.
@@ -509,7 +557,7 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
     else:
         S = make_stream(P, rng)
     syn = Synapses(P, device, write_window_ms, write_gain, dep_gain, pot_sign,
-                   pulse_width, energy, phase, weights)
+                   pulse_width, energy, phase, weights, read_ms)
     if device is None:
         energy = None
     dt = P.sim_dt_ms
@@ -634,12 +682,14 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
         if stopped:
             break
     t_done = t_end
-    if device is not None:
-        syn.flush(t_done)
+    syn.finish(t_done)
     res = _score(P, S, np.array(post_t), np.array(post_j, int),
                  np.array(post_lab, int), np.array(post_lat, float), syn,
                  t_done)
     res["stopped"] = stopped
+    if device is not None:
+        res["retained_weights"] = (syn.retained_weights()[0].copy()
+                                   if P.n_out == 1 else syn.retained_weights())
     if u_rec is not None:
         u_rec = u_rec[:int(math.ceil(t_done / (u_per * dt) - 1e-9))]
         u_rec[~np.isfinite(u_rec)] = np.nan
@@ -654,9 +704,9 @@ def pulse_step(device, amp, width, w):
     lo, hi = float(device.g_min), float(device.g_max)
     probe = device.nominal()
     probe.set_conductance(np.full((1, 1), lo + w * (hi - lo)))
-    g0 = float(probe.conductance()[0, 0])
+    g0 = float(probe.retained()[0, 0])
     probe.program(np.array([0]), np.array([0]), np.array([float(amp)]), width)
-    return (float(probe.conductance()[0, 0]) - g0) / (hi - lo)
+    return (float(probe.retained()[0, 0]) - g0) / (hi - lo)
 
 
 def calibrate_write(device, P, width, amp0=1.0, tol=0.02):
@@ -734,10 +784,14 @@ class Session:
         self.copies, self.weights, self.runs = None, None, 0
         if self.given:
             self.copies = tuple(patterns)
+        self.device_start = None
         if device is not None:
             lo, hi = float(device.g_min), float(device.g_max)
             device.set_conductance(np.full(device.shape,
                                            lo + P.w_init * (hi - lo)))
+            # the untrained device, for fresh copies (robustness baseline,
+            # retrain): a deep copy, so it never follows the session's
+            self.device_start = copy.deepcopy(device)
 
     def run(self, seconds, learn=True, on_section=None, record_u=False,
             stream_key=None, **changes):

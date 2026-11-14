@@ -287,7 +287,10 @@ one fixed keyed test stream, one factor changed at a time: jitter
 (nt_st_rb_noise, the ABSOLUTE noise Hz, not added to the trained value);
 comma lists, '' = the Masquelier 2008 levels plus the trained value.
 nt_st_rb_seconds per level (default 30), nt_st_rb_untrained also runs an
-untrained copy (ideal synapses only; not available for device synapses).
+untrained copy (device synapses: a copy of the start device).
+nt_st_dyn picks the device dynamics: "physical time, full read" (default:
+devices relax between writes, the neuron reads the full conductance) or
+"legacy (writes only, G_nv)".
 The other settings stay at the values of the last Train. It is counted over
 the WHOLE run (hits = pattern windows answered, false = other windows with
 an output spike), a different denominator from Test's last-third verdict,
@@ -6129,7 +6132,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                 str(val).lower() in ("1", "true", "yes", "on", "play")) or True
         elif tag in ("nt_st_input", "nt_st_spacing", "nt_st_speed",
                      "nt_st_imgset", "nt_st_synapse", "nt_st_pulse",
-                     "nt_st_code"):
+                     "nt_st_code", "nt_st_dyn"):
             val = self._nt_st_set_combo(tag, val)
             if val is None:
                 return False

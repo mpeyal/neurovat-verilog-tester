@@ -1,7 +1,8 @@
 """Robustness tab of the stream mode in the real desktop Trainer: refusals
 (no trained network, settings changed, busy), a short sweep with its plots
 and table, Stop, Show in Raster, a worker exception, and a device network
-(no untrained baseline; device and energy meter unchanged)."""
+(ECFET v3 in physical time: untrained baseline and retrain on copies of the
+start device; device and energy meter unchanged)."""
 from pathlib import Path
 import hashlib
 import shutil
@@ -393,9 +394,14 @@ def main():
             else:
                 code_txt = ""
 
-            # a device network: no untrained baseline, the device and the
-            # energy meter are not changed by the sweep
+            # a device network (ECFET v3, physical time, full read): the
+            # untrained baseline is a copy of the start device; the device
+            # and the energy meter are not changed by a recall sweep; retrain
+            # trains copies of the start device; Show in Raster replays a
+            # retrained device on a copy
             set_("nt_st_synapse", "selected device")
+            assert set_("nt_device", "ECFET v3 (paper-faithful)")
+            assert set_("nt_st_dyn", "physical")
             app.on_nt_stream_reset()
             set_("nt_st_seconds", 2)
             app._nt_stream_start(True)
@@ -404,35 +410,57 @@ def main():
                 ds = app._nt_stream_session
                 assert ds is not None and ds.device is not None, \
                     app._nt_stream_error
-                # retrain is refused for device synapses (recall works)
-                assert set_("nt_st_rb_mode", "retrain")
-                assert not app._nt_rb_start()
-                assert app._nt_rb_error == rb.DEVICE_RETRAIN
-                assert sr.DEVICE_REFUSAL in dpg.get_value("nt_st_rb_status")
-                assert sr.DEVICE_REFUSAL in dpg.get_value("nt_st_rb_mode_note")
-                assert not app.trainer_running
-                assert set_("nt_st_rb_mode", "recall")
                 dev = ds.device
+                assert dev.time_dynamic and type(dev).__name__ == \
+                    "EcfetV3Array", type(dev).__name__
+                assert any("physical time, full read (vector array)" in x
+                           for x in app._log_lines)
+                assert set_("nt_st_rb_mode", "recall")
                 g0 = digest(dev.conductance())
+                clock0 = dev.clock
                 meter = ds.kw["energy"]
                 before = repr(meter.report("eval"))
                 set_("nt_st_rb_jitter", "3")
                 set_("nt_st_rb_delete", "30")
                 set_("nt_st_rb_noise", "26")
                 set_("nt_st_rb_seconds", 1)
+                set_("nt_st_rb_untrained", True)
                 assert app._nt_rb_start(), app._nt_rb_error
                 pump(app, timeout=600)
                 rd = app._nt_rb_result
-                assert rd["untrained_note"] == rb.DEVICE_NOTE
-                assert all(x["untrained"] is None for b in rd["factors"]
+                assert rd["untrained_note"] != rb.DEVICE_NOTE
+                assert all(x["untrained"] is not None for b in rd["factors"]
                            for x in b["rows"])
-                assert rb.DEVICE_NOTE in dpg.get_value("nt_st_rb_nominal")
-                assert not series_points("jit", "untrained", "hit")
+                assert series_points("jit", "untrained", "hit")
                 assert series_points("jit", "trained", "hit")
                 assert digest(dev.conductance()) == g0
+                assert dev.clock == clock0
                 assert repr(meter.report("eval")) == before
                 assert ds.kw["energy"] is meter
-                device_txt = "device sweep left the device and meter alone"
+                # retrain at each level, device synapses
+                assert set_("nt_st_rb_mode", "retrain")
+                assert sr.DEVICE_REFUSAL not in dpg.get_value(
+                    "nt_st_rb_mode_note")
+                set_("nt_st_rb_train_s", 1)
+                set_("nt_st_rb_repeats", 1)
+                set_("nt_st_rb_jitter", "1")
+                set_("nt_st_rb_delete", "0")
+                set_("nt_st_rb_noise", "26")
+                assert app._nt_rb_start(), app._nt_rb_error
+                pump(app, timeout=600)
+                rr = app._nt_rb_result
+                assert rr["mode"] == sr.RETRAIN, rr
+                assert all(x["trained"] is not None and x["untrained"]
+                           is not None for b in rr["factors"]
+                           for x in b["rows"])
+                assert digest(dev.conductance()) == g0
+                assert set_("nt_st_rb_pick", 0)
+                assert app._nt_rb_show_raster(), app._nt_rb_error
+                pump(app)
+                assert digest(dev.conductance()) == g0
+                device_txt = ("device (v3 vector, physical time): recall with "
+                              "untrained baseline, retrain, retrained raster; "
+                              "device and meter unchanged")
             else:
                 device_txt = f"device check skipped ({app._nt_stream_error})"
             frames(app, 2)
