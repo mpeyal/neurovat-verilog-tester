@@ -1,0 +1,24 @@
+memtorch,memtorch_default,va_param,va_default,match,note
+time_series_resolution,0.0001,time_step,1e-09,NO,MemTorch default 1e-4 s; .va $bound_step 1e-9 s
+r_on,542 ohm -> 2.000827e-10 m,gap_min,2e-10,NO,MemTorch DERIVES gap_min = g_0 ln(I_0 sinh(Vr/V_0) r_on / Vr)
+r_off,218586 ohm -> 1.700000e-09 m,gap_max,1.7e-09,NO,MemTorch DERIVES gap_max the same way from r_off
+gap_init,2e-10,gap_ini,2e-10,yes,MemTorch clamps the initial gap; the .va idt starts at gap_ini unclamped
+g_0,2.5e-10,g0,2.5e-10,yes,
+V_0,0.25,V0,0.25,yes,
+I_0,0.001,I0,0.001,yes,
+read_voltage,0.1,V_read,0.1,yes,twin-only read definition of .G
+T_init,298,T_ini,298.0,yes,
+R_th,2100.0,Rth,2100.0,yes,
+gamma_init,16,gamma0,16.0,yes,.va hard-codes gamma_ini = 16 for V < 0; MemTorch uses gamma_init for both
+beta,0.8,beta,0.8,yes,
+t_ox,1.2e-08,tox,1.2e-08,yes,
+F_min,1400000000.0,F_min,1400000000.0,yes,
+vel_0,10,Vel0,10.0,yes,
+E_a,0.6,Ea,0.6,yes,
+a_0,2.5e-10,a0,2.5e-10,yes,
+delta_g_init,0.02,deltaGap0,0.02,yes,
+model_switch,0,model_switch,0,yes,
+T_crit,450,T_crit,450.0,yes,
+T_smth,500,T_smth,500.0,yes,
+(q = 1.6e-19 hard-coded),1.6e-19,q,1.602176462e-19,NO,.va: `P_Q (1.602176462e-19 in the Accellera constants.vams)
+(k_b = 1.3806503e-23 hard-coded),1.3806503e-23,kb,1.3806503e-23,yes,.va: `P_K

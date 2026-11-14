@@ -14,13 +14,32 @@ _RE_MODULE = re.compile(r"^\s*module\s+([A-Za-z_]\w*)", re.M)
 _RE_PARAM = re.compile(
     r"parameter\s+(?:real|integer)?\s*([A-Za-z_]\w*)\s*=\s*([^;]+);")
 
-# (model_key, keywords) - first match wins, checked against filename + module
+# (model_key, keywords), checked against filename + module.  The MOST SPECIFIC
+# (longest) matching keyword wins; equal lengths fall back to list order.
+# Dynamic twins insert their va_keywords at the front at load time
+# (registry._register_twin), so without the length rule the winner would depend
+# on twin load order.  Generic device words ("memristor", "diffu"[sive]) are
+# deliberately NOT ECFET keywords: an unrelated memristor .va must stay
+# unmapped (the GUI then offers to build a twin) instead of silently
+# simulating the ECFET v1 port.  The v1 source (basic_v1_Diffu_Drft_verilog.va)
+# still maps through "v1"/"basic"/"drft".
 MODEL_HINTS = [
     ("fefet", ("fefet", "ferro", "hzo")),
     ("v3", ("v3", "paper")),
     ("v2", ("v2", "ecram", "practical")),
-    ("v1", ("v1", "basic", "diffu", "drft", "memristor", "ecfet")),
+    ("v1", ("v1", "basic", "drft", "ecfet")),
 ]
+
+
+def match_hint(hint_text, hints=None):
+    """Model key of the longest keyword found in hint_text ("" if none);
+    ties go to the earlier entry in `hints`."""
+    best_key, best_len = "", 0
+    for key, words in (MODEL_HINTS if hints is None else hints):
+        for w in words:
+            if w and len(w) > best_len and w in hint_text:
+                best_key, best_len = key, len(w)
+    return best_key
 
 
 @dataclass
@@ -69,10 +88,7 @@ def parse_va(path):
             pass
 
     hint_text = (va.name + " " + va.module).lower()
-    for key, words in MODEL_HINTS:
-        if any(w in hint_text for w in words):
-            va.model_key = key
-            break
+    va.model_key = match_hint(hint_text)
     # Guard versioned names: if the name says "vN" but we matched a DIFFERENT
     # version family (e.g. "ecfet_v4" falling through to the generic "ecfet"->v1
     # keyword), trust the name's version - remap to vN if that's a real twin,

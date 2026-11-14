@@ -1,0 +1,12 @@
+# figure: Fig. 3c of Sharbati et al., Adv. Mater. 30, 1802353 (2018)
+# source_type: 
+# digitizer: 
+# date: 
+# x: pulse index from the start of one LTP ramp
+# x_unit: pulses
+# y: G
+# y_unit: uS
+# stimulus: ltp_ltd
+# notes: EMPTY SLOT - add measured or digitized points only (never invented ones);
+#        fill source_type (digitized | original), digitizer (tool + version), date.
+x,y

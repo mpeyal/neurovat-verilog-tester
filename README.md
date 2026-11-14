@@ -344,7 +344,7 @@ the desktop uses `vatester/stdp_protocol.py` for the controlled experiment.
 ## CLI quick start
 
 ```
-python selftest.py                                  # 13 sanity checks
+python selftest.py                                  # 35 sanity checks (27 v2/v1 + 8 v3)
 python run_ecfet.py spike                           # single 100 pA / 10 ms gate spike
 python run_ecfet.py potentiate --amp-pA 50 --n 30   # conductance-up pulse train
 python run_ecfet.py depress                         # conductance-down train

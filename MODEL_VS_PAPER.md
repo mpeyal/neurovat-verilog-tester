@@ -134,7 +134,7 @@ anti-symmetric STDP windows; **Fig. 4b** is the *device's actual* measurement â€
 
 ```
 python run_fig3.py              # Fig.3 a/b/c  -> results/fig3_ab.png, results/fig3_c.png
-python selftest.py              # 17/17, includes the Fig.3a -30/-10 assertions
+python selftest.py              # 35/35 (27 v2/v1 + 8 v3), includes the Fig.3a -30/-10 assertions
 python tools/stdp_check.py      # anti-symmetric STDP window numbers
 python tools/verify_fig3a_gui.py   # Fig.3a through the real GUI -> results/ui_fig3a.png
 python tools/verify_stdp_gui.py    # STDP through the real GUI -> results/ui_stdp_delR.png

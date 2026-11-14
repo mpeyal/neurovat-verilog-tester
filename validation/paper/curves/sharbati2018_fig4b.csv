@@ -1,0 +1,12 @@
+# figure: Fig. 4b of Sharbati et al., Adv. Mater. 30, 1802353 (2018)
+# source_type: 
+# digitizer: 
+# date: 
+# x: onset-to-onset dt
+# x_unit: ms
+# y: dG
+# y_unit: uS
+# stimulus: pp_dt*
+# notes: EMPTY SLOT - add measured or digitized points only (never invented ones);
+#        fill source_type (digitized | original), digitizer (tool + version), date.
+x,y

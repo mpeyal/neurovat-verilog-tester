@@ -12,16 +12,22 @@ What each figure asserts (Sharbati et al., Adv. Mater. 2018, 30, 1802353):
   Fig 3b  depression single -50 pA/10 ms @ 227 uS: exact +mirror.
   Fig 3c  LTP/LTD ramp, sampled on the RETAINED G_nv (observables "G_nv (S)",
             NOT G_nv+stdp_lock):
-            - span 120..1150 uS in ~1000 pulses,
+            - 95% of the 120..1150 uS window reached in 800..1500 pulses,
             - >250 distinct nonvolatile states,
             - near-linear up-ramp (R^2),
             - SYMMETRIC LTD: the down-ramp on G_nv returns to Gmin,
-            - inset KILL-SHOT: retained step grows ~G-ratio (4.74x) from 227->1075 uS
-              (the multiplicative signature; an additive law gives ratio 1.0).
+            - CONCAVE-DOWN (saturating) up-ramp: mean per-pulse step in the top
+              third is smaller than in the middle third (top/mid < 0.95).  This
+              guards against the earlier multiplicative law (concave-up, ratio > 1)
+              that verilog/ecfet_v3.va records as replaced by the conserved-x
+              logistic S(x) law.
+            - inset (INFO only, not asserted): retained step at 227 uS vs mid-window
+              (bell-shaped: small near the rails).
   Fig 4b  STDP dG vs dt: 3-exp with the device taus (22 ms/315 ms/19 s),
             peak ~5 uS at dt->0, value ~1 uS at 1800 ms, anti-symmetric.
-  Fig S4  retained dG/G linear in pulse amplitude: ~0.22% @ 50 pA,
-            ~13% @ 3000 pA (windowless multiplicative law; accepted tradeoff).
+  Fig S4  retained dG/G linear in pulse amplitude at small signal (10-200 pA):
+            ~0.22% @ 50 pA; large but bounded ~16% @ 3000 pA, set by S(x)
+            saturation.
   Fig S5  retention self-discharge: +~3.2% R over 13 h toward Gmin.
   Fig S6  endurance: a closed +/- cycle CONSERVES (|net dG_nv| small over 500
             cycles) AND yields two stable, well-separated states.

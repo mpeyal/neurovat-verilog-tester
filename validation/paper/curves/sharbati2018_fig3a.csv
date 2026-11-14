@@ -1,0 +1,12 @@
+# figure: Fig. 3a of Sharbati et al., Adv. Mater. 30, 1802353 (2018)
+# source_type: 
+# digitizer: 
+# date: 
+# x: time after the pulse onset
+# x_unit: s
+# y: R
+# y_unit: ohm
+# stimulus: sp_pot
+# notes: EMPTY SLOT - add measured or digitized points only (never invented ones);
+#        fill source_type (digitized | original), digitizer (tool + version), date.
+x,y

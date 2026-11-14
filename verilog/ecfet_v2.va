@@ -1,7 +1,7 @@
 // ecfet_v2.va - upgraded practical ECFET / ECRAM model
 //
 // Drop-in replacement for basic_v1_Diffu_Drft_verilog with the same pins.
-// Identical dynamics to the Python reference model (ecfet/model_v2.py);
+// Identical dynamics to the Python reference model (simulation_core/model_v2.py);
 // tune parameters in Python first, then copy them here.
 //
 // Improvements over v1:
@@ -91,20 +91,34 @@ parameter real R_eq          = 10k  from (0:inf);   // delithiated equilibrium  
 // spike-timing-dependent plasticity - EDGE-TRIGGERED 3-exponential impulse
 // lock-in, an exact port of the discrete per-pulse rule in model_v2.py (the
 // VERIFIED reference the GUI runs, paper Fig.4b fit R^2=1.0).  Each pulse ONSET
-// is a @(cross) event on the gate current that instantaneously: (1) decays both
-// 3-component eligibility traces by exp(-dt/tau_i) since the previous onset
-// (tau1=22ms, tau2=315ms, tau3=19s = the SAME device taus as the volatile
-// pools), (2) locks A_stdp * sum(OPPOSITE surviving trace) into the nonvolatile
-// state via the accumulator stdp_lock, (3) bumps its own trace components by the
-// normalized weights stdp_c1/2/3.  The +side window is therefore the paper 3-exp
+// is a @(cross) event on the gate current that instantaneously (mirroring
+// EcfetV2.step()): (1) decays both 3-component eligibility traces by
+// exp(-dt/tau_i) since the previous onset (tau1=22ms, tau2=315ms, tau3=19s =
+// the SAME device taus as the volatile pools), (2) locks A_stdp * sum(OPPOSITE
+// surviving trace) into the nonvolatile state and CONSUMES (zeroes) that trace,
+// (3) clamps the nonvolatile state G_nv = V(n_nv) + lock to [Gmin, Gmax],
+// (4) SATURATES its own trace components at the normalized one-pulse weights
+// stdp_c1/2/3 (min(tr + w, w)).  The lock lives in the accumulator stdp_lock;
+// it relaxes with tau_retention exactly like the twin's G_nv (the retention
+// ODE is linear, so the lock part decays toward 0 while n_nv carries G_eq).
+// Twin G_nv == V(n_nv) + V(n_stdp).  The +side window is therefore the paper 3-exp
 //   dG(dt) = A_stdp*(scn1 e^-dt/tau1 + scn2 e^-dt/tau2 + scn3 e^-dt/tau3),
 // peak ~A_stdp at |dt|->0, with the slow 19s tail (~0.7 uS out to 1800 ms); the
-// -side is its anti-symmetric mirror.  Validated against model_v2.py to 4
-// decimals (a single pre/post pair sweep reproduces the GUI window exactly).
+// -side is its anti-symmetric mirror.  Parameter names/defaults are checked
+// against model_v2.py by vatester/tools_ext.check_consistency; waveform-level
+// validation of this .va against a SPICE simulator is not yet done and is
+// tracked in validation/ (being added).
 // This REPLACES the old continuous trace, which under-charged for short pulses
 // and gave a weak, mis-shaped Spectre window.  Same-polarity trains (Fig.3
 // LTP/LTD, panel-c pulses) leave the opposite trace at ~0, so the lock-in stays
 // inert there - Fig.3 is unaffected.  Set A_stdp = 0 to disable STDP.
+// NOT mirrored (cannot be expressed faithfully in continuous time):
+//  * Twin onset = |Ieff| goes from below to >= I_drift_th BETWEEN TWO SAMPLES;
+//    a direct +I -> -I reversal with no sub-threshold sample gives no twin
+//    onset, while I(IGsc) here is continuous and always crosses |I| <
+//    I_drift_th, so @(cross) fires.  Pulses separated by a gap agree.
+//  * Twin per-pulse cycle-to-cycle variability (sigma_c2c, seed; Python
+//    random.gauss stream) has no equivalent here: this .va is sigma_c2c = 0.
 parameter real A_stdp   = 4.5e-6 from [0:inf); // S, window peak at dt->0 (paper ~4.5 uS)
 parameter real tau_stdp = 0.02 from (0:inf);   // s, legacy single-tau (unused by the 3-exp trace)
 parameter real stdp_c1  = 0.39 from [0:inf);   // trace weight on tau1 (22 ms)
@@ -120,7 +134,7 @@ real tau1, tau2, tau3v, csum, cn1, cn2, cn3;
 real absI, Ieff, G_total, x, win, u, sgn, kap;
 // edge-triggered 3-exponential STDP state (1 unit == 1, lock in S)
 real tr_p1, tr_p2, tr_p3, tr_d1, tr_d2, tr_d3;
-real stdp_lock, t_evt, dt_evt;
+real stdp_lock, t_evt, dt_evt, gnv_now, stdp_eff;
 real ssum, scn1, scn2, scn3;
 
 analog begin
@@ -163,37 +177,66 @@ analog begin
     // Each trace component decays with its own device tau (tau1/tau2/tau3v);
     // the lock-in pairs a pulse with sum() of the surviving OPPOSITE trace.
     // A positive-current pulse begins (I(IGsc) crosses +I_drift_th upward):
+    // Both blocks mirror EcfetV2.step() onset branch (twin model_v2.py).
     @(cross(I(IGsc) - I_drift_th, +1)) begin
         dt_evt = $abstime - t_evt;
+        // twin step(): tr_pot/tr_dep *= exp(-dt/tau_i) every step
         tr_p1 = tr_p1*exp(-dt_evt/tau1); tr_p2 = tr_p2*exp(-dt_evt/tau2); tr_p3 = tr_p3*exp(-dt_evt/tau3v);
         tr_d1 = tr_d1*exp(-dt_evt/tau1); tr_d2 = tr_d2*exp(-dt_evt/tau2); tr_d3 = tr_d3*exp(-dt_evt/tau3v);
+        // twin step() 2): G_nv retention, applied to the lock part (linear ODE)
+        stdp_lock = stdp_lock*exp(-dt_evt/tau_retention);
         t_evt = $abstime;
         if (-polarity > 0.0) begin          // positive current potentiates
             stdp_lock = stdp_lock + A_stdp*(tr_d1 + tr_d2 + tr_d3);   // pairs with depression trace
-            tr_p1 = tr_p1 + scn1; tr_p2 = tr_p2 + scn2; tr_p3 = tr_p3 + scn3;
+            tr_d1 = 0.0; tr_d2 = 0.0; tr_d3 = 0.0;                    // twin: consume tr_dep
+            tr_p1 = min(tr_p1 + scn1, scn1);                          // twin: saturate tr_pot
+            tr_p2 = min(tr_p2 + scn2, scn2);                          //   at 1-pulse weight
+            tr_p3 = min(tr_p3 + scn3, scn3);
         end else begin
             stdp_lock = stdp_lock - A_stdp*(tr_p1 + tr_p2 + tr_p3);
-            tr_d1 = tr_d1 + scn1; tr_d2 = tr_d2 + scn2; tr_d3 = tr_d3 + scn3;
+            tr_p1 = 0.0; tr_p2 = 0.0; tr_p3 = 0.0;                    // twin: consume tr_pot
+            tr_d1 = min(tr_d1 + scn1, scn1);                          // twin: saturate tr_dep
+            tr_d2 = min(tr_d2 + scn2, scn2);
+            tr_d3 = min(tr_d3 + scn3, scn3);
         end
+        // twin: G_nv = min(max(G_nv, Gmin), Gmax) at every onset (G_nv = n_nv + lock)
+        gnv_now = V(n_nv,ignd) + stdp_lock;
+        stdp_lock = min(max(gnv_now, Gmin), Gmax) - V(n_nv,ignd);
     end
     // A negative-current pulse begins (I(IGsc) crosses -I_drift_th downward):
     @(cross(I(IGsc) + I_drift_th, -1)) begin
         dt_evt = $abstime - t_evt;
+        // twin step(): tr_pot/tr_dep *= exp(-dt/tau_i) every step
         tr_p1 = tr_p1*exp(-dt_evt/tau1); tr_p2 = tr_p2*exp(-dt_evt/tau2); tr_p3 = tr_p3*exp(-dt_evt/tau3v);
         tr_d1 = tr_d1*exp(-dt_evt/tau1); tr_d2 = tr_d2*exp(-dt_evt/tau2); tr_d3 = tr_d3*exp(-dt_evt/tau3v);
+        // twin step() 2): G_nv retention, applied to the lock part (linear ODE)
+        stdp_lock = stdp_lock*exp(-dt_evt/tau_retention);
         t_evt = $abstime;
         if (polarity > 0.0) begin           // negative current potentiates
             stdp_lock = stdp_lock + A_stdp*(tr_d1 + tr_d2 + tr_d3);
-            tr_p1 = tr_p1 + scn1; tr_p2 = tr_p2 + scn2; tr_p3 = tr_p3 + scn3;
+            tr_d1 = 0.0; tr_d2 = 0.0; tr_d3 = 0.0;                    // twin: consume tr_dep
+            tr_p1 = min(tr_p1 + scn1, scn1);                          // twin: saturate tr_pot
+            tr_p2 = min(tr_p2 + scn2, scn2);
+            tr_p3 = min(tr_p3 + scn3, scn3);
         end else begin
             stdp_lock = stdp_lock - A_stdp*(tr_p1 + tr_p2 + tr_p3);   // pairs with potentiation trace
-            tr_d1 = tr_d1 + scn1; tr_d2 = tr_d2 + scn2; tr_d3 = tr_d3 + scn3;
+            tr_p1 = 0.0; tr_p2 = 0.0; tr_p3 = 0.0;                    // twin: consume tr_pot
+            tr_d1 = min(tr_d1 + scn1, scn1);                          // twin: saturate tr_dep
+            tr_d2 = min(tr_d2 + scn2, scn2);
+            tr_d3 = min(tr_d3 + scn3, scn3);
         end
+        // twin: G_nv = min(max(G_nv, Gmin), Gmax) at every onset (G_nv = n_nv + lock)
+        gnv_now = V(n_nv,ignd) + stdp_lock;
+        stdp_lock = min(max(gnv_now, Gmin), Gmax) - V(n_nv,ignd);
     end
+
+    // locked-in STDP part of the twin's G_nv, relaxing with tau_retention
+    // between onsets (twin step() 2), exact for the linear retention ODE)
+    stdp_eff = stdp_lock * exp(-($abstime - t_evt) / tau_retention);
 
     // total conductance = nonvolatile + volatile pools + locked-in STDP
     G_total = V(n_nv,ignd) + V(n_v1,ignd) + V(n_v2,ignd) + V(n_v3,ignd)
-              + stdp_lock;
+              + stdp_eff;
     if (G_total < Gmin) G_total = Gmin;
     if (G_total > Gmax) G_total = Gmax;
     x = (G_total - Gmin) / (Gmax - Gmin);
@@ -223,7 +266,7 @@ analog begin
     end
 
     if (analysis("ic")) begin
-        V(n_nv,ignd) <+ 1.0 / Rinit;
+        V(n_nv,ignd) <+ min(max(1.0 / Rinit, Gmin), Gmax);   // twin reset(): clamped
         V(n_v1,ignd) <+ 0.0;
         V(n_v2,ignd) <+ 0.0;
         V(n_v3,ignd) <+ 0.0;
@@ -246,7 +289,7 @@ analog begin
     V(mem)  <+ I(mem) / G_total;
     // isolated STDP window readout (S, 1 V == 1 S): plot V(I54.n_stdp) vs dT to
     // compare directly to the GUI window - free of volatile/direct-write background
-    V(n_stdp) <+ stdp_lock;
+    V(n_stdp) <+ stdp_eff;   // twin G_nv == V(n_nv) + V(n_stdp)
 end
 
 endmodule

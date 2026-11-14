@@ -1,0 +1,62 @@
+model,target,unit,paper,twin,spectre,twin_vs_paper,spectre_vs_paper,role,source_type,page_figure
+v2,fig3a_dR_peak,ohm,-30,-29.89,pending,+0.4%,pending,calibration,text,p.3 text; Fig. 3a
+v2,fig3a_dR_peak_pct,%,-0.67,-0.6794,pending,-1.4%,pending,calibration,text,p.3 text; Fig. 3a
+v2,fig3a_dR_settled_fig,ohm,-10,-11.56,pending,-15.6%,pending,calibration,text,p.3 text; Fig. 3a (axis to 4e4 ms)
+v2,fig3a_dR_settled_asym,ohm,-10,-9.58,pending,+4.2%,pending,calibration,text,p.3 text; Fig. 3a
+v2,fig3a_dR_settled_pct,%,-0.22,-0.2177,pending,+1.0%,pending,calibration,text,p.3 text; Fig. 3a
+v2,fig3b_dR_peak,ohm,30,29.85,pending,-0.5%,pending,calibration,text,p.4 text; Fig. 3b
+v2,fig3b_dR_settled_fig,ohm,10,11.58,pending,+15.8%,pending,calibration,text,p.4 text; Fig. 3b
+v2,fig3b_dR_settled_asym,ohm,10,10.23,pending,+2.3%,pending,calibration,text,p.4 text; Fig. 3b
+v2,fig4b_tau1,ms,22,22.24,pending,+1.1%,pending,calibration,text,p.4 text; Fig. 4b and caption
+v2,fig4b_tau2,ms,315,313.4,pending,-0.5%,pending,calibration,text,p.4 text; Fig. 4b and caption
+v2,fig4b_tau3,s,19,38.31,pending,+101.6%,pending,calibration,text,p.4 text; Fig. 4b; fit detail in Fig. S7 (SI missing)
+v2,fig3c_r2_10_90,,0.994,0.9928,pending,-0.1%,pending,calibration,text,p.4 text; Fig. 3c
+v2,fig3c_states,states,>250,1576,pending,met,pending,calibration,text,p.4 text; Fig. 3c caption; abstract p.1
+v2,p2_step_pct,%,<0.4,0.2177,pending,met,pending,calibration,text,p.2 text
+v2,ret_13h_pct,%,-3.2,-1.969,pending,+38.5%,pending,calibration,text,p.4 text; Fig. S5 (SI missing)
+v2,fig2d_modulation_pct,%,700,1049,pending,+49.9%,pending,calibration,text,p.3 text; Fig. 2d
+v2,(diag) R0 (model operating point),ohm,-,4400,pending,-,-,diagnostic,-,-
+v2,(diag) instantaneous step per event,%,-,0.6794,pending,-,-,diagnostic,-,-
+v2,"(diag) dR 35 s after a depression pulse, relative",%,-,0.2632,pending,-,-,diagnostic,-,-
+v2,(diag) Fig.4b fit R^2 (free taus),,-,1,pending,-,-,diagnostic,-,-
+v2,(diag) Fig.4b fit R^2 (taus fixed 22/315/19000 ms),,-,0.9975,pending,-,-,diagnostic,-,-
+v2,(diag) Fig.4b dG at dt = 15 ms,uS,-,1.432,pending,-,-,diagnostic,-,-
+v2,(diag) Fig.4b dG at dt = 1800 ms,uS,-,1.014,pending,-,-,diagnostic,-,-
+v2,(diag) Fig.4b alt dG (peak2 - G(t2)) span / mean,%,-,4.726,pending,-,-,diagnostic,-,-
+v2,(diag) LTD linearity R^2 (10-90 %),,-,0.9866,pending,-,-,diagnostic,-,-
+v2,(diag) LTP reads inside 10-90 %,pulses,-,1274,pending,-,-,diagnostic,-,-
+v2,(diag) LTP median step (10-90 %),uS,-,0.6055,pending,-,-,diagnostic,-,-
+v2,(diag) LTP max per-event step (10-90 %),%,-,0.5012,pending,-,-,diagnostic,-,-
+v2,(diag) G window min,uS,-,100,pending,-,-,diagnostic,-,-
+v2,(diag) G window max,uS,-,1149,pending,-,-,diagnostic,-,-
+v3,fig3a_dR_peak,ohm,-30,-30.02,pending,-0.1%,pending,calibration,text,p.3 text; Fig. 3a
+v3,fig3a_dR_peak_pct,%,-0.67,-0.6823,pending,-1.8%,pending,calibration,text,p.3 text; Fig. 3a
+v3,fig3a_dR_settled_fig,ohm,-10,-10.45,pending,-4.5%,pending,calibration,text,p.3 text; Fig. 3a (axis to 4e4 ms)
+v3,fig3a_dR_settled_asym,ohm,-10,-9.38,pending,+6.2%,pending,calibration,text,p.3 text; Fig. 3a
+v3,fig3a_dR_settled_pct,%,-0.22,-0.2132,pending,+3.1%,pending,calibration,text,p.3 text; Fig. 3a
+v3,fig3b_dR_peak,ohm,30,30.35,pending,+1.2%,pending,calibration,text,p.4 text; Fig. 3b
+v3,fig3b_dR_settled_fig,ohm,10,10.69,pending,+6.9%,pending,calibration,text,p.4 text; Fig. 3b
+v3,fig3b_dR_settled_asym,ohm,10,10.62,pending,+6.2%,pending,calibration,text,p.4 text; Fig. 3b
+v3,fig4b_tau1,ms,22,22.22,pending,+1.0%,pending,calibration,text,p.4 text; Fig. 4b and caption
+v3,fig4b_tau2,ms,315,314.6,pending,-0.1%,pending,calibration,text,p.4 text; Fig. 4b and caption
+v3,fig4b_tau3,s,19,76.02,pending,+300.1%,pending,calibration,text,p.4 text; Fig. 4b; fit detail in Fig. S7 (SI missing)
+v3,fig3c_r2_10_90,,0.994,0.9962,pending,+0.2%,pending,calibration,text,p.4 text; Fig. 3c
+v3,fig3c_states,states,>250,1240,pending,met,pending,calibration,text,p.4 text; Fig. 3c caption; abstract p.1
+v3,p2_step_pct,%,<0.4,0.2132,pending,met,pending,calibration,text,p.2 text
+v3,ret_13h_pct,%,-3.2,-3.133,pending,+2.1%,pending,calibration,text,p.4 text; Fig. S5 (SI missing)
+v3,fig2d_modulation_pct,%,700,857.8,pending,+22.5%,pending,calibration,text,p.3 text; Fig. 2d
+v3,(diag) R0 (model operating point),ohm,-,4400,pending,-,-,diagnostic,-,-
+v3,(diag) instantaneous step per event,%,-,0.6823,pending,-,-,diagnostic,-,-
+v3,"(diag) dR 35 s after a depression pulse, relative",%,-,0.2429,pending,-,-,diagnostic,-,-
+v3,(diag) Fig.4b fit R^2 (free taus),,-,1,pending,-,-,diagnostic,-,-
+v3,(diag) Fig.4b fit R^2 (taus fixed 22/315/19000 ms),,-,0.9979,pending,-,-,diagnostic,-,-
+v3,(diag) Fig.4b dG at dt = 15 ms,uS,-,1.17,pending,-,-,diagnostic,-,-
+v3,(diag) Fig.4b dG at dt = 1800 ms,uS,-,0.6892,pending,-,-,diagnostic,-,-
+v3,(diag) Fig.4b alt dG (peak2 - G(t2)) span / mean,%,-,15.32,pending,-,-,diagnostic,-,-
+v3,(diag) LTD linearity R^2 (10-90 %),,-,0.9973,pending,-,-,diagnostic,-,-
+v3,(diag) LTP linearity R^2 over 10-90 % of x (v3),,-,0.9823,pending,-,-,diagnostic,-,-
+v3,(diag) LTP reads inside 10-90 %,pulses,-,835,pending,-,-,diagnostic,-,-
+v3,(diag) LTP median step (10-90 %),uS,-,1.023,pending,-,-,diagnostic,-,-
+v3,(diag) LTP max per-event step (10-90 %),%,-,0.2633,pending,-,-,diagnostic,-,-
+v3,(diag) G window min,uS,-,120,pending,-,-,diagnostic,-,-
+v3,(diag) G window max,uS,-,1149,pending,-,-,diagnostic,-,-
