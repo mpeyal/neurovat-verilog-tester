@@ -23,6 +23,8 @@ column says so.  Extra rows: the twin on the exact PWL vs the reference
 (dt-independent), and the window-edge gap (twin w_eps = 1e-4, the .va
 default, vs w_eps = 0, MemTorch's hard clip, both exact on the PWL).
 
+Each sampled run is also scored against the exact twin on the PWL
+(*_vs_twin_pwl columns), which is free of Spectre's own edge error.
 Metrics as validation/memtorch_compare.py: per-read G = I/V at each read
 sample vs I_ref = V_k / R(x_ref(t_k_end)) (max, mean, last), current NRMSE
 normalised by the reference current range, wall time.
@@ -214,6 +216,7 @@ def main(argv=None):
         else:
             ts_ref, x_ref, _ = twin_pwl(stim)
             ref_label = "twin exact PWL (no Spectre reference found)"
+        ts_t, x_t, w_t = twin_pwl(stim)          # exact twin on the PWL (second reference)
         curves = []
         g_ref_last = None
         for dt in args.dts:
@@ -224,9 +227,13 @@ def main(argv=None):
                     ("twin Euler", *run_twin_samples(stim, V, dt, integrator=1))]
             for tool, I, wall in runs:
                 m, g_tool, g_ref = metrics(stim, dt, I, V, ts_ref, x_ref, P)
+                mt, _, _ = metrics(stim, dt, I, V, ts_t, x_t, P)
                 dev = float(np.max(np.abs(I - I_mt)) / np.max(np.abs(I_mt)))
                 rows.append({"stimulus": name, "reference": ref_label, "tool": tool,
                              "dt_s": dt, "n_steps": len(V), **m,
+                             "g_max_pct_vs_twin_pwl": mt["g_max_pct"],
+                             "g_mean_pct_vs_twin_pwl": mt["g_mean_pct"],
+                             "i_nrmse_pct_vs_twin_pwl": mt["i_nrmse_pct"],
                              "max_rel_dev_vs_memtorch": dev, "wall_s": wall,
                              "us_per_step": 1e6 * wall / len(V)})
                 if len(g_tool) and dt in (args.dts[0], args.dts[-1]):
@@ -235,7 +242,6 @@ def main(argv=None):
                                     "twin Euler": "x:"}[tool]))
                 g_ref_last = g_ref
         # dt-independent rows: the twin on the exact PWL, and the window edge
-        ts_t, x_t, w_t = twin_pwl(stim)
         rows.append({"stimulus": name, "reference": ref_label, "tool": "twin exact PWL",
                      "dt_s": 0.0, "n_steps": len(ts_t) - 1,
                      **state_metrics(stim, ts_t, x_t, ts_ref, x_ref, P),
@@ -254,10 +260,12 @@ def main(argv=None):
     write(OUT / "memtorch_compare.csv", rows)
     f = lambda v, s: "-" if v != v else format(v, s)  # noqa: E731
     print(f"{'stimulus':14s} {'tool':40s} {'dt':>7s} {'Gmax%':>8s} {'Gmean%':>8s} "
-          f"{'I NRMSE%':>9s} {'dev MT':>8s} {'us/step':>8s}")
+          f"{'I NRMSE%':>9s} {'Gmax%tw':>8s} {'I%tw':>8s} {'dev MT':>8s} {'us/step':>8s}")
     for r in rows:
         print(f"{r['stimulus']:14s} {r['tool']:40s} {r['dt_s']:7.0e} {f(r['g_max_pct'], '8.4f')} "
               f"{f(r['g_mean_pct'], '8.4f')} {f(r['i_nrmse_pct'], '9.4f')} "
+              f"{f(r.get('g_max_pct_vs_twin_pwl', math.nan), '8.4f')} "
+              f"{f(r.get('i_nrmse_pct_vs_twin_pwl', math.nan), '8.4f')} "
               f"{f(r['max_rel_dev_vs_memtorch'], '8.1e')} {f(r['us_per_step'], '8.2f')}")
     return 0
 

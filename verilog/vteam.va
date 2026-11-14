@@ -37,10 +37,12 @@
 // state clipped to [0, 1] (an integration overshoot past a bound never moves
 // R outside [r_on, r_off]).
 //
-// The voltage thresholds v_off / v_on are inherent kinks of dx/dt (the rate is
-// continuous there but its slope jumps for alpha = 1): a simulator that does
-// not place a time point at the threshold crossing of a ramp sees an O(h^2)
-// local error there, so pulse-edge timing is step-sensitive.
+// The voltage thresholds v_off / v_on are inherent: dx/dt switches on within
+// the few ps of a pulse edge that lie past the threshold, and its slope jumps
+// at the PWL corners.  A fixed-order integrator (Spectre's errpreset=
+// conservative selects gear2only) is under-resolved there, so the state change
+// per pulse edge, and thus edge timing, is step-sensitive (measured: +3 % of an
+// ON edge's move at maxstep 1 ps; see validation/README.md, VTEAM).
 //
 // Uses only idt on an implicit node (no $bound_step, no previous-evaluation
 // variables, no events).

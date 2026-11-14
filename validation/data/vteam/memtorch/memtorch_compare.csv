@@ -1,43 +1,43 @@
-stimulus,reference,tool,dt_s,n_steps,i_nrmse_pct,g_max_pct,g_mean_pct,g_last_pct,max_rel_dev_vs_memtorch,wall_s,us_per_step
-s1_vteam,ref_1ps/spectre,MemTorch,1e-09,407,0.110603,3.67789,0.485165,3.67789,0,0.0026876,6.60344
-s1_vteam,ref_1ps/spectre,twin exact,1e-09,407,0.110603,3.67789,0.485165,3.67789,6.61034e-09,0.0043665,10.7285
-s1_vteam,ref_1ps/spectre,twin Euler,1e-09,407,0.110603,3.67789,0.485165,3.67789,2.4362e-16,0.0021542,5.29287
-s1_vteam,ref_1ps/spectre,MemTorch,1e-10,4070,0.0992219,3.67789,0.485165,3.67789,0,0.0240719,5.91447
-s1_vteam,ref_1ps/spectre,twin exact,1e-10,4070,0.0992212,3.67789,0.485165,3.67789,4.00326e-06,0.0428312,10.5236
-s1_vteam,ref_1ps/spectre,twin Euler,1e-10,4070,0.0992219,3.67789,0.485165,3.67789,2.19518e-16,0.0205518,5.04958
-s1_vteam,ref_1ps/spectre,MemTorch,1e-11,40700,0.00679677,0.352759,0.0368864,0.352759,0,0.229847,5.64735
-s1_vteam,ref_1ps/spectre,twin exact,1e-11,40700,0.00679677,0.352759,0.0368864,0.352759,1.40243e-12,0.446591,10.9728
-s1_vteam,ref_1ps/spectre,twin Euler,1e-11,40700,0.00679677,0.352759,0.0368864,0.352759,2.17761e-16,0.20089,4.93586
-s1_vteam,ref_1ps/spectre,MemTorch,1e-12,407000,0.00065305,0.0339796,0.00355067,0.0339796,0,2.26621,5.56807
-s1_vteam,ref_1ps/spectre,twin exact,1e-12,407000,0.00065305,0.0339796,0.00355067,0.0339796,4.01335e-12,4.52774,11.1247
-s1_vteam,ref_1ps/spectre,twin Euler,1e-12,407000,0.00065305,0.0339796,0.00355067,0.0339796,2.1752e-16,2.3692,5.82112
-s1_vteam,ref_1ps/spectre,twin exact PWL,0,407000,0.000553207,0.0287874,0.00300803,0.0287874,nan,4.36437,nan
-s1_vteam,"twin exact PWL, w_eps = 1e-4",window edge: twin w_eps = 0 (hard clip),0,407000,0,0,0,0,nan,nan,nan
-s2_vteam,ref_1ps/spectre,MemTorch,1e-09,327,0.125057,11.6099,1.43443,0,0,0.001366,4.17737
-s2_vteam,ref_1ps/spectre,twin exact,1e-09,327,0.125057,11.6099,1.43443,0,4.90954e-15,0.0042824,13.096
-s2_vteam,ref_1ps/spectre,twin Euler,1e-09,327,0.125057,11.6099,1.43443,0,1.00195e-16,0.0016013,4.89694
-s2_vteam,ref_1ps/spectre,MemTorch,1e-10,3270,0.193335,11.6099,1.43443,0,0,0.0150654,4.60716
-s2_vteam,ref_1ps/spectre,twin exact,1e-10,3270,0.193335,11.6099,1.43443,0,5.31111e-09,0.0316632,9.68294
-s2_vteam,ref_1ps/spectre,twin Euler,1e-10,3270,0.193335,11.6099,1.43443,0,8.8082e-17,0.0214391,6.5563
-s2_vteam,ref_1ps/spectre,MemTorch,1e-11,32700,0.0215937,1.98187,0.167935,0,0,0.230519,7.04951
-s2_vteam,ref_1ps/spectre,twin exact,1e-11,32700,0.0215937,1.98187,0.167935,0,3.981e-05,0.376613,11.5172
-s2_vteam,ref_1ps/spectre,twin Euler,1e-11,32700,0.0215937,1.98187,0.167935,0,1.74401e-16,0.191201,5.84713
-s2_vteam,ref_1ps/spectre,MemTorch,1e-12,327000,0.00146167,0.135031,0.0113773,0,0,1.7385,5.3165
-s2_vteam,ref_1ps/spectre,twin exact,1e-12,327000,0.00146181,0.135031,0.0113773,2.25514e-13,0.000153119,3.0411,9.29999
-s2_vteam,ref_1ps/spectre,twin Euler,1e-12,327000,0.00146167,0.135031,0.0113773,0,1.74159e-16,1.418,4.3364
-s2_vteam,ref_1ps/spectre,twin exact PWL,0,327000,0.00125561,0.11599,0.00977343,2.08167e-13,nan,2.42325,nan
-s2_vteam,"twin exact PWL, w_eps = 1e-4",window edge: twin w_eps = 0 (hard clip),0,327000,3.03391e-05,2.08167e-13,2.08167e-14,2.08167e-13,nan,nan,nan
-sine_memtorch,ref_1ps/spectre,MemTorch,1e-09,200,0.95008,nan,nan,nan,0,0.0007587,3.7935
-sine_memtorch,ref_1ps/spectre,twin exact,1e-09,200,0.95008,nan,nan,nan,1.75635e-16,0.0024696,12.348
-sine_memtorch,ref_1ps/spectre,twin Euler,1e-09,200,0.95008,nan,nan,nan,1.75635e-16,0.0010089,5.0445
-sine_memtorch,ref_1ps/spectre,MemTorch,1e-10,2000,0.0383722,nan,nan,nan,0,0.0094946,4.7473
-sine_memtorch,ref_1ps/spectre,twin exact,1e-10,2000,0.0383722,nan,nan,nan,4.33788e-16,0.0230984,11.5492
-sine_memtorch,ref_1ps/spectre,twin Euler,1e-10,2000,0.0383722,nan,nan,nan,1.73515e-16,0.0099197,4.95985
-sine_memtorch,ref_1ps/spectre,MemTorch,1e-11,20000,0.000246895,nan,nan,nan,0,0.11118,5.55899
-sine_memtorch,ref_1ps/spectre,twin exact,1e-11,20000,0.000246895,nan,nan,nan,1.43118e-15,0.198513,9.92564
-sine_memtorch,ref_1ps/spectre,twin Euler,1e-11,20000,0.000246895,nan,nan,nan,1.73477e-16,0.0788573,3.94286
-sine_memtorch,ref_1ps/spectre,MemTorch,1e-12,200000,2.63731e-05,nan,nan,nan,0,0.997049,4.98525
-sine_memtorch,ref_1ps/spectre,twin exact,1e-12,200000,2.48319e-05,nan,nan,nan,2.25127e-05,2.31905,11.5952
-sine_memtorch,ref_1ps/spectre,twin Euler,1e-12,200000,2.63731e-05,nan,nan,nan,1.73473e-16,1.0293,5.14652
-sine_memtorch,ref_1ps/spectre,twin exact PWL,0,200000,2.26065e-05,nan,nan,nan,nan,2.21973,nan
-sine_memtorch,"twin exact PWL, w_eps = 1e-4",window edge: twin w_eps = 0 (hard clip),0,200000,9.28368e-06,nan,nan,nan,nan,nan,nan
+stimulus,reference,tool,dt_s,n_steps,i_nrmse_pct,g_max_pct,g_mean_pct,g_last_pct,g_max_pct_vs_twin_pwl,g_mean_pct_vs_twin_pwl,i_nrmse_pct_vs_twin_pwl,max_rel_dev_vs_memtorch,wall_s,us_per_step
+s1_vteam,ref_1ps/spectre,MemTorch,1e-09,407,0.110603,3.67789,0.485165,3.67789,3.70775,0.488248,0.111225,0,0.002593,6.37101
+s1_vteam,ref_1ps/spectre,twin exact,1e-09,407,0.110603,3.67789,0.485165,3.67789,3.70775,0.488248,0.111225,6.61034e-09,0.0048792,11.9882
+s1_vteam,ref_1ps/spectre,twin Euler,1e-09,407,0.110603,3.67789,0.485165,3.67789,3.70775,0.488248,0.111225,2.4362e-16,0.0025564,6.28108
+s1_vteam,ref_1ps/spectre,MemTorch,1e-10,4070,0.0992219,3.67789,0.485165,3.67789,3.70775,0.488248,0.0997732,0,0.0190914,4.69076
+s1_vteam,ref_1ps/spectre,twin exact,1e-10,4070,0.0992212,3.67789,0.485165,3.67789,3.70775,0.488248,0.0997725,4.00326e-06,0.0487133,11.9689
+s1_vteam,ref_1ps/spectre,twin Euler,1e-10,4070,0.0992219,3.67789,0.485165,3.67789,3.70775,0.488248,0.0997732,2.19518e-16,0.0246465,6.05565
+s1_vteam,ref_1ps/spectre,MemTorch,1e-11,40700,0.00679677,0.352759,0.0368864,0.352759,0.324065,0.0338843,0.00624301,0,0.243241,5.97644
+s1_vteam,ref_1ps/spectre,twin exact,1e-11,40700,0.00679677,0.352759,0.0368864,0.352759,0.324065,0.0338843,0.00624301,1.40243e-12,0.451972,11.105
+s1_vteam,ref_1ps/spectre,twin Euler,1e-11,40700,0.00679677,0.352759,0.0368864,0.352759,0.324065,0.0338843,0.00624301,2.17761e-16,0.228256,5.60825
+s1_vteam,ref_1ps/spectre,MemTorch,1e-12,407000,0.00065305,0.0339796,0.00355067,0.0339796,0.00519367,0.000542737,9.97544e-05,0,2.46658,6.0604
+s1_vteam,ref_1ps/spectre,twin exact,1e-12,407000,0.00065305,0.0339796,0.00355067,0.0339796,0.00519367,0.000542737,9.97544e-05,4.01335e-12,4.3469,10.6804
+s1_vteam,ref_1ps/spectre,twin Euler,1e-12,407000,0.00065305,0.0339796,0.00355067,0.0339796,0.00519367,0.000542737,9.97544e-05,2.1752e-16,2.26277,5.55963
+s1_vteam,ref_1ps/spectre,twin exact PWL,0,407000,0.000553207,0.0287874,0.00300803,0.0287874,,,,nan,4.15759,nan
+s1_vteam,"twin exact PWL, w_eps = 1e-4",window edge: twin w_eps = 0 (hard clip),0,407000,0,0,0,0,,,,nan,nan,nan
+s2_vteam,ref_1ps/spectre,MemTorch,1e-09,327,0.125057,11.6099,1.43443,0,11.6495,1.44472,0.12623,0,0.0017737,5.42416
+s2_vteam,ref_1ps/spectre,twin exact,1e-09,327,0.125057,11.6099,1.43443,0,11.6495,1.44472,0.12623,4.90954e-15,0.0032833,10.0407
+s2_vteam,ref_1ps/spectre,twin Euler,1e-09,327,0.125057,11.6099,1.43443,0,11.6495,1.44472,0.12623,1.00195e-16,0.0016156,4.94067
+s2_vteam,ref_1ps/spectre,MemTorch,1e-10,3270,0.193335,11.6099,1.43443,0,11.6495,1.44472,0.194153,0,0.0170853,5.22486
+s2_vteam,ref_1ps/spectre,twin exact,1e-10,3270,0.193335,11.6099,1.43443,0,11.6495,1.44472,0.194153,5.31111e-09,0.032133,9.82661
+s2_vteam,ref_1ps/spectre,twin Euler,1e-10,3270,0.193335,11.6099,1.43443,0,11.6495,1.44472,0.194153,8.8082e-17,0.0171205,5.23563
+s2_vteam,ref_1ps/spectre,MemTorch,1e-11,32700,0.0215937,1.98187,0.167935,0,1.86804,0.158284,0.0203414,0,0.16194,4.95228
+s2_vteam,ref_1ps/spectre,twin exact,1e-11,32700,0.0215937,1.98187,0.167935,0,1.86804,0.158284,0.0203414,3.981e-05,0.322849,9.87307
+s2_vteam,ref_1ps/spectre,twin Euler,1e-11,32700,0.0215937,1.98187,0.167935,0,1.86804,0.158284,0.0203414,1.74401e-16,0.168582,5.15542
+s2_vteam,ref_1ps/spectre,MemTorch,1e-12,327000,0.00146167,0.135031,0.0113773,0,0.0190629,0.00160511,0.000207582,0,1.57667,4.82161
+s2_vteam,ref_1ps/spectre,twin exact,1e-12,327000,0.00146181,0.135031,0.0113773,2.25514e-13,0.0190629,0.00160511,0.000206085,0.000153119,3.02653,9.25545
+s2_vteam,ref_1ps/spectre,twin Euler,1e-12,327000,0.00146167,0.135031,0.0113773,0,0.0190629,0.00160511,0.000207582,1.74159e-16,1.55744,4.76282
+s2_vteam,ref_1ps/spectre,twin exact PWL,0,327000,0.00125561,0.11599,0.00977343,2.08167e-13,,,,nan,2.95004,nan
+s2_vteam,"twin exact PWL, w_eps = 1e-4",window edge: twin w_eps = 0 (hard clip),0,327000,3.03391e-05,2.08167e-13,2.08167e-14,2.08167e-13,,,,nan,nan,nan
+sine_memtorch,ref_1ps/spectre,MemTorch,1e-09,200,0.95008,nan,nan,nan,nan,nan,0.95001,0,0.0013302,6.651
+sine_memtorch,ref_1ps/spectre,twin exact,1e-09,200,0.95008,nan,nan,nan,nan,nan,0.95001,1.75635e-16,0.0024962,12.481
+sine_memtorch,ref_1ps/spectre,twin Euler,1e-09,200,0.95008,nan,nan,nan,nan,nan,0.95001,1.75635e-16,0.0012175,6.0875
+sine_memtorch,ref_1ps/spectre,MemTorch,1e-10,2000,0.0383722,nan,nan,nan,nan,nan,0.0383317,0,0.0127861,6.39305
+sine_memtorch,ref_1ps/spectre,twin exact,1e-10,2000,0.0383722,nan,nan,nan,nan,nan,0.0383317,4.33788e-16,0.0238073,11.9037
+sine_memtorch,ref_1ps/spectre,twin Euler,1e-10,2000,0.0383722,nan,nan,nan,nan,nan,0.0383317,1.73515e-16,0.005806,2.903
+sine_memtorch,ref_1ps/spectre,MemTorch,1e-11,20000,0.000246895,nan,nan,nan,nan,nan,0.000224158,0,0.113627,5.68133
+sine_memtorch,ref_1ps/spectre,twin exact,1e-11,20000,0.000246895,nan,nan,nan,nan,nan,0.000224158,1.43118e-15,0.218599,10.93
+sine_memtorch,ref_1ps/spectre,twin Euler,1e-11,20000,0.000246895,nan,nan,nan,nan,nan,0.000224158,1.73477e-16,0.101699,5.08497
+sine_memtorch,ref_1ps/spectre,MemTorch,1e-12,200000,2.63731e-05,nan,nan,nan,nan,nan,9.54585e-06,0,1.07359,5.36796
+sine_memtorch,ref_1ps/spectre,twin exact,1e-12,200000,2.48319e-05,nan,nan,nan,nan,nan,2.23935e-06,2.25127e-05,2.53493,12.6746
+sine_memtorch,ref_1ps/spectre,twin Euler,1e-12,200000,2.63731e-05,nan,nan,nan,nan,nan,9.54585e-06,1.73473e-16,1.42601,7.13006
+sine_memtorch,ref_1ps/spectre,twin exact PWL,0,200000,2.26065e-05,nan,nan,nan,,,,nan,2.45528,nan
+sine_memtorch,"twin exact PWL, w_eps = 1e-4",window edge: twin w_eps = 0 (hard clip),0,200000,9.28368e-06,nan,nan,nan,,,,nan,nan,nan

@@ -665,11 +665,23 @@ git-ignored; their `.json` provenance is tracked.
 * Where the residual comes from: Spectre over-integrates the part of each
   50 ps pulse edge that lies past a threshold (one s2 ON edge: +26 % of the
   edge's move at 100 ps, +4.8 % at 10 ps, +3.2 % at 1 ps; the plateau slope is
-  exact to 1e-12). The thresholds are kinks of the rate and Spectre places no
-  time point at the crossing, so pulse-edge timing is step-sensitive. The
-  twin's edge integral is checked against a 200 000-point quadrature in pytest.
+  exact to 1e-12). The logs show `errpreset=conservative` selects
+  `method=gear2only`; replaying variable-step BDF2 on Spectre's own time points
+  and V reproduces Spectre's state change across that edge to 0.1 % of the
+  excess (100 ps, 10 ps and 1 ps runs). So it is Spectre's gear2 truncation
+  error on the steep, cubic part of the edge. From 10 ps to 1 ps it shrinks
+  only from 4.8 % to 3.2 % (at 10 ps Spectre already cuts its step after each
+  breakpoint), so the 1 ps reference still carries about 7.8e-6 in s per s2 ON
+  pulse (0.12 % in G near R_on). A one-pulse diagnostic deck (-0.25 V / 2 ns,
+  50 ps edges, from x = d) converges onto the twin as h^2: excess over the two
+  edges' exact move 3.2 % (maxstep 1 ps), 0.039 % (0.1 ps), 0.0004 % (0.01 ps);
+  with `method=traponly` 0.88 % (1 ps) and 0.0099 % (0.1 ps). The twin's edge
+  integral is also checked against a 200 000-point quadrature in pytest.
 * MemTorch: its Euler step is exact for VTEAM on held samples (the rate depends
   on V only), so MemTorch equals the exact twin on the same samples; its error
-  against Spectre is the sampling of the 50 ps edges: s1_vteam 3.68 % (1 ns),
-  0.35 % (10 ps), 0.034 % (1 ps); s2_vteam 11.6 / 1.98 / 0.135 %
-  (`data/vteam/memtorch/memtorch_compare.csv`).
+  is the sampling of the 50 ps edges. Against Spectre 1 ps: s1_vteam 3.68 %
+  (1 ns), 0.35 % (10 ps), 0.034 % (1 ps); s2_vteam 11.6 / 1.98 / 0.135 %.
+  Against the exact twin on the PWL (no Spectre edge error): s1 3.71 / 0.32 /
+  0.0052 %, s2 11.6 / 1.87 / 0.019 % (`data/vteam/memtorch/memtorch_compare.csv`).
+  1 ns and 0.1 ns give the same G error because both midpoint grids turn each
+  50 ps-edged pulse into the same rectangle.
