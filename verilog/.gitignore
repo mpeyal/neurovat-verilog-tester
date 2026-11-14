@@ -3,3 +3,5 @@
 *
 !.gitignore
 !ecfet*.va
+# VTEAM: public model (NeuroVAT's own Spectre form of Kvatinsky 2015, MemTorch variant)
+!vteam.va
