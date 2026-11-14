@@ -12,7 +12,9 @@ The NeuroVAT side is :func:`neurovat.masquelier.run` (ideal synapses,
   ``w_j exp(-(t_end - t_j)/tau)``, t_end = (k+1) dt.
 * Threshold T tested at the END of each step; the output spike is stamped
   t_end. Refractory: the neuron may fire only when ``t_end - t_post > t_ref``
-  (strict). A spike clears both PSP accumulators.
+  (strict, with a 1e-6 dt tolerance so that rounding of the absolute
+  times cannot move the boundary step; before that fix NeuroVAT took
+  1.0 or 1.1 ms by chance). A spike clears both PSP accumulators.
 * STDP: additive, nearest-spike with strict LTP/LTD alternation per synapse
   (Hathway & Goodman 2018). Post spike: each afferent with a pre spike since
   the previous post gets ``+a_plus exp(-(t_post - t_lastpre)/tau_plus)``. Pre

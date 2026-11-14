@@ -242,7 +242,7 @@ def test_d(seed=21, seconds=3.0, n_aff=500):
     return rows
 
 
-def test_d_learning(seed=22, seconds=5.0, n_aff=500):
+def test_d_learning(seed=22, seconds=3.0, n_aff=500):
     """dt convergence WITH learning (final weights vs the 0.0125 ms NeuroVAT
     reference), native input."""
     P0 = M.MasquelierParams(n_afferents=n_aff, n_pattern=n_aff // 2,

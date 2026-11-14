@@ -1,0 +1,20 @@
+engine_part,neurovat_source,neurovat_value,brian2_or_snntorch,mapping_note
+stream neuron,masquelier.run (SRM),"u = K sum w (e^-s/tau_m - e^-s/tau_s) + eta",brian2 NeuronGroup xm/xs/em/es method=exact,"exact decays; same as NeuroVAT accumulators (no ODE error)"
+tau_m,MasquelierParams.tau_m,10 ms,tau_m,identical
+tau_s,MasquelierParams.tau_s,2.5 ms,tau_s,identical
+threshold,MasquelierParams.threshold,500 (paper),thr,"tested at end of each step; spike stamped t_end = Brian2 t"
+eta kernel,K1/K2,"2 / 4, cut at 7 tau_m",em/es traces set to 1 at reset,"eta window s < 7 tau_m - 1e-6 dt"
+refractory,t_ref_ms,"1 ms, strict >",ready = (t - tpost) > t_ref + 1e-6 dt,"= 11 steps at dt 0.1 ms (after bug fix 2)"
+reset,post spike,"PSP accumulators cleared",reset: xm = xs = 0,"schedule groups, thresholds, resets, synapses"
+sim dt,sim_dt_ms,0.1 ms,defaultclock.dt,identical (d: 0.4 .. 0.025 ms)
+input,make_stream,"exact off-grid times (1 ms generation grid)",SpikeGeneratorGroup,"binned floor(t/dt); same-bin duplicates dropped; a-c feed the gridded stream to both"
+STDP form,masquelier.run,"additive, nearest-spike, strict LTP/LTD alternation",on_pre / on_post with ltp_open / ltd_open flags,"post pathway before pre pathway"
+a_plus,a_plus,0.03125,a_plus,identical
+a_minus,a_minus_ratio*a_plus,0.0265625,a_minus,identical
+tau_plus,tau_plus,16.8 ms,apre event-driven trace (set to 1),"nearest: trace set, not incremented"
+tau_minus,tau_minus,33.7 ms,apost event-driven trace (set to 1),"nearest"
+STDP windows,cutoff_tau,7 tau,trace >= exp(-7),identical
+weight bounds,Synapses.update,clip [0 1],clip(w 0 1),identical
+w_init,w_init,0.475,syn.w,identical
+Trainer LIF,network.present / lif.probe_lif_wave,"forward Euler v += dt/tau (v_rest - v + I)",snn.Leaky beta = 1 - dt/tau input dt/tau (v_rest + I),"reset_mechanism none; NeuroVAT reset/refractory/theta written around it"
+Trainer LIF exact,surrogate mode,"alpha = exp(-dt/tau)",snn.Leaky beta = exp(-dt/tau) input (1-beta)(v_rest + I),"residual vs STDP-mode LIF = Euler truncation O(dt/tau)"
