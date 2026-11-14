@@ -85,14 +85,21 @@ def reference(tr, spikes, target=None):
             "membrane": membranes[-1].detach().numpy()}
 
 
-def data(seed):
+def data(seed, n_in=4, n_cls=2, n=30):
+    """Synthetic classes. The default (4 inputs, 2 classes, 30 samples) is the
+    original fixed set; other sizes get seeded random binary-ish prototypes."""
     rng = np.random.default_rng(seed)
+    if (n_in, n_cls) == (4, 2):
+        protos = [np.array([.9, .1, .8, .2]), np.array([.1, .9, .2, .8])]
+    else:
+        prng = np.random.default_rng([seed, n_in, n_cls])
+        protos = [np.where(prng.random(n_in) < .5, .85, .15) for _ in range(n_cls)]
     result = []
-    for i in range(30):
-        target = i % 2
-        base = np.array([.9, .1, .8, .2]) if target == 0 else np.array([.1, .9, .2, .8])
-        result.append((np.clip(base+rng.normal(0, .045, 4), 0, 1), target))
-    return result[:16], result[16:22], result[22:]
+    for i in range(n):
+        target = i % n_cls
+        result.append((np.clip(protos[target]+rng.normal(0, .045, n_in), 0, 1), target))
+    a, b = int(round(n*16/30)), int(round(n*22/30))
+    return result[:a], result[a:b], result[b:]
 
 
 def reference_stdp(tr, spikes, target=None, learn=False):
@@ -178,8 +185,9 @@ def reference_stdp(tr, spikes, target=None, learn=False):
             "layers": [s.numpy() for s in layers], "membrane": membrane.numpy(), "grads": []}
 
 
-def compare(cls, hidden, seed, rule="surrogate", *, input_kind=None, write_amp=None, evidence_path=None):
-    train, validation, test = data(seed)
+def compare(cls, hidden, seed, rule="surrogate", *, input_kind=None, write_amp=None, evidence_path=None,
+            grid=(2, 2), n_out=2, epochs=8, n_samples=30):
+    train, validation, test = data(seed, grid[0]*grid[1], n_out, n_samples)
     kind = input_kind or ("voltage" if cls is FeFET else "current")
     amp = write_amp if write_amp is not None else (1. if kind == "voltage" else 50e-12)
     def make_device():
@@ -191,7 +199,7 @@ def compare(cls, hidden, seed, rule="surrogate", *, input_kind=None, write_amp=N
         return device
     app = Trainer(make_device, kind, NeuronParams(),
                   STDPParams(pot_amp=amp, dep_amp=amp, sg_lr=.04),
-                  NetConfig(grid_h=2, grid_w=2, n_out=2, hidden_layers=hidden,
+                  NetConfig(grid_h=grid[0], grid_w=grid[1], n_out=n_out, hidden_layers=hidden,
                             present_ms=40, seed=seed, learn_rule=rule),
                   patterns=[(str(i), x) for i, (x, y) in enumerate(train)],
                   targets=[y for x, y in train])
@@ -220,9 +228,9 @@ def compare(cls, hidden, seed, rule="surrogate", *, input_kind=None, write_amp=N
         app.restore_state(saved_app); ref.restore_state(saved_ref)
         return float(np.mean(np.array(ap) == targets)), float(np.mean(np.array(rp) == targets))
 
-    for epoch in range(8):
+    for epoch in range(epochs):
         if rule == "surrogate":
-            app.lr_scale = ref.lr_scale = .15 + .85*.5*(1+math.cos(math.pi*epoch/7))
+            app.lr_scale = ref.lr_scale = .15 + .85*.5*(1+math.cos(math.pi*epoch/max(epochs-1, 1)))
         epoch_loss = 0.
         for i in rng.permutation(len(train)):
             x, target = train[i]
