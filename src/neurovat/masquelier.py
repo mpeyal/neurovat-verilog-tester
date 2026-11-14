@@ -482,6 +482,9 @@ class Synapses:
             return
         dw = self.pending[rows, cols]
         amps = self.pot_sign * np.where(dw > 0, self.pot_gain, self.dep_gain) * dw
+        if self.dynamic and self.energy is not None:
+            # the meter reads conductance(): bring the devices to now first
+            self.device.advance(self.dev_time(t_ms), np.unique(cols))
         g0 = self.conductance()[rows, cols] if self.energy is not None else None
         current = None
         if self.energy is not None and hasattr(self.device, "write_current"):
@@ -668,6 +671,8 @@ def run(P=None, device=None, write_window_ms=0.0, write_gain=1.0,
                     b0 = S.ptr[(sk + 1) * S.section_steps]
                     pre, post = _section_rasters(S, a0, b0, sk * P.pattern_ms,
                                                  n_bins, bin_ms, sec_posts, m)
+                    if syn.dynamic:
+                        syn.device.advance(syn.dev_time(t_end))
                     G = syn.conductance()
                     energy.record_forward(phase, [G], [pre, post])
                 spikes, sec_posts = sec_posts, []

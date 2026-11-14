@@ -49,6 +49,10 @@ CALIBRATED, AS_SET = "calibrated", "as set"
 # (non-volatile + volatile); legacy = stepped only during write pulses and
 # read at G_nv (the behaviour before Gate B)
 PHYSICAL, LEGACY = "physical time, full read", "legacy (writes only, G_nv)"
+# auto: physical time when the twin has a vectorised array (ECFET v3),
+# legacy for twins on the scalar adapter (v2, RRAM, ...), where physical time
+# costs ~8x the run time (v2, 3 x 784 synapses: 25 s vs 3 s per stream s)
+AUTO = "auto (physical if vectorised)"
 CHUNK_S = 2.0                       # live-plot resolution
 # live Learning-tab series (tag nt_st_s_<key>): pattern windows answered %,
 # other windows answered %, false alarms /s, latency ms
@@ -138,8 +142,8 @@ STREAM_CONTROLS = [
     ("nt_st_window", "stream: device write window ms (one pulse per synapse per window)"),
     ("nt_st_pulse", f"stream: device pulse amplitude, {CALIBRATED} (one pulse = "
                     f"one STDP step) | {AS_SET} (nt_potamp / nt_depamp)"),
-    ("nt_st_dyn", f"stream: device dynamics, {PHYSICAL} (idle-time stepping, "
-                  f"read = full conductance) | {LEGACY}"),
+    ("nt_st_dyn", f"stream: device dynamics, {AUTO} (default) | {PHYSICAL} "
+                  f"(idle-time stepping, read = full conductance) | {LEGACY}"),
     ("nt_st_tabs", "stream view tab: nt_st_tab_raster | nt_st_tab_net | "
                    "nt_st_tab_pat | nt_st_tab_learn | nt_st_tab_weights | "
                    "nt_st_tab_energy | nt_st_tab_robust"),
@@ -331,7 +335,7 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                               "below stands for one STDP step, whatever "
                               "the device does with it.")
             self._ctl_row("dynamics", "nt_st_dyn", "combo",
-                          items=[PHYSICAL, LEGACY], dv=PHYSICAL,
+                          items=[AUTO, PHYSICAL, LEGACY], dv=AUTO,
                           tip="Device synapses only. Physical time: every "
                               "device keeps its own clock and is stepped "
                               "through the idle time between writes (one "
@@ -341,7 +345,11 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                               "+ volatile) every 1 ms. Legacy: the device "
                               "moves only during write pulses and is read "
                               "at its retained conductance G_nv. Pulses "
-                              "are sized on the retained step in both.")
+                              "are sized on the retained step in both. "
+                              "Auto: physical time for twins with a "
+                              "vectorised array (ECFET v3), legacy for the "
+                              "others (physical time on the per-synapse "
+                              "Python adapter is ~8x slower).")
         if dpg.does_item_exist("nt_st_img_pick"):
             dpg.set_value("nt_st_img_pick", "0")
         with dpg.group(tag="nt_st_img_extra", show=False):
@@ -700,7 +708,8 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                 s.startswith("as") else None
         if tag == "nt_st_dyn":
             return PHYSICAL if s.startswith(("phy", "full")) else LEGACY \
-                if s.startswith(("leg", "nv", "g_nv")) else None
+                if s.startswith(("leg", "nv", "g_nv")) else AUTO \
+                if s.startswith("auto") else None
         return val
 
     # ---- start / stop -----------------------------------------------
@@ -825,13 +834,12 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                 "width": max(self._nt_getu("nt_pwidth", 10.0), 0.01) * 1e-3,
                 "window": max(float(g("nt_st_window", 50.0)), 0.0),
                 "calibrate": g("nt_st_pulse", CALIBRATED) == CALIBRATED,
-                "physical": (self._nt_st_set_combo(
-                    "nt_st_dyn", g("nt_st_dyn", PHYSICAL)) or PHYSICAL)
-                == PHYSICAL,
+                "dyn": (self._nt_st_set_combo(
+                    "nt_st_dyn", g("nt_st_dyn", AUTO)) or AUTO),
                 "power": power, "power_note": note}
             d = cfg["device"]
             key += [dev["key"], d["pot"], d["dep"], d["width"], d["window"],
-                    d["calibrate"], d["physical"]]
+                    d["calibrate"], d["dyn"]]
         return tuple(key), cfg
 
     def _nt_st_make_arch(self, inp, cfg, key=None):
@@ -1024,7 +1032,11 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                     session = Session(P, cfg["n_pat"], **given)
                 else:
                     fac = (neuro.vector_twin_factory(d["make"])
-                           if d["physical"] else neuro.twin_factory(d["make"]))
+                           if d["dyn"] != LEGACY else None)
+                    if fac is None or (d["dyn"] == AUTO
+                                       and fac.kind != "vector"):
+                        fac = neuro.twin_factory(d["make"])
+                    physical = getattr(fac, "kind", None) is not None
                     array = fac(cfg["n_out"], cfg["aff"])
                     energy = EnergyMeter([(cfg["n_out"], cfg["aff"])],
                                          [d["kind"]], d["power"], 1e-3)
@@ -1062,7 +1074,7 @@ class NetworkStreamMixin(NetworkStreamViewsMixin, NetworkStreamRobustMixin):
                         f"(STDP step {a_minus:.4f}); width {d['width']:.3g} s; "
                         + (f"physical time, full read ("
                            f"{getattr(fac, 'kind', 'scalar')} array)"
-                           if d["physical"] else "legacy: writes only, G_nv "
+                           if physical else "legacy: writes only, G_nv "
                            "read"))))
                     session = Session(
                         P, cfg["n_pat"], array, write_window_ms=d["window"],

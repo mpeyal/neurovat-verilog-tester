@@ -288,9 +288,10 @@ one fixed keyed test stream, one factor changed at a time: jitter
 comma lists, '' = the Masquelier 2008 levels plus the trained value.
 nt_st_rb_seconds per level (default 30), nt_st_rb_untrained also runs an
 untrained copy (device synapses: a copy of the start device).
-nt_st_dyn picks the device dynamics: "physical time, full read" (default:
-devices relax between writes, the neuron reads the full conductance) or
-"legacy (writes only, G_nv)".
+nt_st_dyn picks the device dynamics: "auto (physical if vectorised)"
+(default: physical time for ECFET v3, legacy for other twins), "physical
+time, full read" (devices relax between writes, the neuron reads the full
+conductance) or "legacy (writes only, G_nv)".
 The other settings stay at the values of the last Train. It is counted over
 the WHOLE run (hits = pattern windows answered, false = other windows with
 an output spike), a different denominator from Test's last-third verdict,

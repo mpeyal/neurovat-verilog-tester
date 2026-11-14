@@ -111,8 +111,10 @@ Virtuoso** on a shared university host.
   every `read_ms` (1 ms) with `device.peek(t)`; weight = `clip((G - g_min)
   / (g_max - g_min), 0, 1)`, linear in conductance. Static devices and
   ideal weights take none of these paths. Stream mode combo `nt_st_dyn`:
-  "physical time, full read" (default for device synapses; uses
-  `vector_twin_factory`) | "legacy (writes only, G_nv)". The supervised
+  "auto (physical if vectorised)" (default: physical time for ECFET v3 via
+  `vector_twin_factory`, legacy for scalar-adapter twins, where physical time
+  measured ~8x slower: v2 3x784, 25 s vs 3 s per stream s) | "physical time,
+  full read" | "legacy (writes only, G_nv)". The supervised
   Trainer (`CrossbarSNN`) still uses the serial / G_nv adapter. C6
   ablation: `validation/ablation/run_ablation.py` (ideal / NeuroSim fitted
   curve / v3 static / v3 physical time).
