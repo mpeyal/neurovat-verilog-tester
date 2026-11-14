@@ -1,0 +1,10 @@
+{
+  "test": "b_pair",
+  "pairs": 21,
+  "nv_post": 21,
+  "b2_post": 21,
+  "post_match": 1.0,
+  "max_abs_dw_nv_b2": 1.6653345369377348e-15,
+  "max_abs_dw_nv_analytic": 4.9439619065339e-17,
+  "driver_latency_ms": 1.1000000000003638
+}

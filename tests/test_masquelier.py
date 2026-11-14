@@ -524,3 +524,59 @@ def test_keyed_runs_keep_the_background_whatever_the_deletion_and_jitter(given):
         np.testing.assert_array_equal(S.t[S.kind == 0], ref.t[ref.kind == 0])
         np.testing.assert_array_equal(S.aff[S.kind == 0], ref.aff[ref.kind == 0])
         assert not np.array_equal(S.t[S.kind == 1], ref.t[ref.kind == 1])
+
+
+def test_two_pre_spikes_in_one_step_depress_once_by_the_first():
+    """Nearest-spike rule: only an afferent's FIRST pre spike after a post is
+    depressed, even when its second spike falls in the same 0.1 ms step
+    (found by the Brian2 cross-check, validation/engine)."""
+    import math
+    from neurovat.masquelier import Stream
+    P = MasquelierParams(n_afferents=9, n_pattern=0, threshold=4.0,
+                         base_s=0.2, n_repeats=1)
+
+    def stream(aff, t):
+        aff, t = np.asarray(aff, np.int32), np.asarray(t, float)
+        o = np.argsort(t, kind="stable")
+        aff, t = aff[o], t[o]
+        ptr = np.searchsorted(np.minimum(t // 1.0, 199), np.arange(201))
+        return Stream(ptr=ptr, aff=aff, t=t, label=np.full(4, -1),
+                      section_steps=50, duration_ms=200.0,
+                      kind=np.zeros(aff.size, np.int8), extra=np.full(4, -1))
+    w0 = np.r_[np.ones(8), 0.5]
+    drive = (list(range(8)), [10.0] * 8)        # 8 synchronous drivers -> 1 post
+    tp = run(P, stream=stream(*drive), weights=w0)["post_t_ms"][0]
+    one = run(P, stream=stream(drive[0] + [8], drive[1] + [tp + 5.01]),
+              weights=w0)["weights"][8]
+    two = run(P, stream=stream(drive[0] + [8, 8],
+                               drive[1] + [tp + 5.01, tp + 5.05]),
+              weights=w0)["weights"][8]
+    expected = 0.5 - P.a_minus_ratio * P.a_plus * math.exp(-5.01 / P.tau_minus)
+    assert one == pytest.approx(expected, abs=1e-12)
+    assert two == pytest.approx(expected, abs=1e-12)
+
+
+@pytest.mark.parametrize("t_drive", [10.0, 20.0, 36.3])
+def test_refractory_ends_on_the_same_step_at_any_absolute_time(t_drive):
+    """t_end - t_post for 10 steps of 0.1 ms is 1 ms +- rounding; it used to
+    clear the strict 1 ms refractory test by chance (a 1.0 ms instead of a
+    1.1 ms interval after the spike at 37.4 ms; found by the Brian2
+    cross-check). Saturating input fires the neuron as soon as it is ready."""
+    from neurovat.masquelier import Stream
+    P = MasquelierParams(n_afferents=16, n_pattern=0, threshold=4.0,
+                         base_s=0.1, n_repeats=1)
+    k0 = int(round(t_drive / 0.1))
+    ks = np.arange(k0 + 11, k0 + 40)
+    k = np.r_[np.full(8, k0), np.tile(ks, 8)]
+    aff = np.r_[np.arange(8), np.repeat(np.arange(8, 16), ks.size)].astype(np.int32)
+    t = k * 0.1
+    t = np.where(np.floor(t / 0.1) < k, np.nextafter(t, np.inf), t)
+    o = np.argsort(t, kind="stable")
+    aff, t = aff[o], t[o]
+    S = Stream(ptr=np.searchsorted(np.minimum(t // 1.0, 99), np.arange(101)),
+               aff=aff, t=t, label=np.full(2, -1), section_steps=50,
+               duration_ms=100.0, kind=np.zeros(aff.size, np.int8),
+               extra=np.full(2, -1))
+    post = run(P, stream=S, weights=np.ones(16), learn=False)["post_t_ms"]
+    assert len(post) >= 4
+    np.testing.assert_allclose(np.diff(post[:4]), 1.1, atol=1e-9)

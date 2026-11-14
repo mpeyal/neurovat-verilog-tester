@@ -1,0 +1,20 @@
+{
+  "loc_model": 75,
+  "loc_file": 139,
+  "non_ode_constructs": [
+    "pulse-onset edge detection (prev flag) in run_regularly",
+    "trace harvest + consume + saturate at onset",
+    "stdp_lock clamp to [Gmin, Gmax] - G_nv at onset",
+    "x rail gating and clip at [0, 1]",
+    "1 pA drift threshold / leak scale on I",
+    "G output clip"
+  ],
+  "pitfalls": [
+    "sympy cannot differentiate int()/comparisons inside ODE subexpressions under rk4: the gated write rate and sign had to move into the per-step event code (held over each step)",
+    "the drive as TimedArray inside an ODE also fails (non-real comparison); it is latched into a parameter each step",
+    "fixed dt: the random train's 1 us edges are not on the grid; the step-averaged current keeps the charge exact"
+  ],
+  "dt_s": 0.0001,
+  "method": "rk4",
+  "codegen": "numpy"
+}
