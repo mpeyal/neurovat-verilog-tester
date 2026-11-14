@@ -97,3 +97,29 @@ p = min(1, 2 P(X <= min(b, c))), X ~ Bin(b + c, 1/2); p = 1 if b + c = 0.
   primary; they are reported as supporting or not.
 - A crashed run is re-run with the same seed and arm; no seed is replaced or
   dropped. Results are reported whatever they are.
+
+## Addendum (2026-11-14), committed while the main run was in progress
+
+Written before any outcome of this run was looked at. The engine finding
+below came from the C5 open-loop replay against Spectre.
+
+1. **Engine finding.** The physical-time v3 read is inaccurate inside write
+   pulses. `EcfetV3Array` (like `model_v3.step`) treats a whole 10 ms pulse
+   as one step, so the new EDL pool never decays within the pulse. During a
+   pulse, `peek()` returns the post-pulse state, a look-ahead of up to
+   10 ms. Against Spectre, the worst error outside pulses is 1.96-4.89 % of
+   range; inside pulses it reaches 52 %.
+2. **Fix.** An engine fix (sub-stepping and a causal read) goes on a
+   separate branch. `masquelier.run` and the design above stay as they are.
+3. **Primary result moves to the fixed engine.** The physical-time arms
+   (`v3_time` and every attribution read arm `v3_time_nv` / `_p1` / `_p2` /
+   `_p3`) will be re-run on the fixed engine. That re-run keeps the same
+   seeds (101-130), arms, gaps, outcomes, tests and decision rule, and its
+   result is the primary result. The runs made under this file at commit
+   `91dee5f` (code `9842b33`) are reported only as an old-engine (pre-fix)
+   sensitivity row, and all their `v3_time` and attribution numbers are
+   labelled "old engine (pre-fix)".
+4. **Arms that carry over.** `ideal`, `neurosim`, `v3_static` and
+   `v3_static_gain` do not use the changed path. They carry over to the
+   primary analysis once they are shown to be bit-identical on the fixed
+   engine (same seeds, same runs.jsonl fields except wall time).
