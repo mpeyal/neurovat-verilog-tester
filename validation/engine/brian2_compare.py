@@ -209,6 +209,20 @@ DTS = (0.4, 0.2, 0.1, 0.05, 0.025)
 DT_REF = 0.0125
 
 
+def early(ref, test, n=20, tol=1.0):
+    """The tonically firing neuron is phase-neutral (a spike clears the PSP
+    sums), so a sub-dt shift is never corrected and the trains drift apart
+    over seconds; matching whole trains then measures that drift. Reported
+    instead: the index-paired error over the first n spikes and the time of
+    the first spike that is more than tol ms off."""
+    ref, test = np.sort(np.asarray(ref, float)), np.sort(np.asarray(test, float))
+    k = min(n, ref.size, test.size)
+    d = np.abs(test[:k] - ref[:k])
+    return {f"first{n}_mean_abs_dt_ms": float(d.mean()) if k else float("nan"),
+            f"first{n}_max_abs_dt_ms": float(d.max()) if k else float("nan"),
+            "first_divergence_ms": C.first_divergence(ref, test, tol)}
+
+
 def test_d(seed=21, seconds=3.0, n_aff=500):
     """dt convergence, fixed weights, native input. Reference: NeuroVAT at
     0.0125 ms (exact input times; only the threshold sampling remains)."""
@@ -231,6 +245,7 @@ def test_d(seed=21, seconds=3.0, n_aff=500):
                          "match_frac_1ms": m["match_frac"],
                          "mean_abs_dt_ms": m["mean_abs_dt_ms"],
                          "max_abs_dt_ms": m["max_abs_dt_ms"],
+                         **early(tref, t),
                          "dropped_same_bin": b["n_dropped"] if eng == "brian2" else 0})
         m2 = C.match_spikes(r["post_t_ms"], b["post_t_ms"], dt * 1.0001)
         rows.append({"test": "d_dt", "engine": "nv_vs_b2", "dt_ms": dt,
@@ -261,8 +276,7 @@ def test_d_learning(seed=22, seconds=3.0, n_aff=500):
                          "n_ref": m["n_ref"], "n": m["n_test"],
                          "match_frac_1ms": m["match_frac"],
                          "mean_abs_dt_ms": m["mean_abs_dt_ms"],
-                         "first_divergence_ms": C.first_divergence(
-                             ref["post_t_ms"], x["post_t_ms"], 1.0),
+                         **early(ref["post_t_ms"], x["post_t_ms"]),
                          "weight_nrmse": C.nrmse(x["weights"], ref["weights"], span=1.0)})
         print("  dL dt", dt, rows[-2:], flush=True)
     return rows
@@ -305,9 +319,9 @@ def figures(trace_a, rows_b, rows_d):
         for eng, mk in (("neurovat", "o-"), ("brian2", "s--")):
             rr = [r for r in rows_d if r["engine"] == eng and r["test"] == "d_dt"]
             ax.loglog([r["dt_ms"] for r in rr],
-                      [max(r["mean_abs_dt_ms"], 1e-6) for r in rr], mk, label=eng)
+                      [max(r["first20_mean_abs_dt_ms"], 1e-6) for r in rr], mk, label=eng)
         ax.set_xlabel("dt (ms)")
-        ax.set_ylabel(f"mean |spike time error| vs NeuroVAT @ {DT_REF} ms (ms)")
+        ax.set_ylabel(f"first-20-spike mean |error| vs NeuroVAT @ {DT_REF} ms (ms)")
         ax.legend(frameon=False, fontsize=8)
         fig.tight_layout()
         fig.savefig(C.FIGURES / "d_dt_convergence.png", dpi=150)
