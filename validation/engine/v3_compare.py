@@ -58,8 +58,16 @@ def main(argv=None):
             g_s = np.interp(tc, sp["t_s"], sp["G_S"])
             m_bs = metrics(np.interp(tc, t, G), g_s)
             m_ts = metrics(np.interp(tc, tg, tw["G_S"]), g_s)
+            # a fixed step puts an off-grid onset (and its lock-in jump) up
+            # to one dt early: score also without the samples within one
+            # dt of a pulse edge
+            edges = np.asarray(st.waveform().edges, float)
+            far = np.abs(tc[:, None] - edges[None, :]).min(1) > args.dt * 1.0001
+            g_bc = np.interp(tc, t, G)
+            m_far = {"maxerr": float(np.abs(g_bc - g_s)[far].max()) / m_bs["range"]}
             row.update({"b2_vs_spectre_nrmse_pct": 100 * m_bs["nrmse"],
                         "b2_vs_spectre_maxerr_pct": 100 * m_bs["maxerr"],
+                        "b2_vs_spectre_maxerr_off_edge_pct": 100 * m_far["maxerr"],
                         "twin_vs_spectre_nrmse_pct": 100 * m_ts["nrmse"],
                         "twin_vs_spectre_maxerr_pct": 100 * m_ts["maxerr"]})
         row.update({"g_range_uS": 1e6 * m_bt["range"], "sim_s": st.t_stop,
