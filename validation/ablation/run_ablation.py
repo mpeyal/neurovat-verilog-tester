@@ -74,6 +74,15 @@ def v3_params():
 # unchanged; only the read-out differs.
 DIAG = {"v3_time_nv": (), "v3_time_p1": (0,), "v3_time_p2": (1,),
         "v3_time_p3": (2,)}
+# gain control: v3_static with every pulse scaled by 1 + c3 kappa/(1-kappa)
+# (~1.36): the extra step the 19 s pool adds to the read right after a write,
+# as if it were stored - "is the 19 s effect just a larger learning rate?"
+GAIN_ARMS = ("v3_static_gain",)
+
+
+def pool3_gain():
+    p = v3_params()
+    return 1.0 + p.pool_weights[2] * p.kappa_v / (1.0 - p.kappa_v)
 
 
 def _pool_read_array(pools_read, n_post, n_pre):
@@ -102,7 +111,7 @@ def make_array(arm, n_post, n_pre, fit):
         return _pool_read_array(DIAG[arm], n_post, n_pre)
     if arm == "neurosim":
         return array_from_fit(fit, n_post, n_pre)
-    if arm == "v3_static":
+    if arm in ("v3_static", "v3_static_gain"):
         return EcfetV3Array(v3_params(), n_post, n_pre, "serial", "nv")
     if arm == "v3_time":
         return EcfetV3Array(v3_params(), n_post, n_pre, "physical", "full")
@@ -136,6 +145,9 @@ def one_job(job):
         kw = dict(write_window_ms=WINDOW_MS, read_ms=read_ms,
                   **{q: cal[q] for q in ("write_gain", "dep_gain", "pot_sign",
                                          "pulse_width")})
+        if arm in GAIN_ARMS:
+            kw["write_gain"] *= pool3_gain()
+            kw["dep_gain"] *= pool3_gain()
     r = run(P, device=dev, **kw)
     w = np.asarray(r["weights"], float)
     ws = np.asarray(r.get("retained_weights", w), float)
@@ -178,7 +190,7 @@ def summarise(rows):
         out.setdefault((r["k"], r["arm"]), []).append(r)
     table = []
     for (k, arm), rs in sorted(out.items(), key=lambda x: (x[0][0],
-                                                          (ARMS + tuple(DIAG)).index(x[0][1]))):
+                                                          (ARMS + tuple(DIAG) + GAIN_ARMS).index(x[0][1]))):
         def ms(vals):
             v = np.array([x for x in vals if x is not None], float)
             return (float(v.mean()) if v.size else float("nan"),

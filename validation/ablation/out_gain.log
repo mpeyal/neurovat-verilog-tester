@@ -1,0 +1,17 @@
+NeuroSim fit to v3 retained curves: A_p/Pmax 1000.000 (rmse 7.19 % of range, max 10.09 %), A_d/Pmax 1000.000 (rmse 7.19 %, max 10.09 %)
+[1/10] v3_static_gain k=10 seed 10: success False hit 0.00 fa/s 0.00 (383 s)
+[2/10] v3_static_gain k=10 seed 6: success False hit 0.00 fa/s 0.02 (384 s)
+[3/10] v3_static_gain k=10 seed 2: success False hit 0.00 fa/s 0.02 (385 s)
+[4/10] v3_static_gain k=10 seed 8: success False hit 0.00 fa/s 0.00 (386 s)
+[5/10] v3_static_gain k=10 seed 7: success False hit 0.00 fa/s 0.02 (386 s)
+[6/10] v3_static_gain k=10 seed 1: success False hit 0.00 fa/s 0.02 (386 s)
+[7/10] v3_static_gain k=10 seed 3: success False hit 0.00 fa/s 0.02 (387 s)
+[8/10] v3_static_gain k=10 seed 9: success False hit 0.60 fa/s 0.00 (398 s)
+[9/10] v3_static_gain k=10 seed 5: success False hit 1.00 fa/s 0.00 (402 s)
+[10/10] v3_static_gain k=10 seed 4: success False hit 1.00 fa/s 0.00 (404 s)
+Network: 1000 afferents (500 in the pattern), 1 neuron, Masquelier 2008 rule and neuron; 300 evenly spaced presentations per run; 10 seeds (streams shared by the arms); scored on the last third. Device arms: 10 ms pulses, 10 ms write window, calibrated on the retained step. mean ± sd over seeds; success = runs meeting hit > 98 %, no false alarm, latency < 10 ms.
+
+| gap (ms) | arm | success | hit % | false alarms /s | latency ms | pattern w>0.9 % (read / stored) | background w<0.1 % (read / stored) | mean background w (read / stored) |
+|---|---|---|---|---|---|---|---|---|
+| 450 | v3_static_gain | 0/10 | 26.0 ± 43.3 | 0.01 ± 0.01 | 27.0 ± 14.6 | 4.8 ± 9.4 / 4.8 ± 9.4 | 40.0 ± 32.5 / 40.0 ± 32.5 | 0.167 ± 0.087 / 0.167 ± 0.087 |
+wall 406 s -> validation\ablation\out\gain_control_gap450
