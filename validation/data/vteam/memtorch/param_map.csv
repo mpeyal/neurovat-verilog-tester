@@ -1,0 +1,13 @@
+memtorch,memtorch_default,twin_va,twin_default,match,note
+r_off,1000,r_off,1000.0,yes,
+r_on,50,r_on,50.0,yes,
+d,3e-09,d,3e-09,yes,"MemTorch normalises by d, not x_off - x_on (paper eq. 7)"
+k_on,-10,k_on,-10.0,yes,
+k_off,0.0005,k_off,0.0005,yes,
+alpha_on,3,alpha_on,3.0,yes,
+alpha_off,1,alpha_off,1.0,yes,
+v_on,-0.2,v_on,-0.2,yes,
+v_off,0.02,v_off,0.02,yes,
+x_on,0,x_on,0.0,yes,MemTorch: initial state only (twin/.va: x_init)
+x_off,3e-09,x_off,3e-09,yes,"MemTorch: unused; bounds are [0, d]"
+time_series_resolution,1e-10,-,None,n/a,MemTorch default 1e-10 s; the .va has no step
