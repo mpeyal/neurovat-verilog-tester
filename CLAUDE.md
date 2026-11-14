@@ -70,8 +70,11 @@ Virtuoso** on a shared university host.
   settings-key change. It shares `trainer_running` / `_trainer_stop`; the
   worker calls `sweep()` once per level and posts `nt_robust_progress`
   (partial result) and always `nt_robust_done`. The session, its runs, the
-  device and the energy meter are left unchanged. No untrained baseline for
-  device synapses. "Show in Raster" replays one keyed level through the
+  device and the energy meter are left unchanged (a time-dynamic device
+  relaxes during a recall run, so `sr.device_preserved` deep-copies its
+  state before each run and puts it back). Device synapses get the
+  untrained baseline from a deep copy of `Session.device_start` (the device
+  as the session placed it at the start weight). "Show in Raster" replays one keyed level through the
   Raster tab. Mode radio `nt_st_rb_mode`: "recall" (above) | "retrain at
   each level" (`sweep(retrain=True, train_seconds=, repeats=)`): per level
   a `fresh_like` copy is trained (STDP on, keyed training stream
@@ -82,8 +85,37 @@ Virtuoso** on a shared university host.
   the mean and the min-max (shaded band). Each row keeps its retrained
   weights, and Show in Raster replays them on a copy. The last result of each mode
   is kept and the radio switches between them (held while a sweep runs).
-  Retrain is refused for device synapses (`sr.DEVICE_REFUSAL`). Bridge:
+  Device synapses retrain deep copies of `Session.device_start` (rows keep
+  `devices`, replayed via `sr.fresh_like(s, device=...)`); only a device
+  session without a start copy is refused (`sr.DEVICE_REFUSAL`). Bridge:
   `nt_robust <seconds> <retrain 1/0> <train_s> <repeats>`.
+- Device synapses in physical time (Gate B; `src/neurovat/devices/`):
+  `ScalarTwinArray(make, n_post, n_pre, timing, read)` - `timing="serial"`
+  (default, the old contract: a twin is stepped only during its write
+  pulses, pulses of one call one after another) or `"physical"` (per-device
+  clock; idle time is ONE zero-drive `step()` call, exact for v2/v3 since
+  their idle updates are exact exponentials; pulses of one call start
+  together; a pulse arriving while one is on starts when it ends);
+  `read="nv"` (G_nv, old) or `"full"` (`dev.G`: G_nv + v3 stdp_lock +
+  volatile pools, clamped). `retained()` is always the stored part and
+  pulse sizing (`pulse_step`, `calibrate_write`, `potentiation_sign`) uses
+  it. `EcfetV3Array` (`devices/ecfet_v3.py`) is the vectorised v3, equal
+  to the scalar twin to rtol 1e-11 (`tests/test_vector_twin.py`,
+  `benchmarks/bench_vector_twin.py`); `vector_twin_factory(make)` uses it
+  only for an unmodified `model_v3.EcfetV3` with `sigma_c2c == 0` after a
+  self-check against the scalar twin, else the scalar adapter (an edited /
+  hot-reloaded v3 is therefore never silently out of sync). If you change
+  `model_v3.step`, mirror it in `EcfetV3Array._step`. In
+  `masquelier.Synapses` a time-dynamic array runs on a device clock that
+  carries across runs (`t0 = device.clock`), and the efficacy is re-read
+  every `read_ms` (1 ms) with `device.peek(t)`; weight = `clip((G - g_min)
+  / (g_max - g_min), 0, 1)`, linear in conductance. Static devices and
+  ideal weights take none of these paths. Stream mode combo `nt_st_dyn`:
+  "physical time, full read" (default for device synapses; uses
+  `vector_twin_factory`) | "legacy (writes only, G_nv)". The supervised
+  Trainer (`CrossbarSNN`) still uses the serial / G_nv adapter. C6
+  ablation: `validation/ablation/run_ablation.py` (ideal / NeuroSim fitted
+  curve / v3 static / v3 physical time).
 - Bridge note: the mailbox holds one command; while an async command
   (`nt_train`, ...) is pending, a second command (e.g. `shot`) is not served
   while it runs (a `shot` sent then came back black), so a mid-run screenshot

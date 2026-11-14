@@ -4,7 +4,9 @@ A :class:`DeviceArray` is one crossbar: an ``n_post x n_pre`` grid of
 independent synaptic devices held as arrays, so a whole presentation's worth
 of writes is one vectorized call. The network only ever
 
-* reads ``conductance()`` (retained weight, Siemens), and
+* reads ``conductance()`` (the read conductance, Siemens: the retained
+  weight for a static device; see the physical-time methods below for a
+  device that evolves between writes), and
 * calls ``program(rows, cols, amps, width, t)`` with signed drive amplitudes.
 
 Everything else (switching kinetics, bounds, retention, variation, write
