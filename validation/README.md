@@ -581,3 +581,107 @@ How to read the table:
   V < 0, which is the same value at the default.
 * MemTorch clamps the state every step (no wind-up) and computes T from the
   previous step's current.
+
+**Against Spectre.** `memtorch_compare.py --spectre-ref-dir <dir>` also scores
+MemTorch and the twins against imported fine-step Spectre runs of the `.va`
+(`<dir>/s1_pm1p3.csv`, `s1_pm1p4.csv`, stanford/scrub.py output) ->
+`data/stanford/memtorch/memtorch_vs_spectre.csv`. The 1 ps Spectre CSVs are not
+in git, so the directory is a command-line argument. Spectre ran the real
+`.va` (wind-up, q = `` `P_Q ``), so MemTorch and the matched twins carry the
+semantic gap on top of their numerical error; the `.va`-semantics twin is the
+like-for-like row (worst per-read G 0.030 % / 0.367 % at +-1.3 / +-1.4 V,
+against MemTorch at 1 ps 1.17 % / 0.89 %).
+
+## VTEAM memristor: `vteam-1` (twin vs Spectre, and vs MemTorch)
+
+Model: S. Kvatinsky, M. Ramadan, E. G. Friedman, A. Kolodny, "VTEAM: A General
+Model for Voltage-Controlled Memristors", IEEE TCAS-II 62(8), 786-790, 2015.
+`verilog/vteam.va` (NeuroVAT's own Spectre form, tracked) and
+`twins/vteam.py` implement the variant MemTorch 1.1.6 implements
+(`memtorch/bh/memristor/VTEAM.py`), so the MemTorch comparison is like for
+like.
+
+### Equations and MemTorch's deviations from the paper
+* State, paper eq. (6a-c): dx/dt = k_off (v/v_off - 1)^alpha_off f_off(x) for
+  v > v_off > 0; 0 for v_on < v < v_off; k_on (v/v_on - 1)^alpha_on f_on(x)
+  for v < v_on < 0.
+* Window: the paper's "ideal rectangular window" (Sec. III; also used for the
+  paper's own fits). MemTorch clips the STATE to [0, d] after each Euler step,
+  so there is no wind-up. No Joglekar/Biolek window.
+* I-V: eq. (7) with x_on = 0 and x_off - x_on replaced by d:
+  R(x) = r_off x/d + r_on (1 - x/d). The exponential eq. (8) is not used.
+* x_on is only the initial state and x_off is unused; the bounds are [0, d].
+  Same as the paper for the defaults (x_on = 0, x_off = d).
+* Defaults: paper Table II, column "TEAM [9]" (r_on 50, r_off 1000 ohm, d 3 nm,
+  k_off 5e-4, k_on -10 m/s, alpha_off 1, alpha_on 3, v_off 0.02, v_on -0.2 V).
+* Threshold tests are inclusive (v >= v_off); the rate is zero there anyway.
+
+### Continuous-time form (`.va` = twin)
+* State on an internal node, s = x/d (`V(ws) <+ idt(win * rate / d, x_init/d)`,
+  read back implicitly; no `$bound_step`, no previous-evaluation variables).
+* The rectangular window acts on the rate with a linear edge of width
+  `w_eps` (1e-4 of d): rate > 0: win = clip((1 - s)/w_eps, 0, 1); rate < 0:
+  win = clip(s/w_eps, 0, 1). With a hard gate the implicit step that reaches a
+  bound has no solution. `w_eps = 0` in the twin is MemTorch's hard clip; the
+  difference was below 1e-4 % of G on every MemTorch stimulus.
+* The twin is exact: the rate depends on V only and the window on s only, so
+  on each piece of a step between threshold crossings the state follows a
+  closed form (linear move, then exponential approach inside the edge band).
+  `integrator=1` is MemTorch's scheme (Euler, clip, then the current); it
+  reproduces MemTorch's currents to rounding (`tests/test_vteam.py`).
+
+### Stimulus set (`vteam-1`)
+`validation/vteam/stimuli.py`. Reads are at -0.1 V inside the dead zone
+(+0.1 V would exceed v_off = 0.02 V and move the state). Pulse amplitudes are
+chosen for partial switching (+0.8 V / 10 ns moves 6.5 % of d, -0.225 V / 10 ns
+also 6.5 %; -1 V crosses all of d in about 5 ps). Stimuli: off_train,
+on_train, s1_vteam, s2_vteam (MemTorch comparison), amplitude_sweep,
+pulse_width_sweep, read_disturb_hold, saturate_reverse (window: no wind-up),
+dc_loop and sine_memtorch (MemTorch's hysteresis default, 1 V, 50 MHz).
+
+### How to run
+```
+python validation/vteam/run_twin.py [--self-check]
+python validation/vteam/make_decks.py                     # spice/spectre_vteam/ (tracked)
+python validation/vteam/make_decks.py --step 1e-11        # spice/spectre_vteam_step/10ps/
+python validation/vteam/make_decks.py --step 1e-12        # spice/spectre_vteam_step/1ps/ (reltol 1e-6)
+# run_all.sh in each deck folder on the Cadence machine (Spectre 24.1 writes
+# <name>.raw/tran.tran.tran), then import:
+python validation/vteam/scrub.py --dir <deck-step run dir>
+python validation/vteam/scrub.py --dir <1 ps run dir> --out-root validation/data/vteam/ref_1ps
+python validation/vteam/score.py [--ref ref_1ps/spectre]
+python validation/vteam/step_convergence.py [--ref ref_1ps/spectre]
+<venv-with-memtorch>/python validation/vteam/memtorch_compare.py
+```
+Pass rule: the stanford-1 rule (per-read G max 3 %, mean 1 %, I NRMSE 1 %,
+state NRMSE 1 %). The fine-step CSVs (`data/vteam/ref_*/spectre/*.csv`) are
+git-ignored; their `.json` provenance is tracked.
+
+### Results (Spectre 24.1, 2026-11)
+* Twin vs Spectre at the deck step (100 ps): 10/10 PASS, worst per-read G
+  error 0.70 % (s2_vteam), I NRMSE <= 0.065 %.
+* Twin vs Spectre at 1 ps: 10/10 PASS, worst 0.116 % (s2_vteam). Spectre at
+  10 ps vs 1 ps: worst 0.037 %.
+* Where the residual comes from: Spectre over-integrates the part of each
+  50 ps pulse edge that lies past a threshold (one s2 ON edge: +26 % of the
+  edge's move at 100 ps, +4.8 % at 10 ps, +3.2 % at 1 ps; the plateau slope is
+  exact to 1e-12). The logs show `errpreset=conservative` selects
+  `method=gear2only`; replaying variable-step BDF2 on Spectre's own time points
+  and V reproduces Spectre's state change across that edge to 0.1 % of the
+  excess (100 ps, 10 ps and 1 ps runs). So it is Spectre's gear2 truncation
+  error on the steep, cubic part of the edge. From 10 ps to 1 ps it shrinks
+  only from 4.8 % to 3.2 % (at 10 ps Spectre already cuts its step after each
+  breakpoint), so the 1 ps reference still carries about 7.8e-6 in s per s2 ON
+  pulse (0.12 % in G near R_on). A one-pulse diagnostic deck (-0.25 V / 2 ns,
+  50 ps edges, from x = d) converges onto the twin as h^2: excess over the two
+  edges' exact move 3.2 % (maxstep 1 ps), 0.039 % (0.1 ps), 0.0004 % (0.01 ps);
+  with `method=traponly` 0.88 % (1 ps) and 0.0099 % (0.1 ps). The twin's edge
+  integral is also checked against a 200 000-point quadrature in pytest.
+* MemTorch: its Euler step is exact for VTEAM on held samples (the rate depends
+  on V only), so MemTorch equals the exact twin on the same samples; its error
+  is the sampling of the 50 ps edges. Against Spectre 1 ps: s1_vteam 3.68 %
+  (1 ns), 0.35 % (10 ps), 0.034 % (1 ps); s2_vteam 11.6 / 1.98 / 0.135 %.
+  Against the exact twin on the PWL (no Spectre edge error): s1 3.71 / 0.32 /
+  0.0052 %, s2 11.6 / 1.87 / 0.019 % (`data/vteam/memtorch/memtorch_compare.csv`).
+  1 ns and 0.1 ns give the same G error because both midpoint grids turn each
+  50 ps-edged pulse into the same rectangle.

@@ -21,3 +21,6 @@ data/*/twin/
 
 # fine-step Spectre reference sets (hundreds of MB): regenerate from the host runs; keep the .json provenance
 data/stanford/ref_*/spectre/*.csv
+data/vteam/ref_*/spectre/*.csv
+# fine-step VTEAM decks: regenerate with validation/vteam/make_decks.py --step <s>
+spice/spectre_vteam_step/

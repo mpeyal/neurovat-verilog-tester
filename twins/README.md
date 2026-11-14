@@ -39,6 +39,15 @@ Licence terms (quoted in full in the file header):
 The `.va` file itself is not in git; `validation/README.md` explains where to
 get it.
 
+## VTEAM memristor (MemTorch variant)
+`vteam.py` is the twin of `verilog/vteam.va`, NeuroVAT's own Spectre form of
+the VTEAM model (S. Kvatinsky, M. Ramadan, E. G. Friedman, A. Kolodny, IEEE
+TCAS-II 62(8), 2015) in the variant MemTorch 1.1.6 implements: paper eq. (6)
+with the ideal rectangular window, linear I-V eq. (7), MemTorch's parameter
+names and defaults. The equations are restated, no MemTorch (GPL-3) code is
+copied. The twin integrates in closed form (exact, no step size).
+`validation/README.md` ("VTEAM") lists the deviations from the paper.
+
 ## ⚠ Security
 Importing a twin **executes its Python** — there is no sandbox. This folder
 keeps device code out of the app source and constrains the agent to write only
