@@ -151,14 +151,31 @@ step).
 Learning needs about 200 presentations (C6: `--presentations 200`, with a
 pattern every k-th 50 ms section). At k = 4 that is 40 s of stream per seed.
 
-Use the tier-1 cost per synapse-second to size the closed loop:
+Measured in tier 1 (16 synapses, 4 s, 3608 pulses, pulse duty about 56 %):
+**0.59 ms per pulse, 0.033 s per synapse-second**. The transient took 2.12 s
+for 34153 steps.
 
-- **Smallest useful network:** 1 neuron, 32 afferents (16 in the pattern),
-  40 s, 10 seeds. That is 32 x 40 x 10 = 12 800 synapse-seconds.
-- **Medium:** 1 neuron, 100 afferents. Sparse writes help, because a pulse
-  is only emitted where STDP accumulated a change in that window.
-- **Out of reach for a single transient:** 2000 afferents (the paper's
-  size). It would need parallel seeds at 2 Spectre jobs at a time (host rule).
+That figure is for synapses only, with the write window aligning pulses on
+a 10 ms grid. A closed loop adds the neuron's spike events and the input
+spike PWLs, which are not aligned. Assume a step count 3-10x higher, i.e.
+**about 0.1-0.3 s per synapse-second**.
+
+| size | synapse-seconds | estimated Spectre time |
+|---|---|---|
+| smallest useful: 1 neuron, 32 afferents, 40 s (200 presentations at k = 4), 10 seeds | 12 800 | 0.4 - 1 h |
+| 1 neuron, 100 afferents, 40 s, 10 seeds | 40 000 | 1 - 3.5 h |
+| the paper's 2000 afferents, 450 s, 1 seed | 900 000 | 1 - 3 days |
+
+Recommendation:
+
+- **Build at 32 afferents with 10-20 seeds,** at 2 Spectre jobs at a time
+  (host rule).
+- **100 afferents is affordable** for a confirmation run.
+- **2000 afferents is out of scope** for Spectre.
+
+Output stays small with a strobe and by saving only the read node and n_x
+per synapse plus the neuron's spikes. Tier 1 wrote 31 MB of PSF-ascii for
+16 synapses over 4 s at a 0.2 ms strobe.
 
 Build order:
 

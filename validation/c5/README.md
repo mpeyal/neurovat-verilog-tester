@@ -54,7 +54,35 @@ comparisons are made per synapse:
 | **twin** | the scalar twin replaying the same pulses on the Gate A grid, against Spectre (model equivalence under this schedule) |
 | **G_nv** | the stored part only, engine against Spectre |
 
-RESULTS_PLACEHOLDER
+**Spectre run.** 2.12 s transient, 34153 accepted steps, 20301 strobe
+points. Every synapse's gate charge matches the schedule to 5e-14, with the
+right sign.
+
+Ranges over the 16 synapses, in % of each synapse's Spectre G range
+(215 to 599 uS):
+
+| comparison | NRMSE % | max % | final G error % | verdict |
+|---|---|---|---|---|
+| twin replay, full G | 0.021 - 0.063 | 0.065 - 0.178 | <= 0.13 | **16/16 PASS** |
+| engine read, full G, all reads | 5.1 - 14.5 | 18 - 52 | <= 3.9 | **16/16 FAIL** |
+| engine read, full G, outside pulses | (<= 1.45) | 1.96 - 4.89 | - | max fails on 12/16 |
+| engine read, G_nv, outside pulses | - | <= 7.3e-4 | <= 6.6e-4 | exact |
+| engine read, G_nv, all reads | 1.4 - 4.1 | 5.3 - 14.6 | - | FAIL (read timing) |
+
+Reading the table:
+
+- **The v3 model matches Spectre under the training's own pulse schedule.**
+  This covers 3608 pulses of 0.2 to 1563 pA, including synapse 2 reaching the
+  G_total output clamp at Gmax. Synapse 2 does not reach the x rail: its final
+  G_nv is 994 uS, so the rail taper is not exercised here.
+- **The stored conductance is exact.** What the engine stores, G_nv and so
+  the stored weight, matches Spectre to below 1e-5 of range outside pulses
+  and at the end.
+- **The full read does not match.** What the network *reads* during training,
+  the full G, does not meet the Gate A rule. The cause is the engine, not the
+  model; see below. A claim of the form "training with a device synapse in
+  NeuroVAT matches Spectre" holds for the stored state (G_nv), but not yet
+  for the full read the neuron uses.
 
 ## Why the engine's full read is off (`diagnose_engine.py`, `data/c5/diagnose.json`)
 
@@ -95,4 +123,16 @@ C6 numbers and needs its own decision. Gate A did not catch it, because
 
 ## Spectre cost
 
-COST_PLACEHOLDER
+The figures are in `data/c5/cost.json`. Wall time is the transient only,
+parsed from the log; the AHDL compile, about 2 s, comes on top. The host is
+shared, so timings are indicative.
+
+- 16 instances over 4.06 s: 2.12 s, 34153 accepted steps.
+- That is **0.59 ms per v3 pulse** and **0.033 s per synapse-second**.
+- Steps per pulse are only about 9.5, because the engine's write window
+  aligns most pulses on a common 10 ms grid, so the instances share
+  breakpoints.
+- For comparison, a single instance with free-running pulses (Sharbati
+  ltp_ltd) took 1.6 ms per pulse and 113 steps per pulse.
+- The engine itself took 10.4 s for the same run, including the Python
+  logging wrappers.
