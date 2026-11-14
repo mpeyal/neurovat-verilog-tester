@@ -4,7 +4,9 @@ A :class:`DeviceArray` is one crossbar: an ``n_post x n_pre`` grid of
 independent synaptic devices held as arrays, so a whole presentation's worth
 of writes is one vectorized call. The network only ever
 
-* reads ``conductance()`` (retained weight, Siemens), and
+* reads ``conductance()`` (the read conductance, Siemens: the retained
+  weight for a static device; see the physical-time methods below for a
+  device that evolves between writes), and
 * calls ``program(rows, cols, amps, width, t)`` with signed drive amplitudes.
 
 Everything else (switching kinetics, bounds, retention, variation, write
@@ -51,6 +53,44 @@ class DeviceArray:
         probe the device without touching the crossbar."""
         raise NotImplementedError
 
+    # ---- optional: physical time ----------------------------------------
+    #
+    # A *time-dynamic* array (``time_dynamic = True``) keeps a clock per
+    # device and evolves between writes: ``advance(t)`` steps every device
+    # with zero drive (idle) up to time ``t`` (s), ``read_at(t, cols)`` is the
+    # read conductance of columns ``cols`` at ``t`` (devices advanced first),
+    # and ``program`` starts each pulse at ``max(t, that device's clock)``,
+    # all pulses of one call in parallel. ``retained()`` is the stored
+    # (non-volatile) part only, used to size write pulses. The defaults below
+    # are those of a device with no dynamics between writes.
+
+    time_dynamic = False
+
+    @property
+    def clock(self):
+        """Device time (s) the array has been advanced to (0 if static)."""
+        return 0.0
+
+    def advance(self, t, cols=None):
+        """Idle-step devices (all, or columns ``cols``) up to time ``t``."""
+        return None
+
+    def read_at(self, t, cols=None):
+        """Read conductance at time ``t`` (S): all columns or ``cols``."""
+        self.advance(t, cols)
+        G = np.asarray(self.conductance(), float)
+        return G if cols is None else G[:, cols]
+
+    def peek(self, t):
+        """Read conductance of every device at ``t``; an array may answer
+        without changing its state (the default advances it: exact for a
+        twin whose idle step composes)."""
+        return self.read_at(t)
+
+    def retained(self):
+        """Non-volatile (stored) conductance, shape ``self.shape`` (S)."""
+        return self.conductance()
+
     # ---- optional -------------------------------------------------------
 
     def set_conductance(self, G):
@@ -66,9 +106,9 @@ class DeviceArray:
     def potentiation_sign(self, amp, width):
         """+1 if a positive drive raises conductance, else -1."""
         probe = self.nominal()
-        g0 = float(probe.conductance()[0, 0])
+        g0 = float(probe.retained()[0, 0])
         probe.program(np.array([0]), np.array([0]), np.array([abs(amp)]), width)
-        return 1.0 if float(probe.conductance()[0, 0]) - g0 >= 0.0 else -1.0
+        return 1.0 if float(probe.retained()[0, 0]) - g0 >= 0.0 else -1.0
 
 
 def spread(nominal, sigma, shape, rng, floor=1e-3):

@@ -20,7 +20,9 @@ every level; "retrain at each level" trains a fresh copy at every level
 mode is kept; the toggle switches the plots, the table and the Raster list
 between them (disabled while a sweep runs). In retrain mode "Show in
 Raster" replays that level's retrained weights (the first training) on a
-copy, never the session's. Retrain is refused for device synapses.
+copy, never the session's. Device synapses retrain (and give the
+untrained baseline) on deep copies of the start device
+(``Session.device_start``); a device session without one is refused.
 
 The module-level helpers are GUI-free (tested in tests/test_robust_tab.py).
 """
@@ -43,7 +45,8 @@ SETTINGS_CHANGED = ("settings changed since this network was built: press "
                     "New network, or restore them")
 NO_NETWORK = ("no trained network: press Train first (the sweep tests the "
               "trained network; Test before Train is the untrained baseline)")
-DEVICE_NOTE = "untrained baseline not available for device synapses"
+DEVICE_NOTE = ("untrained baseline not available: this device network "
+               "kept no start device")
 HIT_COL = (80, 160, 255)
 FALSE_COL = (255, 140, 60)
 NOM_COL = (205, 210, 225, 150)
@@ -61,7 +64,7 @@ MODE_TEXT = {
                  "patterns, threshold held) trained at the level with STDP "
                  "on, then tested there (STDP off). Nominal = retrained at "
                  "nominal: an independent training, not your network")}
-DEVICE_RETRAIN = sr.DEVICE_REFUSAL + " (use recall for device synapses)"
+DEVICE_RETRAIN = sr.DEVICE_REFUSAL + " (use recall, or build a new network)"
 
 
 def mode_key(value):
@@ -587,7 +590,7 @@ class NetworkStreamRobustMixin:
         except (ValueError, TypeError) as exc:
             return self._nt_rb_refuse(str(exc))
         seconds = min(max(seconds, 1.0), 600.0)
-        device = s.device is not None
+        device = not sr.can_copy(s)     # a device session with no start copy
         mode = self._nt_rb_mode()
         retrain = mode == sr.RETRAIN
         train_s, repeats = self._nt_rb_train_settings()
@@ -763,7 +766,7 @@ class NetworkStreamRobustMixin:
             return
         train_s, repeats = self._nt_rb_train_settings()
         s = self._nt_stream_session
-        if s is not None and s.device is not None:
+        if s is not None and not sr.can_copy(s):
             note = DEVICE_RETRAIN
         else:
             raw = float(self._nt_get("nt_st_rb_train_s", 0.0) or 0.0)
@@ -872,8 +875,10 @@ class NetworkStreamRobustMixin:
                 session.kw = {k: v for k, v in session.kw.items()
                               if k != "energy"}
             record_u = seconds * P.n_out <= sv.U_BUDGET
-            res = session.run(seconds, learn=False, on_section=on_section,
-                              record_u=record_u, stream_key=key, **changes)
+            with sr.device_preserved(session):  # a device relaxes in a run
+                res = session.run(seconds, learn=False, on_section=on_section,
+                                  record_u=record_u, stream_key=key,
+                                  **changes)
             if res.get("stopped") or "stream" not in cap:
                 out["stopped"] = True
                 return
@@ -1019,10 +1024,17 @@ class NetworkStreamRobustMixin:
             if not weights:
                 return self._nt_rb_refuse("this retrained level kept no "
                                           "weights: run the sweep again")
-            if s.device is not None:
+            if not sr.can_copy(s):
                 return self._nt_rb_refuse(DEVICE_RETRAIN)
-            net = sr.fresh_like(s)
-            net.weights = np.array(weights[0], float)
+            if s.device is not None:
+                devs = (row or {}).get("devices")
+                if not devs:
+                    return self._nt_rb_refuse("this retrained level kept no "
+                                              "device: run the sweep again")
+                net = sr.fresh_like(s, device=devs[0])
+            else:
+                net = sr.fresh_like(s)
+                net.weights = np.array(weights[0], float)
         images = bool(s.given)
         nominal = r["nominal"]
         view_ms = sv.view_window_ms(self._nt_get("nt_st_view_win", 0.0),

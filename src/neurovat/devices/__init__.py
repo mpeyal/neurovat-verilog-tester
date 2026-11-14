@@ -9,6 +9,7 @@ A device class is constructed as
 from .base import DeviceArray, spread
 from .scalar import ScalarTwinArray, device_weight, calibrate_pot_sign
 from .softbound import SoftBoundArray, SoftBoundParams
+from .ecfet_v3 import EcfetV3Array
 
 _REGISTRY = {}
 
@@ -41,10 +42,30 @@ def device_factory(name, params=None, variation=None, write_noise=0.0):
     return factory
 
 
-def twin_factory(make_device):
+def twin_factory(make_device, timing="serial", read="nv"):
     """Factory wrapping a scalar device twin (see :class:`ScalarTwinArray`)."""
     def factory(n_post, n_pre, seed=None):
-        return ScalarTwinArray(make_device, n_post, n_pre)
+        return ScalarTwinArray(make_device, n_post, n_pre, timing, read)
+    return factory
+
+
+def vector_twin_factory(make_device, timing="physical", read="full"):
+    """Like :func:`twin_factory`, but an unmodified ECFET v3 twin without
+    cycle-to-cycle noise runs as the vectorised :class:`EcfetV3Array` (same
+    results to machine tolerance, checked once per factory against the
+    scalar twin); any other twin keeps the scalar adapter. The factory's
+    ``kind`` attribute says which one it builds ("vector" | "scalar")."""
+    from .ecfet_v3 import EcfetV3Array, is_canonical_v3, self_check
+    probe = make_device()
+    vec = (is_canonical_v3(probe)
+           and not getattr(probe.p, "sigma_c2c", 0.0)
+           and self_check(make_device))
+
+    def factory(n_post, n_pre, seed=None):
+        if vec:
+            return EcfetV3Array(probe.p, n_post, n_pre, timing, read)
+        return ScalarTwinArray(make_device, n_post, n_pre, timing, read)
+    factory.kind = "vector" if vec else "scalar"
     return factory
 
 
@@ -59,7 +80,7 @@ except ModuleNotFoundError as e:
 
 __all__ = [
     "DeviceArray", "spread", "ScalarTwinArray", "SoftBoundArray",
-    "SoftBoundParams", "FeFETArray", "FeFETParams", "device_weight",
+    "SoftBoundParams", "EcfetV3Array", "FeFETArray", "FeFETParams", "device_weight",
     "calibrate_pot_sign", "register_device", "available_devices",
-    "device_class", "device_factory", "twin_factory",
+    "device_class", "device_factory", "twin_factory", "vector_twin_factory",
 ]

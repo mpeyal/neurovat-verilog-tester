@@ -135,8 +135,8 @@ def test_device_session_is_not_changed_by_a_sweep():
     G = dev.conductance().copy()
     before = repr(meter.report("eval"))
     res = sr.sweep(s, {"noise_hz": [10.0, 40.0]}, seconds=1.0)
-    assert res["untrained_note"].startswith("skipped")
-    assert res["factors"][0]["rows"][0]["untrained"] is None
+    assert res["untrained_note"].startswith("fresh copy of the start device")
+    assert res["factors"][0]["rows"][0]["untrained"] is not None
     np.testing.assert_array_equal(dev.state_dict()["w"], state["w"])
     np.testing.assert_array_equal(dev.conductance(), G)
     assert repr(meter.report("eval")) == before   # sweep reads not metered
@@ -267,8 +267,8 @@ def test_retrain_refuses_a_device_and_needs_train_seconds(low_start):
                          pattern_ms=img["pattern_ms"], seed=1)
     dev = device_factory("softbound")(1, 8)
     s = Session(P, device=dev, patterns=img["patterns"])
-    with pytest.raises(ValueError, match="retraining needs ideal weights: a "
-                       "device copy cannot be made"):
+    s.device_start = None               # a device session with no start copy
+    with pytest.raises(ValueError, match="retraining needs a fresh device"):
         sr.sweep(s, {"noise_hz": [5.0]}, seconds=1.0, retrain=True,
                  train_seconds=1.0)
     with pytest.raises(ValueError, match="train_seconds"):
@@ -276,3 +276,64 @@ def test_retrain_refuses_a_device_and_needs_train_seconds(low_start):
     with pytest.raises(ValueError, match="repeats"):
         sr.sweep(low_start, {"noise_hz": [5.0]}, seconds=1.0, retrain=True,
                  train_seconds=1.0, repeats=0)
+
+
+# ---- device synapses in physical time (Gate B) ----------------------------
+
+def _v3_session(read="full"):
+    from neurovat.devices import vector_twin_factory
+    from neurovat.masquelier import calibrate_write
+    from simulation_core.model_v3 import EcfetV3, V3Params
+    bank = sv.image_bank("digits", 10)
+    img = sv.build_image_input(bank, "0", "", 10, 5.0, 0.5)
+    P = MasquelierParams(n_afferents=10, n_pattern=10, w_init=0.5,
+                         pattern_ms=img["pattern_ms"], threshold=1.0, seed=3)
+    P = replace(P, threshold=sv.auto_threshold(img, P))
+    dev = vector_twin_factory(lambda: EcfetV3(V3Params.paper(A_stdp=0.0)),
+                              read=read)(1, 10)
+    w = calibrate_write(dev, P, 10e-3, 50e-12)
+    s = Session(P, device=dev, patterns=img["patterns"], write_window_ms=10.0,
+                **{k: w[k] for k in ("write_gain", "dep_gain", "pot_sign",
+                                     "pulse_width")})
+    s.run(2.0, **NOMINAL)
+    return s
+
+
+def test_time_dynamic_device_recall_sweep_is_repeatable_and_restores_it():
+    s = _v3_session()
+    dev = s.device
+    assert dev.time_dynamic and dev.clock > 2.0
+    state = {k: np.copy(v) for k, v in dev.state_dict().items() if k != "rng"}
+    levels = {"noise_hz": [5.0, 26.0]}
+    a = sr.sweep(s, levels, seconds=1.0, nominal=NOMINAL)
+    b = sr.sweep(s, levels, seconds=1.0, nominal=NOMINAL)
+    for k, v in state.items():
+        np.testing.assert_array_equal(dev.state_dict()[k], v)
+    rows_a, rows_b = a["factors"][0]["rows"], b["factors"][0]["rows"]
+    for ra, rb_ in zip(rows_a, rows_b):
+        for who in ("trained", "untrained"):
+            assert ra[who]["post_spikes"] == rb_[who]["post_spikes"]
+            assert ra[who]["hits"] == rb_[who]["hits"]
+    assert rows_a[0]["untrained"] is not None
+
+
+def test_time_dynamic_device_retrains_on_copies_of_the_start_device():
+    s = _v3_session()
+    dev = s.device
+    g0 = dev.conductance().copy()
+    res = sr.sweep(s, {"jitter_ms": [1.0]}, seconds=1.0, nominal=NOMINAL,
+                   retrain=True, train_seconds=1.0, untrained=False)
+    row = res["factors"][0]["rows"][0]
+    assert row["trained"]["pattern_windows"] > 0
+    trained_dev = row["devices"][0]
+    assert trained_dev is not dev and trained_dev.clock >= 1.0
+    np.testing.assert_array_equal(dev.conductance(), g0)
+    assert np.asarray(row["weights"][0]).shape == (10,)
+    # the replay copy holds the retrained device state, not the start one
+    net = sr.fresh_like(s, device=trained_dev)
+    np.testing.assert_array_equal(net.device.conductance(),
+                                  trained_dev.conductance())
+    again = sr.sweep(s, {"jitter_ms": [1.0]}, seconds=1.0, nominal=NOMINAL,
+                     retrain=True, train_seconds=1.0, untrained=False)
+    assert again["factors"][0]["rows"][0]["trained"]["post_spikes"] == \
+        row["trained"]["post_spikes"]
