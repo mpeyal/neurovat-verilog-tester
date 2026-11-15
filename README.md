@@ -437,3 +437,7 @@ Run any scenario with `--csv`, run the same piecewise-constant `isource`
 stimulus on the .va in Spectre, export and overlay. For exact Verilog-A
 execution outside Cadence, the `.va` also compiles with
 [OpenVAF](https://openvaf.semimod.de/) → OSDI → ngspice.
+
+## License
+
+NeuroVAT is released under the [MIT License](LICENSE). Third-party device models are not redistributed here and keep their own licences: the Stanford-PKU RRAM Verilog-A model must be downloaded from nanoHUB (see `validation/README.md`). Comparison scripts call MemTorch (GPL-3.0) as a separate, optionally installed package; no MemTorch code is included.
