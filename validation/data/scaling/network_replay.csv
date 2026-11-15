@@ -1,0 +1,4 @@
+afferents,stream_s,pulses,post_spikes,spectre_tran_median_s,spectre_tran_min_s,spectre_tran_max_s,spectre_total_median_s,spectre_steps,spectre_cpu_over_elapsed,spectre_s_per_synapse_second,timed_out,engine_read_acc_pass,engine_read_acc_max_pct,load1_min,load1_max
+64,4.01,14587,229,5.474,5.432,5.475,5.74,33319,0.9961,0.02133,False,16/16,0.00244,2.94,3.03
+256,4.01,59972,236,22.91,22.75,22.99,23.4,33608,0.9964,0.02232,False,16/16,0.002878,3.03,3.13
+1000,4.01,227795,224,92.37,91.73,92.61,93.4,33775,0.9965,0.02304,False,16/16,0.003179,3.08,3.31
