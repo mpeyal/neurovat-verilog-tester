@@ -1,0 +1,37 @@
+NeuroSim fit to v3 retained curves: A_p/Pmax 1000.000 (rmse 7.19 % of range, max 10.09 %), A_d/Pmax 1000.000 (rmse 7.19 %, max 10.09 %)
+[1/30] v3_static_gain k=10 seed 107: success False hit 0.02 fa/s 0.00 (250 s)
+[2/30] v3_static_gain k=10 seed 103: success False hit 0.00 fa/s 0.02 (251 s)
+[3/30] v3_static_gain k=10 seed 102: success False hit 0.00 fa/s 0.00 (251 s)
+[4/30] v3_static_gain k=10 seed 101: success False hit 0.00 fa/s 0.00 (251 s)
+[5/30] v3_static_gain k=10 seed 110: success False hit 0.91 fa/s 0.00 (261 s)
+[6/30] v3_static_gain k=10 seed 108: success False hit 0.52 fa/s 0.00 (262 s)
+[7/30] v3_static_gain k=10 seed 104: success False hit 1.00 fa/s 0.00 (265 s)
+[8/30] v3_static_gain k=10 seed 106: success False hit 1.00 fa/s 0.00 (273 s)
+[9/30] v3_static_gain k=10 seed 105: success False hit 1.00 fa/s 0.00 (274 s)
+[10/30] v3_static_gain k=10 seed 109: success True hit 1.00 fa/s 0.00 (274 s)
+[11/30] v3_static_gain k=10 seed 114: success False hit 0.00 fa/s 0.06 (254 s)
+[12/30] v3_static_gain k=10 seed 113: success False hit 0.00 fa/s 0.00 (255 s)
+[13/30] v3_static_gain k=10 seed 112: success False hit 0.00 fa/s 0.00 (255 s)
+[14/30] v3_static_gain k=10 seed 115: success False hit 0.01 fa/s 0.02 (253 s)
+[15/30] v3_static_gain k=10 seed 116: success False hit 0.00 fa/s 0.02 (259 s)
+[16/30] v3_static_gain k=10 seed 111: success True hit 1.00 fa/s 0.00 (276 s)
+[17/30] v3_static_gain k=10 seed 118: success False hit 0.00 fa/s 0.04 (254 s)
+[18/30] v3_static_gain k=10 seed 117: success True hit 1.00 fa/s 0.00 (281 s)
+[19/30] v3_static_gain k=10 seed 120: success False hit 1.00 fa/s 0.00 (279 s)
+[20/30] v3_static_gain k=10 seed 119: success True hit 1.00 fa/s 0.00 (284 s)
+[21/30] v3_static_gain k=10 seed 123: success False hit 0.00 fa/s 0.04 (241 s)
+[22/30] v3_static_gain k=10 seed 124: success False hit 0.00 fa/s 0.00 (240 s)
+[23/30] v3_static_gain k=10 seed 126: success False hit 0.00 fa/s 0.00 (238 s)
+[24/30] v3_static_gain k=10 seed 127: success False hit 0.00 fa/s 0.04 (238 s)
+[25/30] v3_static_gain k=10 seed 122: success True hit 1.00 fa/s 0.00 (259 s)
+[26/30] v3_static_gain k=10 seed 121: success True hit 1.00 fa/s 0.00 (263 s)
+[27/30] v3_static_gain k=10 seed 128: success False hit 0.00 fa/s 0.02 (229 s)
+[28/30] v3_static_gain k=10 seed 125: success False hit 0.98 fa/s 0.00 (256 s)
+[29/30] v3_static_gain k=10 seed 129: success False hit 1.00 fa/s 0.00 (237 s)
+[30/30] v3_static_gain k=10 seed 130: success False hit 1.00 fa/s 0.00 (236 s)
+Network: 1000 afferents (500 in the pattern), 1 neuron, Masquelier 2008 rule and neuron; 300 evenly spaced presentations per run; 30 seeds (streams shared by the arms); scored on the last third. Device arms: 10 ms pulses, 10 ms write window, calibrated on the retained step. mean ± sd over seeds; success = runs meeting hit > 98 %, no false alarm, latency < 10 ms.
+
+| gap (ms) | arm | success | hit % | false alarms /s | latency ms | pattern w>0.9 % (read / stored) | background w<0.1 % (read / stored) | mean background w (read / stored) |
+|---|---|---|---|---|---|---|---|---|
+| 450 | v3_static_gain | 6/30 | 48.1 ± 49.5 | 0.01 ± 0.02 | 17.0 ± 8.7 | 9.9 ± 10.8 / 9.9 ± 10.8 | 56.0 ± 36.6 / 56.0 ± 36.6 | 0.125 ± 0.098 / 0.125 ± 0.098 |
+wall 795 s -> validation\ablation\out\prereg\gain_control_gap450
