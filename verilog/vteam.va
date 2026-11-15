@@ -42,7 +42,7 @@
 // at the PWL corners.  A fixed-order integrator (Spectre's errpreset=
 // conservative selects gear2only) is under-resolved there, so the state change
 // per pulse edge, and thus edge timing, is step-sensitive (measured: +3 % of an
-// ON edge's move at maxstep 1 ps; see validation/README.md, VTEAM).
+// ON edge's move at maxstep 1 ps).
 //
 // Uses only idt on an implicit node (no $bound_step, no previous-evaluation
 // variables, no events).

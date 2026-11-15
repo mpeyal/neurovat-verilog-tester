@@ -440,4 +440,4 @@ execution outside Cadence, the `.va` also compiles with
 
 ## License
 
-NeuroVAT is released under the [MIT License](LICENSE). Third-party device models are not redistributed here and keep their own licences: the Stanford-PKU RRAM Verilog-A model must be downloaded from nanoHUB (see `validation/README.md`). Comparison scripts call MemTorch (GPL-3.0) as a separate, optionally installed package; no MemTorch code is included.
+NeuroVAT is released under the [MIT License](LICENSE). Third-party device models are not redistributed here and keep their own licences: the Stanford-PKU RRAM Verilog-A model must be downloaded from nanoHUB (see `twins/README.md`). The VTEAM twin restates the equations of the variant MemTorch (GPL-3.0) implements; no MemTorch code is included. Validation of the twins against Spectre is maintained separately.

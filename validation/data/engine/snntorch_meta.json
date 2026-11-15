@@ -1,6 +1,0 @@
-{
-  "torch": "2.15.0+cpu",
-  "snntorch": "1.0.0",
-  "dtype": "float64 CPU",
-  "device": "EcfetV2 (shared programming)"
-}

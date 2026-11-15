@@ -1,8 +1,0 @@
-{
-  "model": "stanford_pku",
-  "n_points": 8372,
-  "source": "Spectre 24.1",
-  "stimulus": "dc_reset_ref",
-  "stimulus_set": "stanford-1",
-  "wall_s": 0.0775
-}

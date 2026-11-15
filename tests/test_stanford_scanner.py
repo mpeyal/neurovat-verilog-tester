@@ -77,8 +77,12 @@ def test_builtin_hints_drop_generic_memristor_words():
 
 
 def test_stanford_twin_spec_keywords():
-    from validation.stanford import core
-    spec = core.twin_module().TWIN_SPEC
+    import importlib.util
+    path = ROOT / "twins" / "stanford_pku_rram.py"
+    mspec = importlib.util.spec_from_file_location("nvat_test_stanford_scan", path)
+    mod = importlib.util.module_from_spec(mspec)
+    mspec.loader.exec_module(mod)
+    spec = mod.TWIN_SPEC
     assert spec["key"] == "stanford_pku"
     assert "rram_v_1_0_0" in spec["va_keywords"]
     assert all(len(w) > len("rram") for w in spec["va_keywords"])

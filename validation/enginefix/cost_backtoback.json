@@ -1,8 +1,0 @@
-{
- "what": "validation/enginefix/cost.py (1000 afferents, k=10, 4 s), run back to back on a loaded laptop: master ac92294 code, fixed code, master again; seconds of wall time per stream-second",
- "master_v3_time": [6.996, 6.585],
- "master_ideal": 5.412,
- "fixed_v3_time": 7.754,
- "fixed_ideal": 5.737,
- "earlier_separate_runs": {"master_v3_time": 4.624, "master_ideal": 3.872, "fixed_v3_time": 6.311, "fixed_ideal": 4.111}
-}

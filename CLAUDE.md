@@ -118,10 +118,7 @@ Virtuoso** on a shared university host.
   (decay within the pulse, as the `.va`), so splitting a pulse anywhere
   changes G by <= ~1e-7 of the window (`test_driven_step_is_split_invariant`);
   the x / G_nv arithmetic is the old one, so serial / G_nv paths are
-  bit-identical to before (`tests/test_static_paths_unchanged.py`). The C5
-  schedule replayed through the engine reads what Spectre computes (Gate A
-  16/16, max 0.003 % of range, `validation/enginefix/replay_c5.py`,
-  `tests/test_c5_engine_read.py`). In
+  bit-identical to before (`tests/test_static_paths_unchanged.py`). In
   `masquelier.Synapses` a time-dynamic array runs on a device clock that
   carries across runs (`t0 = device.clock`), and the efficacy is re-read
   every `read_ms` (1 ms) with `device.peek(t)`; weight = `clip((G - g_min)
@@ -131,9 +128,7 @@ Virtuoso** on a shared university host.
   `vector_twin_factory`, legacy for scalar-adapter twins, where physical time
   measured ~8x slower: v2 3x784, 25 s vs 3 s per stream s) | "physical time,
   full read" | "legacy (writes only, G_nv)". The supervised
-  Trainer (`CrossbarSNN`) still uses the serial / G_nv adapter. C6
-  ablation: `validation/ablation/run_ablation.py` (ideal / NeuroSim fitted
-  curve / v3 static / v3 physical time).
+  Trainer (`CrossbarSNN`) still uses the serial / G_nv adapter.
 - Bridge note: the mailbox holds one command; while an async command
   (`nt_train`, ...) is pending, a second command (e.g. `shot`) is not served
   while it runs (a `shot` sent then came back black), so a mid-run screenshot
@@ -155,7 +150,7 @@ Virtuoso** on a shared university host.
   mirrored into the other (the models are meant to be equivalent).
   One deliberate exception: `verilog/ecfet_v3.va` tapers the outward write
   within `x_soft = 1e-5` of each rail (smooth stable fixed point; without it
-  Spectre's step collapsed at x = 1, see `validation/bound/`). The twin keeps
+  Spectre's step collapsed at x = 1). The twin keeps
   the hard clamp (the x_soft -> 0 limit; G differs by <= ~3e-6 of the
   window); `check_va` lists `x_soft` as ".va only".
 - The models are used across runs via `simulate()`, which calls `model.reset()`

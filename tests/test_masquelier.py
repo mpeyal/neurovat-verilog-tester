@@ -529,7 +529,7 @@ def test_keyed_runs_keep_the_background_whatever_the_deletion_and_jitter(given):
 def test_two_pre_spikes_in_one_step_depress_once_by_the_first():
     """Nearest-spike rule: only an afferent's FIRST pre spike after a post is
     depressed, even when its second spike falls in the same 0.1 ms step
-    (found by the Brian2 cross-check, validation/engine)."""
+    (found by a cross-check against Brian2)."""
     import math
     from neurovat.masquelier import Stream
     P = MasquelierParams(n_afferents=9, n_pattern=0, threshold=4.0,

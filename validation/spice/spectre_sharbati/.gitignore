@@ -1,8 +1,0 @@
-# Spectre work files (they carry host / user names); commit only scrubbed CSVs
-**/*.raw/
-**/*.log
-**/*.ahdlSimDB/
-**/*.srf
-**/*.out
-**/*.tran
-**/*.csv

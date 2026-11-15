@@ -106,8 +106,7 @@ parameter real R_eq          = 10k  from (0:inf);   // delithiated equilibrium  
 // peak ~A_stdp at |dt|->0, with the slow 19s tail (~0.7 uS out to 1800 ms); the
 // -side is its anti-symmetric mirror.  Parameter names/defaults are checked
 // against model_v2.py by vatester/tools_ext.check_consistency; waveform-level
-// validation of this .va against a SPICE simulator is not yet done and is
-// tracked in validation/ (being added).
+// validation of this .va against Spectre is maintained separately.
 // This REPLACES the old continuous trace, which under-charged for short pulses
 // and gave a weak, mis-shaped Spectre window.  Same-polarity trains (Fig.3
 // LTP/LTD, panel-c pulses) leave the opposite trace at ~0, so the lock-in stays

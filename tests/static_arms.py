@@ -1,22 +1,21 @@
-"""NeuroSim-style per-pulse nonlinear synapse, fitted to the ECFET v3 twin.
+"""Device arms used by test_static_paths_unchanged.py: the ideal / NeuroSim
+fitted-curve / v3 static (serial timing, G_nv read) synapses with the stream
+parameters, write width and unit current under which the recorded
+fingerprints in ``data/static_paths_master.json`` were taken.
 
-The NeuroSim device model (Chen, Peng & Yu, IEEE TCAD 2018) describes LTP and
-LTD as functions of the pulse number P only:
+NeuroSim-style per-pulse nonlinear synapse (Chen, Peng & Yu, IEEE TCAD 2018),
+fitted to the ECFET v3 twin:
 
     LTP:  G(P) = Gmin + B_p (1 - exp(-P / A_p)),   B_p = (Gmax-Gmin) / (1 - exp(-Pmax / A_p))
     LTD:  G(Q) = Gmax - B_d (1 - exp(-Q / A_d)),   B_d = (Gmax-Gmin) / (1 - exp(-Pmax / A_d))
 
 (Q = depression pulses counted from Gmax). A write moves the device along the
 curve of its direction from the pulse number that corresponds to its present
-conductance. The device has NO time: nothing happens between pulses, the
-read is the stored conductance. Here a pulse of current ``amp`` and width
-``w`` counts as ``|amp| w / q_unit`` (fractional) unit pulses, ``q_unit`` =
-the v3 unit pulse charge (50 pA x 10 ms), so drive is charge, as for v3.
+conductance. The device has no time. A pulse of current ``amp`` and width
+``w`` counts as ``|amp| w / q_unit`` unit pulses, ``q_unit`` = the v3 unit
+pulse charge (50 pA x 10 ms).
 
-``fit_v3(params)`` measures the v3 twin's retained LTP / LTD curves with unit
-pulses (from Gmin up to Gmax and back, ``Pmax`` = Q_full / Q_ref pulses per
-branch) and fits A_p, A_d by least squares; the fit residuals are returned
-and must be reported with any result that uses this model.
+The arithmetic here must not change: the test compares results bit for bit.
 """
 import math
 
@@ -24,6 +23,32 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 
 from neurovat.devices import DeviceArray
+
+WIDTH = 10e-3
+WINDOW_MS = 10.0
+I_UNIT = 50e-12
+
+
+def v3_params():
+    from simulation_core.model_v3 import V3Params
+    return V3Params.paper(A_stdp=0.0)
+
+
+def make_array(arm, n_post, n_pre, fit):
+    from neurovat.devices import EcfetV3Array
+    if arm == "neurosim":
+        return array_from_fit(fit, n_post, n_pre)
+    if arm == "v3_static":
+        return EcfetV3Array(v3_params(), n_post, n_pre, "serial", "nv")
+    raise ValueError(arm)
+
+
+def base_params(a):
+    from neurovat.masquelier import MasquelierParams
+    n = a.afferents
+    return MasquelierParams(n_afferents=n, n_pattern=n // 2,
+                            threshold=500.0 * n / 2000.0, n_repeats=1,
+                            spacing="even")
 
 
 class NeuroSimArray(DeviceArray):
