@@ -101,7 +101,8 @@ def write_deck(n, out_dir):
     out_dir.mkdir(parents=True, exist_ok=True)
     va = Path(os.path.relpath(ROOT / "verilog", out_dir)).as_posix()
     f = out_dir / f"v3_n{n}.scs"
-    f.write_text(deck_text(meta, per, n, t_stop, va), encoding="utf-8", newline="\n")
+    with open(f, "w", encoding="utf-8", newline="\n") as fh:     # py3.9
+        fh.write(deck_text(meta, per, n, t_stop, va))
     return f
 
 
@@ -230,11 +231,16 @@ def bench(a):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     meta, per, t_stop = workload()
+    spectre_dead = False                  # a timeout: skip every larger N
     for n in a.n:
         rec = {"benchmark": "v3_array", "n": n, "t_stop_s": t_stop,
+               "commit": a.commit,
                "pulses": sum(len(p) for p in pulses_of(per, n)), "sides": {}}
         spectre_probes = None
-        if "spectre" in a.sides and n <= a.spectre_max:
+        if "spectre" in a.sides and spectre_dead:
+            rec["sides"]["spectre"] = {"skipped": "a smaller N timed out",
+                                       "timed_out": True}
+        elif "spectre" in a.sides and n <= a.spectre_max:
             deck = write_deck(n, out / "decks")
             runs = []
             for r in range(a.reps):
@@ -258,6 +264,7 @@ def bench(a):
                 "total": summary([x["total_elapsed_s"] for x in runs]),
                 "wall": summary([x["wall_s"] for x in runs]),
                 "timed_out": any(x["timed_out"] for x in runs)}
+            spectre_dead = rec["sides"]["spectre"]["timed_out"]
             if spectre_probes is not None:
                 np.savez_compressed(out / f"spectre_probes_n{n}.npz",
                                     t=spectre_probes[0], G=spectre_probes[1])
@@ -292,6 +299,7 @@ def main(argv=None):
     b.add_argument("--spectre-max", type=int, default=100000)
     b.add_argument("--timeout", type=float, default=900.0)
     b.add_argument("--out", default=str(ROOT / "results" / "scaling" / "v3"))
+    b.add_argument("--commit", default="", help="code commit, recorded")
     d = sub.add_parser("deck")
     d.add_argument("--n", type=int, required=True)
     d.add_argument("--out", default=str(ROOT / "results" / "scaling" / "v3" / "decks"))

@@ -6,8 +6,10 @@ the whole run ("Time used", parse + AHDL compile + DC + transient). The
 CPU / elapsed ratio of the transient is kept as the thread check (a
 multi-threaded run would show CPU >> elapsed).
 """
+import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -29,14 +31,16 @@ def parse_log(text):
     cpu_tr, el_tr = _pair(text, r"Total time required for tran analysis")
     cpu_all, el_all = _pair(text, r"Time used:")
     m = re.search(r"Number of accepted tran steps\s*=\s*(\d+)", text)
-    thr = re.findall(r"^[^\n]*\bthread[^\n]*$", text, re.I | re.M)
     return {"tran_cpu_s": cpu_tr, "tran_elapsed_s": el_tr,
             "total_cpu_s": cpu_all, "total_elapsed_s": el_all,
             "accepted_steps": int(m.group(1)) if m else None,
-            "thread_lines": [ln.strip()[:120] for ln in thr][:4]}
+            "tran_cpu_over_elapsed": (cpu_tr / el_tr if cpu_tr and el_tr else None)}
 
 
-def run(deck, timeout=TIMEOUT_S, keep_raw=False, extra=()):
+MT1 = ("+mt=1",)      # one solver thread, explicitly
+
+
+def run(deck, timeout=TIMEOUT_S, keep_raw=False, extra=MT1):
     """-> dict of timings; ``raw`` = path of the PSF tran file if kept."""
     deck = Path(deck)
     stem = deck.with_suffix("")
@@ -46,11 +50,14 @@ def run(deck, timeout=TIMEOUT_S, keep_raw=False, extra=()):
     cmd = ["spectre", "+escchars", "-format", "psfascii", "-raw", raw.name,
            "+log", log.name, *extra, deck.name]
     t0 = time.perf_counter()
+    # own process group: on a timeout the wrapper AND the solver are killed
+    p = subprocess.Popen(cmd, cwd=deck.parent, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
     try:
-        p = subprocess.run(cmd, cwd=deck.parent, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=timeout)
-        rc, timed_out = p.returncode, False
+        rc, timed_out = p.wait(timeout=timeout), False
     except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        p.wait()
         rc, timed_out = None, True
     wall = time.perf_counter() - t0
     text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
@@ -59,7 +66,7 @@ def run(deck, timeout=TIMEOUT_S, keep_raw=False, extra=()):
     if raw.is_dir():
         c = sorted(raw.glob("*.tran*"))
         tr = c[0] if c else None
-    if keep_raw and tr is not None:
+    if keep_raw and tr is not None and not timed_out:
         out["raw"] = str(tr)
     else:
         shutil.rmtree(raw, ignore_errors=True)
