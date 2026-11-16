@@ -2,9 +2,10 @@
 
 After learning, test the network (STDP off) while ONE input factor at a time
 departs from its nominal value - spike-time jitter, missing (deleted) spikes,
-extra (noise) spikes - the robustness panels of Masquelier, Guyonneau &
-Thorpe (2008) (jitter 1 / 3 ms, 10 / 30 % deletion, 5 / 26 Hz extra spikes;
-their levels, our network). The same levels are run on an UNTRAINED copy of
+extra (noise) spikes - modeled on the robustness tests of Masquelier,
+Guyonneau & Thorpe (2008). The jitter and deletion levels follow that paper;
+the extra-spike levels (default 5 / 26 Hz) are this tool's choice, not values
+reported there. The same levels are run on an UNTRAINED copy of
 the network (same parameters and frozen patterns, start weights): the
 Test-before-Train baseline, so a curve shows what training bought.
 

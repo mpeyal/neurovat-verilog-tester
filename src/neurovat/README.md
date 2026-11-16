@@ -319,9 +319,10 @@ learning.
 `vatester.stream_robust.sweep` (the GUI: the Trainer's stream mode,
 Robustness tab) tests a trained network while ONE input factor at a time
 departs from its nominal value: spike-time jitter, missing (deleted) pattern
-spikes, and extra (noise) spikes, at the levels of the 2008 paper's
-robustness panels (jitter 1 / 3 ms, 10 / 30 % deletion, 5 / 26 Hz) plus the
-value the network was trained with. It is recall: every level runs with
+spikes, and extra (noise) spikes, at default levels (jitter 1 / 3 ms and
+10 / 30 % deletion, following the 2008 paper's robustness tests; extra
+spikes 5 / 26 Hz, this tool's choice, not values reported in that paper)
+plus the value the network was trained with. It is recall: every level runs with
 STDP off and the threshold held, on one fixed keyed stream
 (`Session.run(stream_key=...)`), so the trained and untrained networks see
 the same stream, a repeat sweep gives identical numbers, and the session
