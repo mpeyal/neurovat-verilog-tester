@@ -11,8 +11,10 @@ FeFET) without Cadence. Three built-in ECFET behavioral models are included:
 
 **Your own devices (FeFET, FeCAP, RRAM, ...):** add a `.va` source to `verilog/`
 and its Python twin to `twins/` (see [twins/README.md](twins/README.md)); the app
-registers it at startup, or the built-in agent can build the twin for you.
-Voltage-driven FeFET/FeCAP twins get the voltage drive, STDP and polarization
+registers it at startup. The built-in agent can help you write a twin, but
+its output is not guaranteed to be correct: validate the twin against your
+circuit simulator (for example Spectre) running the same `.va` before you
+rely on it. Voltage-driven FeFET/FeCAP twins get the voltage drive, STDP and polarization
 views. The authors' own FeFET and FeCAP models are private and not included.
 
 ## GUI
