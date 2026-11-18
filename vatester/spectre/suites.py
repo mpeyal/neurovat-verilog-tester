@@ -159,10 +159,17 @@ def _P(m):
 
 
 # ---------------------------------------------------------------- sets
-def _memristor(spec, params, width, read_level):
+def _memristor(spec, params, width, read_level, given=None):
+    given = given or {}
     edge = width / 200
     amps = {}
+    if given.get("amp_pos") is not None:
+        amps[+1] = abs(float(given["amp_pos"]))
+    if given.get("amp_neg") is not None:
+        amps[-1] = abs(float(given["amp_neg"]))
     for sign in (+1, -1):
+        if sign in amps:
+            continue
         w = width
         while w <= 1e-3:
             a = _find_amp(spec, params, "voltage", sign, w, edge, _G, 0.05, 0.02, 5.0)
@@ -172,7 +179,8 @@ def _memristor(spec, params, width, read_level):
                 break
             w *= 10
     if not amps:
-        raise RuntimeError("the twin shows no switching up to 5 V and 1 ms pulses")
+        raise RuntimeError("the twin shows no switching up to 5 V and 1 ms pulses; "
+                           "give the pulse amplitudes (--amp-pos / --amp-neg)")
     vp, vn = amps.get(+1), amps.get(-1)
     if vp is None or vn is None:          # unipolar: use the one found for both
         vp = vp or (vn if vn else None)
@@ -234,11 +242,14 @@ def _memristor(spec, params, width, read_level):
                                   "width_s": width}, vr, width, width / 100)
 
 
-def _ecfet(spec, params):
-    width = 10e-3
+def _ecfet(spec, params, given=None):
+    given = given or {}
+    width = float(given.get("width") or 10e-3)
     edge = 1e-6
-    iu = _find_amp(spec, params, "current", +1, width, edge, _G, 0.01, 1e-13, 1e-6,
-                   opposite=False)
+    iu = given.get("amp_pos")
+    if iu is None:
+        iu = _find_amp(spec, params, "current", +1, width, edge, _G, 0.01, 1e-13, 1e-6,
+                       opposite=False)
     if iu is None:
         neg = _find_amp(spec, params, "current", -1, width, edge, _G, 0.01, 1e-13,
                         1e-6, opposite=False)
@@ -288,10 +299,12 @@ def _ecfet(spec, params):
     return Suite("ecfet", S, {"I_unit_A": iu, "width_s": width}, None, width, 1e-3)
 
 
-def _fecap(spec, params, width):
+def _fecap(spec, params, width, given=None):
+    given = given or {}
     edge = width / 50
-    vc = None
-    w = width
+    vc = given.get("amp_pos")
+    vc = abs(float(vc)) if vc is not None else None
+    w = width if vc is None else 1e3          # skip the search when given
     while w <= 1e-2:
         vc = _find_amp(spec, params, "voltage", +1, w, edge, _P, 0.5, 0.05, 10.0)
         if vc is not None:
@@ -329,10 +342,10 @@ def _fecap(spec, params, width):
                  width / 100)
 
 
-def _fefet(spec, params, width, read_level):
+def _fefet(spec, params, width, read_level, given=None):
     if read_level is None:
         read_level = float(getattr(make_model(spec, params).p, "Vread", 0.0))
-    suite = _memristor(spec, params, width, read_level)
+    suite = _memristor(spec, params, width, read_level, given)
     suite.profile = "fefet"
     suite.calibration = {"V_program": suite.calibration["V_switch_pos"],
                          "V_erase": suite.calibration["V_switch_neg"],
@@ -340,8 +353,14 @@ def _fefet(spec, params, width, read_level):
     return suite
 
 
-def build_suite(spec, params=None, profile=None, width=None, read_level=None):
-    """The automatic test set of a twin."""
+def build_suite(spec, params=None, profile=None, width=None, read_level=None,
+                given=None):
+    """The automatic test set of a twin.  `given` holds user answers that
+    replace the calibration: amp_pos, amp_neg (V, or A for the ECFET unit
+    current), width (s)."""
+    given = dict(given or {})
+    if given.get("width") and not width:
+        width = float(given["width"])
     profile = profile or profile_of(spec)
     hint = spec.get("spectre") or {}
     width = width or hint.get("width")
@@ -353,11 +372,11 @@ def build_suite(spec, params=None, profile=None, width=None, read_level=None):
         except Exception:
             read_level = None
     if profile == "ecfet":
-        return _ecfet(spec, params)
+        return _ecfet(spec, params, given)
     if profile == "memristor":
-        return _memristor(spec, params, width or 10e-9, read_level)
+        return _memristor(spec, params, width or 10e-9, read_level, given)
     if profile == "fecap":
-        return _fecap(spec, params, width or 1e-6)
+        return _fecap(spec, params, width or 1e-6, given)
     if profile == "fefet":
-        return _fefet(spec, params, width or 1e-6, read_level)
+        return _fefet(spec, params, width or 1e-6, read_level, given)
     raise ValueError(f"unknown profile {profile!r}; choose from {PROFILES}")

@@ -264,3 +264,34 @@ def test_validate_end_to_end_with_fake_spectre(tmp_path):
     rep, _ = validate(va, None, ROOT, tmp_path / "bad", runner=_fake_runner(spec, 1.05),
                       open_report=False, log=lambda *a: None)
     assert rep["verdict"] == "FAIL"                # 5 % current error is caught
+
+
+# ---------------------------------------------------------------- setup questions
+def test_parse_number_and_read_gate_suggestion():
+    from vatester.spectre.setup import parse_number, suggest_read_gate
+    assert parse_number("10n") == pytest.approx(1e-8)
+    assert parse_number("1.5m") == pytest.approx(1.5e-3)
+    assert parse_number("-3V") == -3.0 and parse_number("50p") == pytest.approx(5e-11)
+    assert parse_number("1e-6s") == pytest.approx(1e-6)
+    vg = np.linspace(-3, 6, 37)
+    idd = np.where(vg > 0.5, (vg - 0.5) * 8e-6, 0.0)
+    v = suggest_read_gate(vg, idd, 3.0)
+    assert 0.5 < v <= 1.5                                # conducts, below half of 3 V
+    assert suggest_read_gate(vg, np.zeros_like(vg), 3.0) is None
+
+
+def test_interactive_setup_saves_answers(tmp_path):
+    import shutil
+    from vatester.spectre.setup import interactive_setup, load_answers
+    va = tmp_path / "vteam.va"
+    shutil.copy(os.path.join(ROOT, "verilog", "vteam.va"), va)
+    replies = iter(["", "", "0.3", "-0.25", "20n", "nonsense", "-0.1"])
+    a = interactive_setup(va, ROOT, ask=lambda q: next(replies), say=lambda *x: None)
+    assert a["twin"] == "vteam" and a["profile"] == "memristor"
+    assert a["amp_pos"] == 0.3 and a["width"] == pytest.approx(20e-9)
+    assert a["read_level"] == -0.1                      # "nonsense" was asked again
+    assert load_answers(va) == a
+    from vatester.spectre.suites import build_suite
+    su = build_suite(load_twin("vteam", ROOT), None, a["profile"], None, a["read_level"],
+                     {k: a[k] for k in ("amp_pos", "amp_neg", "width")})
+    assert su.calibration["V_switch_pos"] == 0.3 and su.width == pytest.approx(20e-9)

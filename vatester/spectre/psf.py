@@ -172,11 +172,11 @@ def load_waveform(path):
     """Load a PSF-ASCII file, a PSF raw directory (its *.tran file) or a CSV."""
     p = Path(path)
     if p.is_dir():
-        trans = sorted(p.glob("*.tran")) + sorted(p.glob("*.tran.tran"))
-        trans = sorted(set(trans))
-        if not trans:
-            raise PSFError(f"no *.tran file in {p}")
-        p = trans[0]
+        found = sorted(set(p.glob("*.tran")) | set(p.glob("*.tran.tran")))
+        found = found or sorted(p.glob("*.dc"))          # a DC sweep: sweep.dc
+        if not found:
+            raise PSFError(f"no *.tran or *.dc result in {p}")
+        p = found[0]
     return parse_waveform(p.read_text(encoding="utf-8", errors="replace"))
 
 

@@ -168,6 +168,24 @@ def score(dev, suite, stim, tw, ref):
             out.update(quantity="G", unit="S", rule="reads", verdict="INCONCLUSIVE",
                        note="the test has no read plateaus at the read level")
             return out
+        if dev.profile == "fefet":
+            span = float(np.max(gr) - np.min(gr)) if np.all(np.isfinite(gr)) else 0.0
+            if not span > 0:
+                out.update(quantity="G", unit="S", rule="reads", verdict="INCONCLUSIVE",
+                           read_times=reads, g_twin=gt, g_ref=gr, n_reads=int(len(reads)),
+                           note=f"Spectre's read conductance does not change during the "
+                                f"test (read gate {suite.read_level:g} V); check the "
+                                f"read bias and the program/erase amplitudes")
+                return out
+            err = np.abs(gt - gr) / span
+            out.update(read_times=reads, g_twin=gt, g_ref=gr, n_reads=int(len(reads)),
+                       read_g_max_pct=100 * float(np.max(err)),
+                       read_g_mean_pct=100 * float(np.mean(err)),
+                       quantity="G", unit="S",
+                       rule="read G error / G range: max <= 3 %, mean <= 1 %")
+            ok = err.max() <= C.READ_MAX_LIMIT and err.mean() <= C.READ_MEAN_LIMIT
+            out["verdict"] = "PASS" if ok else "FAIL"
+            return out
         g_floor = 1e-6 * float(np.max(np.abs(gr))) if np.any(gr) else 0.0
         if not np.all(np.isfinite(gr)) or np.min(np.abs(gr)) <= max(g_floor, 1e-30):
             out.update(quantity="G", unit="S", rule="reads", verdict="INCONCLUSIVE",
@@ -431,14 +449,29 @@ def _jsonable(o):
 # ------------------------------------------------------------------ main entry
 def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
              profile=None, width=None, runner=None, replay=True, open_report=True,
-             v_ds=0.1, log=print, read_level=None):
+             v_ds=0.1, log=print, read_level=None, answers=None):
+    """answers: the user's setup (setup.interactive_setup or a saved
+    <name>.validate.json): twin, profile, width, amp_pos, amp_neg, read_level,
+    v_ds, twin_read_param.  Explicit arguments win over answers."""
+    a = answers or {}
+    twin = twin or a.get("twin")
+    profile = profile or a.get("profile")
+    width = width or a.get("width")
+    read_level = read_level if read_level is not None else a.get("read_level")
+    if a.get("v_ds") is not None and v_ds == 0.1:
+        v_ds = float(a["v_ds"])
+    given = {k: a[k] for k in ("amp_pos", "amp_neg", "width") if a.get(k) is not None}
+    params = dict(params or {})
+    if a.get("twin_read_param") and read_level is not None:
+        params.setdefault(a["twin_read_param"], float(read_level))
+    params = params or None
     workspace = str(workspace or REPO)
     va_path = Path(va_path)
     text = va_path.read_text(encoding="utf-8", errors="replace")
     module, ports, va_params, bound = va_interface(text)
     key = twin or match_twin(va_path.name, module, workspace)
     spec = load_twin(key, workspace)
-    suite = build_suite(spec, params, profile, width, read_level)
+    suite = build_suite(spec, params, profile, width, read_level, given)
     inst = {**shared_params(spec, va_params, params),
             **{k: v for k, v in (params or {}).items() if k in va_params}}
     dev = Device(suite.profile, va_path, module, ports, inst, bound, v_ds, spec)
@@ -494,14 +527,15 @@ def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
         tw = twins[min(twins)]
         sc = score(dev, suite, st, tw, ref)
         sc["reference_step_s"] = fine[0]
-        if sc["verdict"] == "FAIL" and not ref_ok:
-            sc["verdict"] = "INCONCLUSIVE"
-            sc["note"] = (f"the Spectre reference did not converge (finest vs next "
-                          f"{nxt['max_err_pct']:.3g} %); refine the steps")
-        elif not ref_ok:
-            sc["note"] = (f"Spectre at {fine[1]:.3g} s still differs from {fine[0]:.3g} s "
-                          f"by up to {nxt['max_err_pct']:.3g} %; the twin agrees with "
-                          f"the finest run")
+        if not ref_ok:
+            conv_note = (f"Spectre's result depends on the time step: at {fine[1]:.3g} s it "
+                         f"differs from {fine[0]:.3g} s by up to {nxt['max_err_pct']:.3g} %")
+            if sc["verdict"] == "FAIL":
+                sc["verdict"] = "INCONCLUSIVE"
+                conv_note += "; no converged reference to judge the twin against"
+            elif sc["verdict"] == "PASS":
+                conv_note += "; the twin agrees with the finest run"
+            sc["note"] = conv_note + (f". {sc['note']}" if sc.get("note") else "")
         _plot_l1(out / f"l1_{st.name}.png", dev, st, tw, ref, sc)
         l1.append(sc)
         extra = (f", read G max {sc['read_g_max_pct']:.3g} %"
@@ -537,7 +571,7 @@ def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
     report = {"verdict": overall, "module": module, "va": str(va_path),
               "twin": f"{spec['key']} ({spec.get('label', '')})", "profile": dev.profile,
               "simulator": f"{info.get('simulator', '')} {info.get('version', '')}".strip(),
-              "date": time.strftime("%Y-%m-%d %H:%M"),
+              "date": time.strftime("%Y-%m-%d %H:%M"), "setup": a,
               "calibration": suite.calibration, "shared_params": dev.inst,
               "layer2": conv,
               "layer1": l1, "layer3": l3}

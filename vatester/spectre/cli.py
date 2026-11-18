@@ -263,6 +263,12 @@ def main(argv=None):
     p.add_argument("--v-ds", type=float, default=0.1, help="FeFET drain read bias (V)")
     p.add_argument("--read-level", type=float,
                    help="read bias of the read plateaus (memristor: V; FeFET: gate V)")
+    p.add_argument("--amp-pos", type=float, help="positive / program amplitude (V; ECFET: A)")
+    p.add_argument("--amp-neg", type=float, help="negative / erase amplitude (V)")
+    p.add_argument("--ask", action="store_true",
+                   help="ask the setup questions even when saved answers exist")
+    p.add_argument("--yes", action="store_true",
+                   help="ask nothing: use saved answers, else the automatic values")
     p.add_argument("--no-replay", action="store_true", help="skip layer 3")
     p.add_argument("--no-open", action="store_true", help="do not open the report")
     p.add_argument("--out", help="report folder (default results/validation/<module>_<time>)")
@@ -298,10 +304,26 @@ def main(argv=None):
             import tempfile
             va = va_from_virtuoso(a.cell, a.out or tempfile.mkdtemp(prefix="nvat_va_"))
             print(f"read {a.cell} from Virtuoso -> {va}")
+        from .setup import interactive_setup, load_answers
+        runner = ssh_runner(a.timeout, a.keep)
+        saved = load_answers(va)
+        answers = saved
+        if not a.yes and sys.stdin.isatty():
+            if saved and not a.ask:
+                print(f"saved setup for {Path(va).name}: "
+                      + ", ".join(f"{k}={v}" for k, v in saved.items()))
+                if input("use it? [Y/n]: ").strip().lower() in ("n", "no"):
+                    answers = interactive_setup(va, a.workspace, runner, saved=saved)
+            else:
+                answers = interactive_setup(va, a.workspace, runner, saved=saved)
+        answers = dict(answers or {})
+        for k in ("amp_pos", "amp_neg"):
+            if getattr(a, k) is not None:
+                answers[k] = getattr(a, k)
         report, out = validate(va, a.twin, a.workspace, a.out, _params(a.param) or None,
-                               a.profile, a.width, ssh_runner(a.timeout, a.keep),
+                               a.profile, a.width, runner,
                                not a.no_replay, not a.no_open, a.v_ds,
-                               read_level=a.read_level)
+                               read_level=a.read_level, answers=answers)
         return 0 if report["verdict"] == "PASS" else 1
 
     if a.cmd == "import":

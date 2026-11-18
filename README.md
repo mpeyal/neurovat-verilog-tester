@@ -440,6 +440,14 @@ directly by `Q_ref` / `n_states`.
     python -m vatester.spectre validate --va verilog/my_device.va
     python -m vatester.spectre validate --cell MYLIB/my_device/veriloga    # from Virtuoso
 
+0. **asks you a few questions** in a terminal, each with a suggested answer
+   (Enter keeps it): which twin, the device type, the pulse amplitudes and
+   width (suggested by probing the twin), and for a FeFET the drain bias and
+   the read gate voltage (suggested from a Spectre Id-Vg sweep of the `.va`:
+   the read must be where the transistor conducts). The answers are saved as
+   `<name>.validate.json` next to the `.va` and offered again next time
+   (`--ask` asks again, `--yes` asks nothing). Numbers take SI suffixes: `10n`,
+   `1u`, `50p`;
 1. reads the `.va` (a file, or a Virtuoso cellview through skillbridge):
    module, pins, parameters, `$bound_step` parameter;
 2. finds its twin (built-in ECFET v1/v2/v3 by module name, else the `twins/`
@@ -479,7 +487,7 @@ the one named in `TWIN_SPEC["spectre"]["monitors"] = {"<pin>": "<observable>"}`)
 are found by name (d/drain, g/gate, s/source, b/body/bulk) or by that order.
 Optional hints in `TWIN_SPEC["spectre"]`: `profile`, `width` (base pulse
 width), `read_level`, `monitors`. `--profile`, `--width`, `--read-level`,
-`--param name=value` and `--v-ds` override them.
+`--param name=value`, `--amp-pos`, `--amp-neg` and `--v-ds` override them.
 
 The layers can also be run one at a time:
 
