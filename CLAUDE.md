@@ -141,7 +141,12 @@ Virtuoso** on a shared university host.
 - Tools-menu utilities (GUI-free, testable, shared with the bridge):
   `vatester/tools_ext.py` (twin/.va consistency, OpenVAF compile, LTP/LTD fit).
 - Twin vs Spectre (GUI-free): `vatester/spectre/` - `python -m vatester.spectre
-  run|compare|converge|replay|import|deck`. Layer 1 (`layer1.py`): one PWL
+  validate|run|compare|converge|replay|import|deck`. `validate` (validate.py)
+  is the one-command path: .va (file or Virtuoso cellview) -> twin match ->
+  profile + fixed test set scaled by probing the twin (suites.py: ecfet,
+  memristor, fecap, fefet) -> layer 2 picks the step -> layer 1 on every
+  test -> layer 3 for ECFET v3 -> report.html with plots. Shared twin/.va
+  parameters go to the instance with the twin's value. Layer 1 (`layer1.py`): one PWL
   drives the generated deck (`deck.py`: two-terminal or ECFET In/Out/IGsc/Rmem)
   and the twin (`twinrun.py`: built-in v1/v2/v3 or a twins/ key); Spectre runs
   on the host over SSH (`remote.py`: own `~/.neurovat_runs/<id>/` folder per

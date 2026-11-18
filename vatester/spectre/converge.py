@@ -24,17 +24,25 @@ def _row(kind, step, test, ref, key):
             "verdict": C.verdict(m)}
 
 
-def convergence(runs, stim, device, twin_runs):
-    key = quantity(device, stim.kind)
+def convergence(runs, stim, device, twin_runs, quantity_key=None, cross=True,
+                spectre_key=None):
+    """quantity_key: the compared column (default from the device and stimulus);
+    spectre_key: a different column for the Spectre-vs-Spectre rows;
+    cross=False leaves out the twin-vs-Spectre rows (when the twin's quantity
+    is not defined the same way at every instant)."""
+    key = quantity_key or quantity("ecfet" if device == "ecfet" else "2t", stim.kind)
+    skey = spectre_key or key
     steps = sorted(runs)
     fine = runs[steps[0]]
-    rows = [_row("spectre vs finest spectre", s, runs[s], fine, key) for s in steps[1:]]
+    rows = [_row("spectre vs finest spectre", s, runs[s], fine, skey) for s in steps[1:]]
     tdts = sorted(twin_runs)
     tfine = twin_runs[tdts[0]]
     rows += [_row("twin vs finest twin", d, twin_runs[d], tfine, key) for d in tdts[1:]]
-    rows.append(_row("twin vs finest spectre", tdts[-1], twin_runs[tdts[-1]], fine, key))
-    for s in steps[1:]:
-        rows.append(_row("twin vs spectre at this step", s, twin_runs[tdts[-1]], runs[s], key))
+    if cross:
+        rows.append(_row("twin vs finest spectre", tdts[-1], twin_runs[tdts[-1]], fine, key))
+        for s in steps[1:]:
+            rows.append(_row("twin vs spectre at this step", s, twin_runs[tdts[-1]],
+                             runs[s], key))
     passing = [s for s in steps[1:]
                if next(r for r in rows if r["what"] == "spectre vs finest spectre"
                        and r["step_s"] == s)["verdict"] == "PASS"]
@@ -42,6 +50,7 @@ def convergence(runs, stim, device, twin_runs):
         "finest_step_s": steps[0],
         "coarsest_converged_step_s": max(passing) if passing else steps[0],
         "unconverged_steps_s": [s for s in steps[1:] if s not in passing],
-        "twin_vs_finest": rows[len(steps) - 1 + len(tdts) - 1]["verdict"],
+        "twin_vs_finest": next((r["verdict"] for r in rows
+                                if r["what"] == "twin vs finest spectre"), "n/a"),
     }
     return rows, summary

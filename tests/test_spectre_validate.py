@@ -201,3 +201,66 @@ def test_replay_recording_waves_and_score():
         assert np.all(np.diff(np.round(t / TICK)) > 0)
     sig = {"time": rec.reads_t, **{f"n_rm{k}": 1.0 / rec.reads_g[:, k] for k in range(4)}}
     assert all(r["verdict"] == "PASS" for r in score_replay(rec, sig))
+
+
+# ---------------------------------------------------------------- automatic validation
+def _fake_runner(spec, scale=1.0):
+    """Stands in for Spectre: reads the PWL and maxstep from each deck, runs
+    the twin and returns the signals the deck saves (current scaled by `scale`)."""
+    import re as _re
+
+    def run(decks, va_path, out_dir):
+        out = {}
+        for name, text in decks.items():
+            body = _re.search(r"wave=\[(.*?)\]", text, _re.S).group(1).replace("\\", " ")
+            nums = [float(x) for x in body.split()]
+            st = Stimulus(np.array(nums[0::2]), np.array(nums[1::2]))
+            step = float(_re.search(r"maxstep=([0-9.eE+-]+)", text).group(1))
+            tw = run_twin(spec, st, step)
+            out[name] = ({"time": tw["time"], "n_p": tw["V"], "X1:p": scale * tw["I"]},
+                         {"simulator": "fake", "version": "0"})
+        return out
+    return run
+
+
+def test_suites_are_fixed_and_scaled():
+    from vatester.spectre.suites import build_suite, profile_of
+    vt = load_twin("vteam", ROOT)
+    su = build_suite(vt)
+    assert profile_of(vt) == "memristor" and len(su.stimuli) == 5
+    assert su.stimuli[0].name == "train"
+    assert 0.02 < su.calibration["V_switch_pos"] < 0.2      # VTEAM v_off = 0.02 V
+    assert -0.3 < su.calibration["V_switch_neg"] < -0.2     # VTEAM v_on = -0.2 V
+    assert [s.name for s in build_suite(vt).stimuli] == [s.name for s in su.stimuli]
+    e = build_suite(load_twin("v3", ROOT))
+    assert e.profile == "ecfet" and len(e.stimuli) == 8 and e.calibration["I_unit_A"] > 0
+
+
+def test_va_interface_and_twin_match():
+    from vatester.spectre.deck import transistor_roles, va_interface
+    from vatester.spectre.validate import match_twin
+    mod, ports, params, bound = va_interface(open(os.path.join(ROOT, "verilog", "vteam.va"),
+                                                  encoding="utf-8").read())
+    assert (mod, ports) == ("vteam", ["p", "n"]) and "r_on" in params and bound is None
+    assert match_twin("vteam.va", "vteam", ROOT) == "vteam"
+    assert match_twin("x.va", "ecfet_v3", ROOT) == "v3"
+    roles, mon = transistor_roles(["vdrain", "vgate", "vsource", "vbody", "p_node"])
+    assert roles == {"drain": "vdrain", "gate": "vgate", "source": "vsource",
+                     "body": "vbody"} and mon == ["p_node"]
+    roles, mon = transistor_roles(["d", "g", "s"])
+    assert roles == {"drain": "d", "gate": "g", "source": "s"} and mon == []
+
+
+def test_validate_end_to_end_with_fake_spectre(tmp_path):
+    from vatester.spectre.validate import validate
+    spec = load_twin("vteam", ROOT)
+    va = os.path.join(ROOT, "verilog", "vteam.va")
+    rep, out = validate(va, None, ROOT, tmp_path / "ok", runner=_fake_runner(spec),
+                        open_report=False, log=lambda *a: None)
+    assert rep["verdict"] == "PASS" and rep["profile"] == "memristor"
+    assert len(rep["layer1"]) == 5 and (out / "report.html").exists()
+    assert (out / "layer2_convergence.png").exists() and (out / "l1_train.png").exists()
+    assert "r_on" in rep["shared_params"]          # twin values passed to the instance
+    rep, _ = validate(va, None, ROOT, tmp_path / "bad", runner=_fake_runner(spec, 1.05),
+                      open_report=False, log=lambda *a: None)
+    assert rep["verdict"] == "FAIL"                # 5 % current error is caught

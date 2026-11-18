@@ -249,6 +249,25 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m vatester.spectre", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("validate", help="ONE command: automatic test set, layers 1-3, "
+                       "plots in report.html")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--va", help="Verilog-A file")
+    src.add_argument("--cell", help="LIB/CELL/VIEW in Virtuoso (read through skillbridge)")
+    p.add_argument("--twin", help="twin key (default: matched from the .va)")
+    p.add_argument("--workspace", default=str(REPO), help="folder holding twins/")
+    p.add_argument("--profile", choices=("ecfet", "memristor", "fecap", "fefet"),
+                   help="device profile (default: from the twin)")
+    p.add_argument("--width", type=float, help="base pulse width (default per profile)")
+    p.add_argument("--param", action="append", help="name=value for the twin and the .va")
+    p.add_argument("--v-ds", type=float, default=0.1, help="FeFET drain read bias (V)")
+    p.add_argument("--read-level", type=float,
+                   help="read bias of the read plateaus (memristor: V; FeFET: gate V)")
+    p.add_argument("--no-replay", action="store_true", help="skip layer 3")
+    p.add_argument("--no-open", action="store_true", help="do not open the report")
+    p.add_argument("--out", help="report folder (default results/validation/<module>_<time>)")
+    p.add_argument("--keep", action="store_true", help="keep the remote run folders")
+    p.add_argument("--timeout", type=int, default=3600)
     p = sub.add_parser("run", help="Layer 1: deck -> Spectre (SSH) -> PSF import -> twin")
     _add_common(p, True)
     p.add_argument("--deck", help="run this hand-written deck instead")
@@ -271,6 +290,19 @@ def main(argv=None):
     p.add_argument("path", nargs="?")
     p.add_argument("--skill", help="read this file on the host through skillbridge")
     a = ap.parse_args(argv)
+
+    if a.cmd == "validate":
+        from .validate import ssh_runner, va_from_virtuoso, validate
+        va = a.va
+        if a.cell:
+            import tempfile
+            va = va_from_virtuoso(a.cell, a.out or tempfile.mkdtemp(prefix="nvat_va_"))
+            print(f"read {a.cell} from Virtuoso -> {va}")
+        report, out = validate(va, a.twin, a.workspace, a.out, _params(a.param) or None,
+                               a.profile, a.width, ssh_runner(a.timeout, a.keep),
+                               not a.no_replay, not a.no_open, a.v_ds,
+                               read_level=a.read_level)
+        return 0 if report["verdict"] == "PASS" else 1
 
     if a.cmd == "import":
         try:

@@ -435,10 +435,53 @@ directly by `Q_ref` / `n_states`.
 
 ## Validating against Cadence
 
-`vatester/spectre/` checks a twin against Spectre running the same `.va`, in
-three layers. One piecewise-linear (PWL) stimulus is written into the Spectre
-deck and also drives the twin; Spectre's transient result is imported in the
-PSF-ASCII format (or as a CSV export) and compared with the twin.
+**One command.** Give the Verilog-A model; NeuroVAT does the rest:
+
+    python -m vatester.spectre validate --va verilog/my_device.va
+    python -m vatester.spectre validate --cell MYLIB/my_device/veriloga    # from Virtuoso
+
+1. reads the `.va` (a file, or a Virtuoso cellview through skillbridge):
+   module, pins, parameters, `$bound_step` parameter;
+2. finds its twin (built-in ECFET v1/v2/v3 by module name, else the `twins/`
+   file whose `va_keywords` match);
+3. picks the device profile and its **fixed test set**, scaled to the device by
+   probing the twin (no amplitudes to type in):
+
+   | profile | how it is chosen | drive | test set | compared |
+   |---|---|---|---|---|
+   | `ecfet` | built-in v1/v2/v3, or a current-driven twin | gate current | train, single pulse, amplitude, width and gap sweeps, retention hold, STDP pairs, random spike train | G = 1/V(Rmem) |
+   | `memristor` | other voltage-driven two-terminal twins | voltage | switching train, amplitude and width sweeps, read disturb, random train, a read after every pulse | current + G at every read |
+   | `fecap` | `device_class` FeCAP | voltage | PUND, slow and fast P-V loops, minor loop, amplitude and width sweeps | polarization (monitor pin) + current |
+   | `fefet` | `device_class` FeFET | gate voltage | program/erase train, amplitude and width sweeps, read disturb, random train | G = I_d / V_ds at every read |
+
+4. passes every parameter the twin and the `.va` share to the Spectre instance,
+   with the twin's value;
+5. **layer 2** runs every test in Spectre at three maximum steps; the finest
+   run is the reference, accepted when the next-finest run agrees with it (the
+   report also says whether the coarse deck step alone would have been enough);
+6. **layer 1** scores the twin on every test against that reference;
+7. **layer 3** replays a training run (ECFET v3);
+8. writes `results/validation/<module>_<time>/report.html` with every plot,
+   `summary.json` and the Spectre data, and opens the report.
+
+The verdict is **PASS** (every test agrees), **FAIL** (a test disagrees
+against a converged reference) or **INCONCLUSIVE** (no failure, but a
+reference did not converge, or the comparison is undefined, e.g. a FeFET that
+conducts no current at the read bias: set `--read-level`). Exit code 0 = PASS.
+
+**Your own FeCAP, FeFET, memristor or ECFET.** Put the `.va` in `verilog/` and
+its twin in `twins/` (see [twins/README.md](twins/README.md)); set
+`device_class` in its `TWIN_SPEC` ("FeCAP", "FeFET", "RRAM", ...). Pins are
+read from the `.va`: a capacitor's first two pins are its terminals and any
+further pin is a monitor output (e.g. polarization, compared with the twin's
+`P (uC/cm2)`, `Ptot (uC/cm2)` or `P (norm.)` observable, in that order, or
+the one named in `TWIN_SPEC["spectre"]["monitors"] = {"<pin>": "<observable>"}`); a transistor's pins
+are found by name (d/drain, g/gate, s/source, b/body/bulk) or by that order.
+Optional hints in `TWIN_SPEC["spectre"]`: `profile`, `width` (base pulse
+width), `read_level`, `monitors`. `--profile`, `--width`, `--read-level`,
+`--param name=value` and `--v-ds` override them.
+
+The layers can also be run one at a time:
 
 **Layer 1, waveform agreement** (one stimulus):
 

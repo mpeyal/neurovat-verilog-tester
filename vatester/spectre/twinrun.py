@@ -28,7 +28,8 @@ def builtin_spec(key):
         return None
     return {"key": s.key, "label": s.label, "model_class": s.cls,
             "params_class": s.params_cls, "input_kind": s.input_kind,
-            "device": "ecfet"}
+            **({"device": "ecfet", "device_class": "ECFET"} if s.key in ("v1", "v2", "v3")
+               else {"device_class": s.key.upper()})}
 
 
 def load_twin(key, workspace):
@@ -77,8 +78,16 @@ def run_twin(spec, stim, dt_max, params=None):
     out = {"time": ts, "V": np.empty(n), "I": np.empty(n), "G": np.empty(n)}
     linear = hasattr(model, "step_linear")
     has_current = hasattr(model, "current")
+    obs0 = model.observables() if hasattr(model, "observables") else {}
+    obs_keys = [k for k, v in obs0.items() if isinstance(v, (int, float))]
+    for k in obs_keys:
+        out["obs:" + k] = np.empty(n)
 
     def record(k):
+        if obs_keys:
+            ob = model.observables()
+            for name in obs_keys:
+                out["obs:" + name][k] = float(ob[name])
         g = float(model.G)
         if kind == "voltage":
             v = u[k]

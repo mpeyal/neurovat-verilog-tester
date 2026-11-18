@@ -26,7 +26,8 @@ from pathlib import Path
 
 from ..virtuoso import _load_host
 
-SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
+            "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6"]
 REMOTE_ROOT = ".neurovat_runs"            # under the remote home directory
 
 
@@ -42,17 +43,25 @@ class RemoteRun:
     wall_s: float
 
 
-def _run(cmd, timeout, what):
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        raise SpectreRunError(f"{what} timed out after {timeout} s") from e
-    except FileNotFoundError as e:
-        raise SpectreRunError(f"{what}: {cmd[0]} not found (install OpenSSH)") from e
-    if p.returncode != 0:
+def _run(cmd, timeout, what, retries=1):
+    """Run an ssh/scp command; `retries` > 1 only for steps that are safe to repeat
+    (exit code 255 = connection-level failure is retried after a short wait)."""
+    for attempt in range(retries):
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            if attempt + 1 < retries:
+                continue
+            raise SpectreRunError(f"{what} timed out after {timeout} s") from e
+        except FileNotFoundError as e:
+            raise SpectreRunError(f"{what}: {cmd[0]} not found (install OpenSSH)") from e
+        if p.returncode == 0:
+            return p.stdout
+        if p.returncode == 255 and attempt + 1 < retries:
+            time.sleep(5 * (attempt + 1))
+            continue
         raise SpectreRunError(f"{what} failed ({p.returncode}): "
                               f"{(p.stderr or p.stdout).strip()[-800:]}")
-    return p.stdout
 
 
 def _safe_name(name):
@@ -103,16 +112,22 @@ def run_remote_batch(decks, va_path, host=None, timeout=3600, keep=False,
             pth = Path(tmp) / f"{n}.scs"
             pth.write_text(decks[n], encoding="utf-8", newline="\n")
             files.append(str(pth))
-        _run(["ssh", *SSH_OPTS, host, f"mkdir -p {q(rdir)}"], 60, "remote mkdir")
+        _run(["ssh", *SSH_OPTS, host, f"mkdir -p {q(rdir)}"], 60, "remote mkdir", 4)
         try:
             _run(["scp", "-q", "-B", *SSH_OPTS, *files, str(va_path),
-                  f"{host}:{rdir}/"], 300, "upload")
+                  f"{host}:{rdir}/"], 300, "upload", 4)
             cmds = [f"{spectre} +escchars -format psfascii -raw {q(n + '.raw')} "
                     f"+log {q(n + '.log')} {q(n + '.scs')} >/dev/null 2>&1; "
-                    f"echo EXIT_{n}=$?" for n in names]
-            inner = f"{setup} >/dev/null 2>&1; cd {q(rdir)} && " + "; ".join(cmds)
-            out = _run(["ssh", *SSH_OPTS, host, f"bash -lc {q(inner)}"],
-                       timeout, "spectre run")
+                    f"echo EXIT_{n}=$? >> status.txt" for n in names]
+            job = (f"{setup} >/dev/null 2>&1; " + "; ".join(cmds)
+                   + "; echo DONE >> status.txt")
+            # detached on the host: a dropped SSH connection does not stop it
+            # the 'started' marker makes a retried start a no-op
+            start = (f"cd {q(rdir)} && if [ ! -e started ]; then touch started; "
+                     f"setsid nohup bash -lc {q(job)} > job.out 2>&1 < /dev/null & "
+                     f"fi; echo started")
+            _run(["ssh", *SSH_OPTS, host, start], 60, "spectre start", 4)
+            out = _wait_status(host, rdir, timeout)
             for ln in out.splitlines():
                 if ln.startswith("EXIT_") and "=" in ln:
                     k, v = ln[5:].split("=", 1)
@@ -122,7 +137,8 @@ def run_remote_batch(decks, va_path, host=None, timeout=3600, keep=False,
                 if codes.get(n) == "0":
                     fetch.append(f"{n}.raw")
                 fetch.append(f"{n}.log")
-            _download_tar(host, rdir, fetch, out_dir)
+            for k in range(0, len(fetch), 2):      # one deck (raw + log) per stream
+                _download_tar(host, rdir, fetch[k:k + 2], out_dir)
         finally:
             if not keep:
                 try:
@@ -148,23 +164,59 @@ def run_remote_batch(decks, va_path, host=None, timeout=3600, keep=False,
 
 
 
-def _download_tar(host, rdir, members, out_dir, timeout=600):
-    """Stream `members` of the remote run folder back as one tar over SSH and
-    unpack them into out_dir (no absolute paths, links or '..' accepted)."""
+
+def _wait_status(host, rdir, timeout, poll=5.0):
+    """Poll the detached job's status.txt with short SSH calls until DONE.
+    A failed poll (dropped connection) is retried; gives up after `timeout` s."""
+    q = shlex.quote
+    t_end = time.monotonic() + timeout
+    fails = 0
+    while time.monotonic() < t_end:
+        time.sleep(poll)
+        try:
+            p = subprocess.run(["ssh", *SSH_OPTS, host,
+                                f"cat {q(rdir)}/status.txt 2>/dev/null; true"],
+                               capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            fails += 1
+            continue
+        if p.returncode != 0:
+            fails += 1
+            if fails > 20:
+                raise SpectreRunError("lost the connection to the host: "
+                                      + (p.stderr or "").strip()[-400:])
+            continue
+        fails = 0
+        if "DONE" in p.stdout.split():
+            return p.stdout
+        poll = min(poll * 1.2, 20.0)
+    raise SpectreRunError(f"Spectre did not finish within {timeout} s")
+
+def _download_tar(host, rdir, members, out_dir, timeout=600, retries=3):
+    """Stream `members` of the remote run folder back as one gzip tar over SSH
+    and unpack them into out_dir (no absolute paths, links or '..' accepted).
+    A dropped connection is retried."""
     import io
     import tarfile
     q = shlex.quote
-    cmd = f"cd {q(rdir)} && tar cf - --ignore-failed-read " + " ".join(q(m) for m in members)
-    try:
-        p = subprocess.run(["ssh", *SSH_OPTS, host, cmd], capture_output=True,
-                           timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        raise SpectreRunError(f"download timed out after {timeout} s") from e
-    if p.returncode != 0:
-        raise SpectreRunError("download failed: "
-                              + p.stderr.decode(errors="replace").strip()[-800:])
+    cmd = (f"cd {q(rdir)} && tar czf - --ignore-failed-read "
+           + " ".join(q(m) for m in members))
+    err = ""
+    for attempt in range(retries):
+        try:
+            p = subprocess.run(["ssh", *SSH_OPTS, host, cmd], capture_output=True,
+                               timeout=timeout)
+        except subprocess.TimeoutExpired:
+            err = f"timed out after {timeout} s"
+            continue
+        if p.returncode == 0:
+            break
+        err = p.stderr.decode(errors="replace").strip()[-800:]
+        time.sleep(3 * (attempt + 1))
+    else:
+        raise SpectreRunError(f"download failed after {retries} attempts: {err}")
     out_dir = Path(out_dir).resolve()
-    with tarfile.open(fileobj=io.BytesIO(p.stdout)) as tf:
+    with tarfile.open(fileobj=io.BytesIO(p.stdout), mode="r:gz") as tf:
         for m in tf.getmembers():
             target = (out_dir / m.name).resolve()
             if (m.issym() or m.islnk() or m.name.startswith(("/", "\\"))

@@ -22,6 +22,33 @@ docstring is an annotated, copy-paste template).
 - A `.va` that matches **no** twin shows up but can't be simulated — the GUI
   will **prompt you to build a twin** (the agent writes a new file *here*).
 
+## Validating a twin against Spectre
+
+`python -m vatester.spectre validate --va verilog/<your>.va` runs the fixed
+test set of the twin's device kind in Spectre and compares (see the main
+README, "Validating against Cadence"). The kind comes from `device_class`
+("FeCAP", "FeFET", "RRAM", "Memristor", ...) and `input_kind`; parameters the
+twin's params dataclass shares with the `.va` (same name) are passed to the
+Spectre instance with the twin's value. Optional hints:
+
+```python
+TWIN_SPEC = {
+    ...,
+    "spectre": {"profile": "fecap",     # ecfet | memristor | fecap | fefet
+                "width": 1e-6,          # base pulse width of the test set (s)
+                "read_level": 0.0,      # read bias (memristor / FeFET reads)
+                "monitors": {"pol": "P (uC/cm2)"}},   # .va monitor pin -> observable
+}
+```
+
+A FeCAP twin should expose its polarization as an observable named
+`P (uC/cm2)`, `Ptot (uC/cm2)` or `P (norm.)` (the first one present is used
+unless `monitors` names one) and its current as `I_dev (A)`; its `.va` reports
+polarization on a third (monitor) pin. Make sure the observable and the pin
+report the same quantity (e.g. the ferroelectric part only, or the total
+charge including the dielectric part). A FeFET twin's `.G`
+is the channel conductance at its read bias (`Vread` parameter if it has one).
+
 ## Bundled third-party twin: Stanford-PKU RRAM v1.0.0
 `stanford_pku_rram.py` is a Python restatement of the Stanford-PKU RRAM
 Verilog-A model. The model was developed by the **Stanford Nanoelectronics
