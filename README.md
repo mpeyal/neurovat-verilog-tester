@@ -435,42 +435,70 @@ directly by `Q_ref` / `n_states`.
 
 ## Validating against Cadence
 
-`vatester/spectre/` checks a twin against Spectre running the same `.va`. One
-piecewise-linear (PWL) stimulus is written into the Spectre deck and also drives
-the twin; Spectre's transient result is imported in the PSF-ASCII format and
-both are compared on the twin's time grid:
+`vatester/spectre/` checks a twin against Spectre running the same `.va`, in
+three layers. One piecewise-linear (PWL) stimulus is written into the Spectre
+deck and also drives the twin; Spectre's transient result is imported in the
+PSF-ASCII format (or as a CSV export) and compared with the twin.
 
-    # deck -> Spectre on the Cadence host (SSH) -> PSF-ASCII import -> twin -> verdict
+**Layer 1, waveform agreement** (one stimulus):
+
+    # two-terminal device: deck -> Spectre on the Cadence host (SSH) -> PSF-ASCII -> twin
     python -m vatester.spectre run --va verilog/vteam.va --twin vteam \
         --pulses 0.5,0.8,-0.22,-0.25 --width 10e-9 --gap 3e-9 --read-v -0.1 \
         --maxstep 1e-11 --out results/spectre
+    # ECFET (In, Out, IGsc, Rmem): gate-current stimulus, G = 1/V(Rmem)
+    python -m vatester.spectre run --va verilog/ecfet_v3.va --twin v3 --kind current \
+        --pwl "0 0 0.01 0 0.010001 5e-11 0.02 5e-11 0.020001 0 2 0" --maxstep 1e-3
+    # a result you already have: PSF-ASCII file, .raw folder, or CSV export
+    python -m vatester.spectre compare --psf result.csv --va ... --twin ...
 
-    python -m vatester.spectre compare --psf result.raw ...   # a result you already have
-    python -m vatester.spectre import result.raw               # list its signals
-    python -m vatester.spectre import --skill /path/on/host/tran.tran.tran   # read via skillbridge
-    python -m vatester.spectre deck ... > my.scs                # only write the deck
+**Layer 2, convergence of the reference:** Spectre runs the same stimulus at
+several maximum steps and every run is scored against the finest; the twin is
+refined (dt, dt/2, dt/4) the same way and scored against the finest Spectre
+run. A step that fails against the finest was not converged, and a twin must
+not be judged against it.
+
+    python -m vatester.spectre converge --va ... --twin ... --steps 1e-10,1e-11,1e-12
+
+**Layer 3, training-schedule replay** (ECFET v3): a short unsupervised STDP
+training (the Trainer's stream network) runs with ECFET v3 synapses in
+physical time; every gate pulse the engine applied and every conductance it
+read are recorded; the pulses drive one ECFET instance per synapse in Spectre,
+and the conductance the engine read during training is compared with Spectre
+at the same times. This checks that the engine schedules and reads the device
+correctly, which device-level stimuli cannot show.
+
+    python -m vatester.spectre replay --va verilog/ecfet_v3.va --afferents 16 --seconds 4
+
+**Other commands:** `import result.raw|result.csv` lists the signals;
+`import --skill /path/on/host/tran.tran.tran` reads a result through
+skillbridge (Virtuoso connected), e.g. one an ADE/Maestro run left there;
+`deck ...` only writes the deck.
 
 * **Stimulus:** `--pwl "t v t v ..."`, `--pwl-file t,v.csv` or `--pulses`
   (`--kind current` for a current drive). `--param name=value` sets the same
-  value on the `.va` instance and on the twin.
-* **Deck:** generated for a two-terminal device, `X1 (n_p 0) <module>`, saving
-  V(n_p) and the terminal current I(X1:p); `--deck my.scs` runs your own deck
-  for other devices (`--v-signal` / `--i-signal` name what to compare).
+  value on the `.va` instance and the twin; `--va-param name=value` only on the
+  instance (the value `maxstep` gives the deck's step, e.g. a `$bound_step`
+  parameter).
+* **Twins:** `--twin v1|v2|v3` (the built-in ECFET models) or the `key` of a
+  twin in `twins/`. `--device ecfet|2t` picks the deck (default `ecfet` for
+  v1/v2/v3). The two-terminal deck is `X1 (n_p 0) <module>` saving V(n_p) and
+  I(X1:p); `--deck my.scs` runs your own deck (`--v-signal`, `--i-signal`,
+  `--rmem-signal` name the signals).
 * **Metrics:** NRMSE = rms(twin − Spectre) / (max − min of the Spectre
-  waveform) and the maximum error over the same range, on the current (voltage
-  drive) or voltage (current drive); with `--read-v`, the conductance I/V at
-  every read plateau. Rules: `waveform` NRMSE ≤ 1 % and max ≤ 3 %; `reads`
-  NRMSE ≤ 1 %, per-read G max ≤ 3 % and mean ≤ 1 %. Exit code 0 = PASS.
+  waveform) and the maximum error over the same range, on the conductance
+  (ECFET), the current (voltage drive) or the voltage (current drive); with
+  `--read-v`, also the conductance I/V at every read plateau. Rules: `waveform`
+  NRMSE ≤ 1 % and max ≤ 3 %; `reads` NRMSE ≤ 1 %, per-read G max ≤ 3 % and
+  mean ≤ 1 %. Exit code 0 = PASS.
 * **Running Spectre:** the same `user@host` as the Virtuoso link
   (`NVAT_VIRTUOSO_HOST` or `virtuoso.local`), SSH in batch mode with host-key
-  checking on. Each run uploads the deck and the `.va` into a new
+  checking on. Each run uploads the decks and the `.va` into a new
   `~/.neurovat_runs/<id>/` folder on the host, runs
-  `spectre -format psfascii`, copies `<name>.raw` and the log back and removes
-  the folder (`--keep` leaves it). The environment comes from
-  `NVAT_SPECTRE_SETUP` (default `module load cadence`), the binary from
-  `NVAT_SPECTRE` (default `spectre`).
-* **Skillbridge:** with Virtuoso connected, `import --skill <path>` reads a
-  PSF-ASCII or CSV result that an ADE/Maestro or Spectre run left on the host.
+  `spectre -format psfascii`, streams the results back and removes the folder
+  (`--keep` leaves it). The environment comes from `NVAT_SPECTRE_SETUP`
+  (default `module load cadence`), the binary from `NVAT_SPECTRE` (default
+  `spectre`).
 
 Agreement under these rules is a tolerance check on the stimuli you chose, not
 a proof of equivalence; choose stimuli that exercise every regime of the model.

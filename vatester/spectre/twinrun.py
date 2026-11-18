@@ -19,11 +19,27 @@ import numpy as np
 from ..twin_loader import load_twins
 
 
+def builtin_spec(key):
+    """The built-in ECFET models (simulation_core v1/v2/v3) as a TWIN_SPEC-like
+    dict, or None."""
+    from ..registry import SPEC_BY_KEY
+    s = SPEC_BY_KEY.get(key)
+    if s is None:
+        return None
+    return {"key": s.key, "label": s.label, "model_class": s.cls,
+            "params_class": s.params_cls, "input_kind": s.input_kind,
+            "device": "ecfet"}
+
+
 def load_twin(key, workspace):
-    """Return the TWIN_SPEC dict whose key (or file stem) is `key`.
+    """Return the TWIN_SPEC dict whose key (or file stem) is `key`: a built-in
+    model (v1, v2, v3) or a twin in the workspace's twins/ folder.
 
     Twins are executed on load (see the security note in twin_loader): only
     the trusted twins/ folder of the workspace is read."""
+    b = builtin_spec(key)
+    if b is not None:
+        return b
     found, errors = [], []
     for path, payload, err in load_twins(os.path.join(workspace, "twins")):
         stem = os.path.splitext(os.path.basename(path))[0]

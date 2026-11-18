@@ -149,3 +149,55 @@ def test_remote_needs_host_and_safe_name(tmp_path, monkeypatch):
         remote.run_remote("x", va, "ok")
     with pytest.raises(ValueError):
         remote.run_remote("x", va, "bad name;rm", host="u@h")
+
+
+# ---------------------------------------------------------------- ECFET, layers 2 and 3
+def test_ecfet_deck_and_builtin_twin():
+    from vatester.spectre.deck import make_ecfet_deck
+    from vatester.spectre.layer1 import reference, score
+    st = Stimulus.from_text("0 0 0.01 0 0.010001 5e-11 0.02 5e-11 0.020001 0 0.5 0",
+                            kind="current", name="single")
+    d = make_ecfet_deck("ecfet_v3.va", "ecfet_v3", st, 1e-3, {"Rinit": 4400})
+    assert "X1 (n_in 0 n_igsc n_rmem) ecfet_v3 Rinit=4400" in d
+    assert "igate (0 n_igsc) isource type=pwl" in d and "ic=node" in d
+    with pytest.raises(ValueError):
+        make_ecfet_deck("ecfet_v3.va", "ecfet_v3", Stimulus.from_text("0 0 1 1"), 1e-3)
+    spec = load_twin("v3", ROOT)                       # built-in, not in twins/
+    tw = run_twin(spec, st, 1e-3)
+    assert tw["G"][-1] > tw["G"][0]                    # +50 pA potentiates
+    ref = reference({"time": tw["time"], "n_rmem": 1.0 / tw["G"]}, "ecfet")
+    s = score(tw, ref, "ecfet", st)
+    assert s["compared"] == "conductance" and s["verdict"] == "PASS"
+    bad = run_twin(spec, st, 1e-3, {"Q_full": 0.4e-9})
+    assert score(bad, ref, "ecfet", st)["verdict"] == "FAIL"
+
+
+def test_convergence_table():
+    from vatester.spectre.converge import convergence
+    spec = load_twin("vteam", ROOT)
+    st = Stimulus.pulses([0.5, -0.25], 10e-9, 3e-9, read=-0.1)
+    fine = run_twin(spec, st, 1e-11)
+    good = dict(fine)
+    bad = dict(fine, I=fine["I"] * 1.1)                # a coarse step that is 10 % off
+    twins = {d: run_twin(spec, st, d) for d in (1e-10, 5e-11, 2.5e-11)}
+    rows, s = convergence({1e-12: fine, 1e-11: good, 1e-10: bad}, st, "2t", twins)
+    assert s["unconverged_steps_s"] == [1e-10]
+    assert s["coarsest_converged_step_s"] == 1e-11
+    assert s["twin_vs_finest"] == "PASS"
+
+
+def test_replay_recording_waves_and_score():
+    from vatester.spectre.replay import TICK, gate_waves, record_training, score_replay
+    rec = record_training(afferents=4, seconds=0.6, seed=2)
+    assert rec.n == 4 and len(rec.pulses) > 0 and rec.reads_g.shape[1] == 4
+    waves, t_stop = gate_waves(rec)
+    assert len(waves) == 4 and t_stop > rec.t_end
+    for k, w in enumerate(waves):                       # PWL charge = schedule charge
+        nums = [float(x) for x in w.strip("[] ").replace("\\", " ").split()]
+        t, i = np.array(nums[0::2]), np.array(nums[1::2])
+        q_pwl = np.trapezoid(i, t) if hasattr(np, "trapezoid") else np.trapz(i, t)
+        q_sch = sum(a * wd for c, s, wd, a in rec.pulses if c == k)
+        assert q_pwl == pytest.approx(q_sch, rel=1e-6, abs=1e-24)
+        assert np.all(np.diff(np.round(t / TICK)) > 0)
+    sig = {"time": rec.reads_t, **{f"n_rm{k}": 1.0 / rec.reads_g[:, k] for k in range(4)}}
+    assert all(r["verdict"] == "PASS" for r in score_replay(rec, sig))

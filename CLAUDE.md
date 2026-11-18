@@ -141,13 +141,20 @@ Virtuoso** on a shared university host.
 - Tools-menu utilities (GUI-free, testable, shared with the bridge):
   `vatester/tools_ext.py` (twin/.va consistency, OpenVAF compile, LTP/LTD fit).
 - Twin vs Spectre (GUI-free): `vatester/spectre/` - `python -m vatester.spectre
-  run|compare|import|deck`. One PWL drives the generated deck and the twin;
-  Spectre runs on the host over SSH (`remote.py`: own `~/.neurovat_runs/<id>/`
-  folder per run, removed afterwards; same host source and SSH options as
-  `virtuoso.py`); the PSF-ASCII result is parsed by `psf.py`; `compare.py`
-  holds the pass rule (NRMSE <= 1 %, max <= 3 %; reads: G max <= 3 %, mean
-  <= 1 %). `VirtuosoLink.read_file` reads a result file through skillbridge
-  (read-only). Tests: `tests/test_spectre_validate.py` (no Cadence needed).
+  run|compare|converge|replay|import|deck`. Layer 1 (`layer1.py`): one PWL
+  drives the generated deck (`deck.py`: two-terminal or ECFET In/Out/IGsc/Rmem)
+  and the twin (`twinrun.py`: built-in v1/v2/v3 or a twins/ key); Spectre runs
+  on the host over SSH (`remote.py`: own `~/.neurovat_runs/<id>/` folder per
+  run, removed afterwards, results streamed back as a tar and unpacked with a
+  path check; same host source and SSH options as `virtuoso.py`); the
+  PSF-ASCII / CSV result is parsed by `psf.py`; `compare.py` holds the pass
+  rule (NRMSE <= 1 %, max <= 3 %; reads: G max <= 3 %, mean <= 1 %). Layer 2
+  (`converge.py`): Spectre at several maxsteps vs the finest, twin refined.
+  Layer 3 (`replay.py`): records a masquelier stream training with an
+  EcfetV3Array (program/peek wrapped on the instance) and replays the gate
+  schedule in Spectre, one instance per synapse. `VirtuosoLink.read_file`
+  reads a result through skillbridge (read-only). Tests:
+  `tests/test_spectre_validate.py` (no Cadence needed).
 
 ## Dev workflow
 
