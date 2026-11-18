@@ -268,6 +268,19 @@ class VirtuosoLink:
             return {"ok": True, "path": full, "text": text, "files": files,
                     "note": ""}
 
+    def read_file(self, path):
+        """Read a text file on the Cadence host (e.g. a PSF-ASCII result an
+        ADE/Maestro or Spectre run wrote there). Read-only. Returns its text;
+        raises if the file does not exist or is empty."""
+        with self._lock:
+            self._require()
+            if not isinstance(path, str) or not path or "\n" in path:
+                raise ValueError("path must be a single-line string")
+            text = self.ws["pyReadFile"](path) or ""
+            if not text:
+                raise FileNotFoundError(f"cannot read (missing or empty): {path}")
+            return text
+
     def write_source(self, lib, cell, view, text):
         """Write `text` back to the source file backing a cellview (overwrites
         it in the Cadence library). Returns {ok, path, note}. The library must

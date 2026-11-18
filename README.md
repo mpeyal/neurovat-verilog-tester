@@ -435,11 +435,51 @@ directly by `Q_ref` / `n_states`.
 
 ## Validating against Cadence
 
-Run any scenario with `--csv`, run the same piecewise-constant `isource`
+`vatester/spectre/` checks a twin against Spectre running the same `.va`. One
+piecewise-linear (PWL) stimulus is written into the Spectre deck and also drives
+the twin; Spectre's transient result is imported in the PSF-ASCII format and
+both are compared on the twin's time grid:
+
+    # deck -> Spectre on the Cadence host (SSH) -> PSF-ASCII import -> twin -> verdict
+    python -m vatester.spectre run --va verilog/vteam.va --twin vteam \
+        --pulses 0.5,0.8,-0.22,-0.25 --width 10e-9 --gap 3e-9 --read-v -0.1 \
+        --maxstep 1e-11 --out results/spectre
+
+    python -m vatester.spectre compare --psf result.raw ...   # a result you already have
+    python -m vatester.spectre import result.raw               # list its signals
+    python -m vatester.spectre import --skill /path/on/host/tran.tran.tran   # read via skillbridge
+    python -m vatester.spectre deck ... > my.scs                # only write the deck
+
+* **Stimulus:** `--pwl "t v t v ..."`, `--pwl-file t,v.csv` or `--pulses`
+  (`--kind current` for a current drive). `--param name=value` sets the same
+  value on the `.va` instance and on the twin.
+* **Deck:** generated for a two-terminal device, `X1 (n_p 0) <module>`, saving
+  V(n_p) and the terminal current I(X1:p); `--deck my.scs` runs your own deck
+  for other devices (`--v-signal` / `--i-signal` name what to compare).
+* **Metrics:** NRMSE = rms(twin − Spectre) / (max − min of the Spectre
+  waveform) and the maximum error over the same range, on the current (voltage
+  drive) or voltage (current drive); with `--read-v`, the conductance I/V at
+  every read plateau. Rules: `waveform` NRMSE ≤ 1 % and max ≤ 3 %; `reads`
+  NRMSE ≤ 1 %, per-read G max ≤ 3 % and mean ≤ 1 %. Exit code 0 = PASS.
+* **Running Spectre:** the same `user@host` as the Virtuoso link
+  (`NVAT_VIRTUOSO_HOST` or `virtuoso.local`), SSH in batch mode with host-key
+  checking on. Each run uploads the deck and the `.va` into a new
+  `~/.neurovat_runs/<id>/` folder on the host, runs
+  `spectre -format psfascii`, copies `<name>.raw` and the log back and removes
+  the folder (`--keep` leaves it). The environment comes from
+  `NVAT_SPECTRE_SETUP` (default `module load cadence`), the binary from
+  `NVAT_SPECTRE` (default `spectre`).
+* **Skillbridge:** with Virtuoso connected, `import --skill <path>` reads a
+  PSF-ASCII or CSV result that an ADE/Maestro or Spectre run left on the host.
+
+Agreement under these rules is a tolerance check on the stimuli you chose, not
+a proof of equivalence; choose stimuli that exercise every regime of the model.
+
+To compare by hand instead, run any scenario with `--csv`, run the same
 stimulus on the .va in Spectre, export and overlay. For exact Verilog-A
 execution outside Cadence, the `.va` also compiles with
 [OpenVAF](https://openvaf.semimod.de/) → OSDI → ngspice.
 
 ## License
 
-NeuroVAT is released under the [MIT License](LICENSE). Third-party device models are not redistributed here and keep their own licences: the Stanford-PKU RRAM Verilog-A model must be downloaded from nanoHUB (see `twins/README.md`). The VTEAM twin restates the equations of the variant MemTorch (GPL-3.0) implements; no MemTorch code is included. Validation of the twins against Spectre is maintained separately.
+NeuroVAT is released under the [MIT License](LICENSE). Third-party device models are not redistributed here and keep their own licences: the Stanford-PKU RRAM Verilog-A model must be downloaded from nanoHUB (see `twins/README.md`). The VTEAM twin restates the equations of the variant MemTorch (GPL-3.0) implements; no MemTorch code is included.
