@@ -146,8 +146,8 @@ def test_remote_needs_host_and_safe_name(tmp_path, monkeypatch):
     va.write_text("module a(p, n); endmodule\n")
     monkeypatch.setattr(remote, "_load_host", lambda: "")
     with pytest.raises(remote.SpectreRunError):
-        remote.run_remote("x", va, "ok")
-    with pytest.raises(ValueError):
+        remote.Session()
+    with pytest.raises(ValueError):                # checked before any connection
         remote.run_remote("x", va, "bad name;rm", host="u@h")
 
 
@@ -295,3 +295,121 @@ def test_interactive_setup_saves_answers(tmp_path):
     su = build_suite(load_twin("vteam", ROOT), None, a["profile"], None, a["read_level"],
                      {k: a[k] for k in ("amp_pos", "amp_neg", "width")})
     assert su.calibration["V_switch_pos"] == 0.3 and su.width == pytest.approx(20e-9)
+
+
+# ---------------------------------------------------------------- SSH login safety
+def test_login_guard_limits_and_pauses(tmp_path):
+    from vatester.spectre.remote import LoginGuard, SpectreRunError
+    g = LoginGuard(tmp_path / "g.json", max_logins=3, window_s=600, cooldown_s=1800)
+    for k in range(3):
+        g.check_and_record(now=1000 + k)
+    with pytest.raises(SpectreRunError, match="limit"):
+        g.check_and_record(now=1010)               # 4th login within 10 min
+    g.check_and_record(now=1000 + 601)              # the oldest one aged out
+    g.block("connection reset", now=2000)
+    with pytest.raises(SpectreRunError, match="paused"):
+        g.check_and_record(now=2000 + 1799)
+    LoginGuard(tmp_path / "g.json", cooldown_s=1800).check_and_record(now=2000 + 1801)
+
+
+class _FakeChan:
+    def __init__(self, code):
+        self.code = code
+
+    def recv_exit_status(self):
+        return self.code
+
+
+class _FakeStream:
+    def __init__(self, data, code=0):
+        self.data, self.channel = data, _FakeChan(code)
+
+    def read(self):
+        return self.data
+
+
+class _FakeSFTP:
+    def __init__(self, log):
+        self.log = log
+
+    def put(self, local, remote):
+        self.log.append(("put", remote))
+
+    def close(self):
+        pass
+
+
+class _FakeClient:
+    """Answers the commands of one batch; records every call."""
+    def __init__(self, names, tar_bytes):
+        self.log, self.names, self.tar = [], names, tar_bytes
+        self.polls = 0
+
+    def exec_command(self, cmd, timeout=None):
+        self.log.append(("exec", cmd.split()[0]))
+        if cmd.startswith("cat "):
+            self.polls += 1
+            body = ("".join(f"EXIT_{n}=0\n" for n in self.names) + "DONE\n"
+                    if self.polls >= 2 else "")
+            return None, _FakeStream(body.encode()), _FakeStream(b"")
+        if " tar czf " in cmd:
+            return None, _FakeStream(self.tar), _FakeStream(b"")
+        return None, _FakeStream(b"started\n"), _FakeStream(b"")
+
+    def open_sftp(self):
+        return _FakeSFTP(self.log)
+
+    def close(self):
+        self.log.append(("close",))
+
+
+def test_batch_uses_one_login_and_polls_on_it(tmp_path, monkeypatch):
+    import io
+    import tarfile
+    from vatester.spectre import remote
+    va = tmp_path / "a.va"
+    va.write_text("module a(p, n); endmodule\n")
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data in (("d1.raw/tran.tran.tran", b"x"), ("d1.log", b"ok"),
+                           ("d2.raw/tran.tran.tran", b"y"), ("d2.log", b"ok")):
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    fake = _FakeClient(["d1", "d2"], buf.getvalue())
+    logins = []
+
+    def fake_open(self):
+        self.guard.check_and_record()
+        logins.append(1)
+        self.client = fake
+        return self
+    monkeypatch.setattr(remote.Session, "open", fake_open)
+    monkeypatch.setattr(remote, "POLL_S", 0.01)
+    monkeypatch.setattr(remote.time, "sleep", lambda s: None)
+    guard = remote.LoginGuard(tmp_path / "g.json")
+    s = remote.Session("u@h", guard=guard)
+    runs = remote.run_remote_batch({"d1": "deck1", "d2": "deck2"}, va,
+                                   out_dir=tmp_path / "out", session=s.open())
+    assert len(logins) == 1 and set(runs) == {"d1", "d2"}
+    assert fake.polls >= 2                         # polled on the same connection
+    assert (tmp_path / "out" / "d1.raw" / "tran.tran.tran").read_bytes() == b"x"
+    assert sum(1 for x in fake.log if x[0] == "put") == 3   # two decks + the .va
+
+
+def test_lost_connection_is_not_retried(tmp_path):
+    from vatester.spectre import remote
+
+    class Dead:
+        def exec_command(self, cmd, timeout=None):
+            raise OSError("Connection reset by peer")
+
+        def close(self):
+            pass
+    guard = remote.LoginGuard(tmp_path / "g.json")
+    s = remote.Session("u@h", guard=guard)
+    s.client = Dead()
+    with pytest.raises(remote.SpectreRunError, match="no retry"):
+        s.exec("mkdir x")
+    with pytest.raises(remote.SpectreRunError, match="paused"):
+        guard.check_and_record()                   # every login now refused for 30 min

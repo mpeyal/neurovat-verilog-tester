@@ -142,6 +142,14 @@ class VirtuosoLink:
             return "reused running tunnel"
         if self.tunnel and self.tunnel.poll() is None:
             self.tunnel.terminate()
+        # one SSH login: counted by the shared login guard (too many logins in a
+        # short time are flagged by campus security as a brute-force attack)
+        from .spectre.remote import LoginGuard, SpectreRunError
+        guard = LoginGuard()
+        try:
+            guard.check_and_record()
+        except SpectreRunError as e:
+            raise RuntimeError(str(e)) from e
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         self.tunnel = subprocess.Popen(
             ["ssh", "-N", "-o", "BatchMode=yes",
@@ -158,9 +166,10 @@ class VirtuosoLink:
                 err = (self.tunnel.stderr.read() or b"").decode(
                     errors="replace").strip()
                 self.tunnel = None
+                guard.block(f"tunnel login failed: {err or 'unknown error'}")
                 raise RuntimeError(
                     f"ssh tunnel exited: {err or 'unknown error'} "
-                    "(is SSH key auth set up?)")
+                    "(is SSH key auth set up?). Not retried; SSH paused for 30 min.")
             time.sleep(0.4)
         raise RuntimeError(
             f"tunnel did not open port {self.port} within {wait_s:.0f}s")

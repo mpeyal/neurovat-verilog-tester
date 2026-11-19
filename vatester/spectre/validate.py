@@ -252,14 +252,101 @@ def compared_series(dev, tw, ref, s):
 
 
 # ------------------------------------------------------------------ Spectre
+class Cancelled(RuntimeError):
+    """Raised from a progress callback to stop a validation."""
+
+
+class Progress:
+    """Counts work units and estimates the time remaining.
+
+    Units: one per Spectre run, one per test scored (twin runs + score), and
+    two for the training replay.  ETR = elapsed x remaining / done, from the
+    units finished so far (None until the first one finishes)."""
+
+    def __init__(self, callback=None):
+        self.cb = callback
+        self.t0 = time.monotonic()
+        self.total = 0
+        self.done_base = 0          # units finished in earlier stages
+        self.done = 0
+        self.tests_total = self.tests_done = 0
+        self.runs_total = self.runs_done = 0
+        self.stage = ""
+
+    def plan(self, runs, tests, replay):
+        self.runs_total, self.tests_total = runs, tests
+        self.total = runs + tests + (2 if replay else 0)
+        self.emit("planned")
+
+    def emit(self, stage=None):
+        if stage:
+            self.stage = stage
+        if self.cb is None:
+            return
+        el = time.monotonic() - self.t0
+        eta = (el * (self.total - self.done) / self.done) if self.done else None
+        self.cb({"stage": self.stage, "done": self.done, "total": self.total,
+                 "runs_done": self.runs_done, "runs_total": self.runs_total,
+                 "tests_done": self.tests_done, "tests_total": self.tests_total,
+                 "elapsed_s": el, "eta_s": eta})
+
+    def spectre(self, done, total):
+        self.runs_done = done
+        self.done = self.done_base + done
+        self.emit(f"Spectre {done}/{total} runs")
+
+    def spectre_finished(self, n):
+        self.done_base += n
+        self.done = self.done_base
+        self.runs_done = self.runs_total
+
+    def unit(self, stage, tests=0, n=1):
+        self.done_base += n
+        self.done = self.done_base
+        self.tests_done += tests
+        self.emit(stage)
+
+
 def ssh_runner(timeout=3600, keep=False):
-    from .remote import run_remote_batch
+    """A runner that does all its Spectre work over ONE SSH login (opened at
+    the first call, kept for every later call, closed by runner.close() -
+    validate() closes it at the end)."""
+    from .remote import Session, run_remote_batch
 
-    def run(decks, va_path, out_dir):
-        runs = run_remote_batch(decks, va_path, timeout=timeout, keep=keep, out_dir=out_dir)
-        return {n: load_waveform(r.raw_dir) for n, r in runs.items()}
-    return run
+    class _Runner:
+        def __init__(self):
+            self.session = None
 
+        def __call__(self, decks, va_path, out_dir, progress=None):
+            if self.session is None:
+                self.session = Session().open()
+            runs = run_remote_batch(decks, va_path, timeout=timeout, keep=keep,
+                                    out_dir=out_dir, progress=progress,
+                                    session=self.session)
+            return {n: load_waveform(r.raw_dir) for n, r in runs.items()}
+
+        def close(self):
+            if self.session is not None:
+                self.session.close()
+                self.session = None
+
+    return _Runner()
+
+
+
+def _call_runner(runner, decks, va_path, out_dir, progress=None):
+    """Runners may or may not take a progress callback (tests use simple ones)."""
+    import inspect
+    try:
+        takes = "progress" in inspect.signature(runner).parameters
+    except (TypeError, ValueError):
+        takes = False
+    if takes:
+        return runner(decks, va_path, out_dir, progress=progress)
+    out = runner(decks, va_path, out_dir)
+    if progress is not None:
+        progress(len(decks), len(decks))
+    return out
 
 def conv_steps(profile, base, t_stop):
     f = 4.0 if profile == "ecfet" else 10.0
@@ -449,10 +536,23 @@ def _jsonable(o):
 # ------------------------------------------------------------------ main entry
 def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
              profile=None, width=None, runner=None, replay=True, open_report=True,
-             v_ds=0.1, log=print, read_level=None, answers=None):
+             v_ds=0.1, log=print, read_level=None, answers=None, progress=None):
     """answers: the user's setup (setup.interactive_setup or a saved
     <name>.validate.json): twin, profile, width, amp_pos, amp_neg, read_level,
-    v_ds, twin_read_param.  Explicit arguments win over answers."""
+    v_ds, twin_read_param.  Explicit arguments win over answers.
+    progress(dict) receives the stage, done/total work units, Spectre runs and
+    tests done, the elapsed time and the estimated time remaining (s)."""
+    prog = Progress(progress)
+    runner = runner or ssh_runner()
+    try:
+        return _validate(**{k: v for k, v in locals().items() if k != 'prog'}, prog=prog)
+    finally:
+        if runner is not None and hasattr(runner, 'close'):
+            runner.close()
+
+
+def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner, replay,
+              open_report, v_ds, log, read_level, answers, progress, prog):
     a = answers or {}
     twin = twin or a.get("twin")
     profile = profile or a.get("profile")
@@ -464,8 +564,15 @@ def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
     params = dict(params or {})
     if a.get("twin_read_param") and read_level is not None:
         params.setdefault(a["twin_read_param"], float(read_level))
-    params = params or None
     workspace = str(workspace or REPO)
+    if (profile or "") == "fefet" or a.get("profile") == "fefet":
+        try:                     # a FeFET twin with a drain-bias parameter reads at V_ds
+            from dataclasses import fields as _f
+            if "Vds" in {f.name for f in _f(load_twin(twin, workspace)["params_class"])}:
+                params.setdefault("Vds", float(v_ds))
+        except Exception:        # noqa: BLE001 - twin resolved again below
+            pass
+    params = params or None
     va_path = Path(va_path)
     text = va_path.read_text(encoding="utf-8", errors="replace")
     module, ports, va_params, bound = va_interface(text)
@@ -487,10 +594,13 @@ def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
     plan = {st.name: conv_steps(suite.profile, suite.base_step, st.t_stop)
             for st in suite.stimuli}
     n = sum(len(v) for v in plan.values())
+    do_replay = replay and dev.profile == "ecfet" and spec["key"] == "v3"
+    prog.plan(n, len(suite.stimuli), do_replay)
     log(f"Spectre: {len(suite.stimuli)} tests x 3 steps = {n} runs ...")
     decks = {f"{st.name}__s{i}": dev.deck(st, step)
              for st in suite.stimuli for i, step in enumerate(plan[st.name])}
-    res = runner(decks, va_path, out / "spectre")
+    res = _call_runner(runner, decks, va_path, out / "spectre", prog.spectre)
+    prog.spectre_finished(n)
     info = next(iter(res.values()))[1]
     conv, l1, conv_rows = [], [], {}
     for st in suite.stimuli:
@@ -538,6 +648,8 @@ def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
             sc["note"] = conv_note + (f". {sc['note']}" if sc.get("note") else "")
         _plot_l1(out / f"l1_{st.name}.png", dev, st, tw, ref, sc)
         l1.append(sc)
+        prog.unit(f"test {len(l1)}/{len(suite.stimuli)} scored: {st.name} {sc['verdict']}",
+                  tests=1)
         extra = (f", read G max {sc['read_g_max_pct']:.3g} %"
                  if "read_g_max_pct" in sc else "")
         log(f"  {st.name:20s} ref {fine[0]:.3g} s {'conv.' if ref_ok else 'NOT conv.'}  "
@@ -547,15 +659,18 @@ def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
 
     # ---- layer 3
     l3 = None
-    if replay and dev.profile == "ecfet" and spec["key"] == "v3":
+    if do_replay:
         from .deck import make_replay_deck
         from .replay import gate_waves, record_training, score_replay
         log("Layer 3: training-schedule replay (16 synapses, 4 s) ...")
+        prog.emit("replay: training run")
         rec = record_training(16, 4.0, 1, v3_overrides=params)
+        prog.unit("replay: engine run recorded")
         waves, t_stop = gate_waves(rec)
         deck = make_replay_deck(va_path.name, module, waves, t_stop, 1e-3,
                                 {"Rinit": 1.0 / rec.g_start, "A_stdp": 0.0})
-        sig = runner({"replay": deck}, va_path, out / "spectre")["replay"][0]
+        sig = _call_runner(runner, {"replay": deck}, va_path, out / "spectre")["replay"][0]
+        prog.unit("replay: Spectre done")
         rows3 = score_replay(rec, sig)
         _plot_replay(out / "layer3_replay.png", rows3, rec, sig)
         l3 = {"info": rec.info, "rows": rows3,
@@ -578,6 +693,7 @@ def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
     _html(report, out)
     (out / "summary.json").write_text(json.dumps(_jsonable(report), indent=2, default=str),
                                       encoding="utf-8")
+    prog.emit("finished")
     log(f"Overall: {report['verdict']}  ->  {out / 'report.html'}")
     if open_report:
         try:

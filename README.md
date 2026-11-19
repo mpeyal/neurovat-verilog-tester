@@ -543,13 +543,19 @@ skillbridge (Virtuoso connected), e.g. one an ADE/Maestro run left there;
   NRMSE ≤ 1 % and max ≤ 3 %; `reads` NRMSE ≤ 1 %, per-read G max ≤ 3 % and
   mean ≤ 1 %. Exit code 0 = PASS.
 * **Running Spectre:** the same `user@host` as the Virtuoso link
-  (`NVAT_VIRTUOSO_HOST` or `virtuoso.local`), SSH in batch mode with host-key
-  checking on. Each run uploads the decks and the `.va` into a new
-  `~/.neurovat_runs/<id>/` folder on the host, runs
-  `spectre -format psfascii`, streams the results back and removes the folder
-  (`--keep` leaves it). The environment comes from `NVAT_SPECTRE_SETUP`
-  (default `module load cadence`), the binary from `NVAT_SPECTRE` (default
-  `spectre`).
+  (`NVAT_VIRTUOSO_HOST` or `virtuoso.local`); the host key must already be in
+  `~/.ssh/known_hosts`. A whole validation uses **one SSH login**: the decks
+  and the `.va` are uploaded into a new `~/.neurovat_runs/<id>/` folder,
+  Spectre runs detached (`spectre -format psfascii`), its status is read over
+  the same connection every 30 s, the results come back as one compressed
+  stream and the folder is removed (`--keep` leaves it). A refused or reset
+  connection is never retried. NeuroVAT allows at most 4 SSH logins in 10
+  minutes (all its processes together, recorded in
+  `~/.neurovat/ssh_logins.json`) and pauses SSH for 30 minutes after a failed
+  or reset connection, because many logins in a short time are treated by
+  campus security as a brute-force attack. The environment comes from
+  `NVAT_SPECTRE_SETUP` (default `module load cadence`), the binary from
+  `NVAT_SPECTRE` (default `spectre`). Needs `pip install paramiko`.
 
 Agreement under these rules is a tolerance check on the stimuli you chose, not
 a proof of equivalence; choose stimuli that exercise every regime of the model.

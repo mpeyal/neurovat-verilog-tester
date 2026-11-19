@@ -201,3 +201,64 @@ def interactive_setup(va_path, workspace, runner=None, out_dir=None, ask=input, 
     p = save_answers(va_path, a)
     say(f"  saved to {p}")
     return a
+
+
+def suggest_answers(va_path, workspace, runner=None, given=None, out_dir=None):
+    """Non-interactive suggestions for a GUI form: returns (answers, notes).
+
+    `given` holds values the user already set (twin, profile, v_ds, amp_pos,
+    amp_neg, width, read_level); the rest is filled from the twin calibration
+    and, for a FeFET with a runner, from a Spectre Id-Vg sweep.  notes is a
+    list of lines to show (the sweep table, warnings)."""
+    from .deck import va_interface
+    from .suites import build_suite, profile_of
+    from .twinrun import load_twin, make_model
+    from .validate import Device, match_twin, shared_params
+
+    va_path = Path(va_path)
+    module, ports, va_params, bound = va_interface(
+        va_path.read_text(encoding="utf-8", errors="replace"))
+    a = {k: v for k, v in (given or {}).items() if v not in (None, "")}
+    notes = [f"{va_path.name}: module {module}({', '.join(ports)})"]
+    a["twin"] = a.get("twin") or match_twin(va_path.name, module, workspace)
+    spec = load_twin(a["twin"], workspace)
+    a["profile"] = a.get("profile") or profile_of(spec)
+    prof = a["profile"]
+    if prof == "fefet":
+        a.setdefault("v_ds", 0.1)
+    try:
+        su = build_suite(spec, None, prof, a.get("width"), a.get("read_level"),
+                         {k: a[k] for k in ("amp_pos", "amp_neg") if k in a})
+        cal = su.calibration
+    except RuntimeError as e:
+        notes.append(f"the twin gave no suggestion: {e}")
+        su, cal = None, {}
+    if prof == "ecfet":
+        a.setdefault("amp_pos", float(cal.get("I_unit_A", 50e-12)))
+        a.setdefault("width", 10e-3)
+    elif prof == "fecap":
+        a.setdefault("amp_pos", float(cal.get("V_half_switch", 1.0)))
+        a.setdefault("width", float(cal.get("width_s", 1e-6)))
+    else:
+        a.setdefault("amp_pos", float(cal.get("V_switch_pos", cal.get("V_program", 1.0))))
+        a.setdefault("amp_neg", float(cal.get("V_switch_neg", cal.get("V_erase", -1.0))))
+        a.setdefault("width", float(cal.get("width_s", 1e-6)))
+        if "read_level" not in a:
+            a["read_level"] = float(su.read_level) if su and su.read_level is not None else 0.1
+            if prof == "fefet" and runner is not None:
+                inst = shared_params(spec, va_params)
+                dev = Device("fefet", va_path, module, ports, inst, bound, a["v_ds"], spec)
+                vg, idd = fefet_iv_sweep(dev, runner, out_dir or va_path.parent)
+                notes.append("Spectre Id-Vg sweep at V_ds = %g V:" % a["v_ds"])
+                notes += [f"  Vg {v:6.2f} V   Id {i:.3e} A" for v, i in zip(vg[::4], idd[::4])]
+                sug = suggest_read_gate(vg, idd, a["amp_pos"])
+                if sug is None:
+                    notes.append("the transistor conducts nowhere in -3..6 V: "
+                                 "set the read gate voltage yourself")
+                else:
+                    a["read_level"] = sug
+                    notes.append(f"suggested read gate voltage {sug:g} V")
+        if prof == "fefet":
+            names = {f.name for f in __import__("dataclasses").fields(make_model(spec).p)}
+            a.setdefault("twin_read_param", "Vread" if "Vread" in names else "")
+    return a, notes

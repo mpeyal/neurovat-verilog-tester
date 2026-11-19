@@ -296,6 +296,17 @@ injection** → arbitrary code execution. The following defenses are in place �
    overwrites files on a **shared multi-user host** with no undo — treat any
    agent-driven remote write as destructive; prefer diff/confirm/backup.
 
+7. **SSH logins to the Cadence host are rationed.** Campus security flagged
+   NeuroVAT's old Spectre runner (a new SSH login per step and per status
+   poll, plus retries) as an SSH brute-force attack on 2026-11-18 and reset
+   the connections. `vatester/spectre/remote.py` therefore does ONE login per
+   job (paramiko `Session`: upload, start, polls every >= 30 s, download and
+   cleanup are channels of that connection), never retries a refused or reset
+   connection, and every login (also the Virtuoso tunnel) goes through
+   `LoginGuard`: at most 4 logins per 10 min across processes, and a 30 min
+   pause after a failed or reset connection. Never add polling with fresh
+   `ssh`/`scp` calls, reconnect loops or retries.
+
 6. Don't commit secrets OR infrastructure identifiers. Agent credentials come
    from env vars / the Account dialog only. The Virtuoso login (`user@host`) is
    kept OUT of the repo (this is a **public** repo): `virtuoso.py` /
