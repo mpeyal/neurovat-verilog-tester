@@ -23,9 +23,14 @@ from ..twin_loader import load_twins
 def builtin_spec(key):
     """The built-in ECFET models (simulation_core v1/v2/v3) as a TWIN_SPEC-like
     dict, or None."""
-    from ..registry import SPEC_BY_KEY
+    from ..registry import SPEC_BY_KEY, TWIN_FILE
     s = SPEC_BY_KEY.get(key)
     if s is None:
+        return None
+    # The GUI also registers the twins/ files it found at startup; those must
+    # be read fresh from their file (load_twin), or an edit made while the app
+    # runs - e.g. by "Fix twin with AI" - would be scored with the old code.
+    if not str(TWIN_FILE.get(key, "")).replace("\\", "/").startswith("simulation_core/"):
         return None
     return {"key": s.key, "label": s.label, "model_class": s.cls,
             "params_class": s.params_cls, "input_kind": s.input_kind,

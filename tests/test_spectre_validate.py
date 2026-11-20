@@ -230,6 +230,37 @@ def test_ai_fill_reply_is_checked():
         parse_reply("no json here", ports, keys)
 
 
+def test_twin_edited_while_the_gui_runs_is_loaded_fresh(tmp_path):
+    """The GUI registers twins/ files in the model registry at startup; a
+    validation (and each Fix-twin round) must still run the file as it is now,
+    not the class registered at startup."""
+    import shutil
+    from vatester import registry as R
+    from vatester.spectre.twinrun import builtin_spec
+    from vatester.twin_loader import load_twins
+    (tmp_path / "twins").mkdir()
+    src = open(os.path.join(ROOT, "twins", "vteam.py"), encoding="utf-8").read()
+    f = tmp_path / "twins" / "vteam_regtest.py"
+    f.write_text(src.replace('"key": "vteam"', '"key": "vteam_regtest"')
+                 .replace('"va_keywords": ("vteam",)', '"va_keywords": ("vteam_regtest",)'),
+                 encoding="utf-8")
+    mod, ts = next(p for _, p, _ in load_twins(str(tmp_path / "twins")) if p)
+    R._register_twin(mod, ts)                        # what the GUI does at startup
+    try:
+        assert builtin_spec("vteam_regtest") is None
+        assert builtin_spec("v3") is not None
+        f.write_text(f.read_text(encoding="utf-8").replace(
+            '"label": "VTEAM memristor', '"label": "EDITED VTEAM memristor'), encoding="utf-8")
+        assert load_twin("vteam_regtest", str(tmp_path))["label"].startswith("EDITED")
+    finally:
+        spec = R.SPEC_BY_KEY.pop("vteam_regtest", None)
+        if spec in R.MODEL_SPECS:
+            R.MODEL_SPECS.remove(spec)
+        for d in (R.TWIN_FILE, R.RELOAD_MODULES, R.DEVICE_OF_KEY):
+            d.pop("vteam_regtest", None)
+        shutil.rmtree(tmp_path / "twins", ignore_errors=True)
+
+
 def test_default_output_is_under_the_workspace(tmp_path):
     """Without out_dir the run goes to <workspace>/results/validation (the
     Windows exe's code folder is not the workspace)."""
