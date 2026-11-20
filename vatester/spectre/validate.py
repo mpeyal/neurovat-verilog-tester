@@ -38,12 +38,12 @@ from pathlib import Path
 import numpy as np
 
 from . import compare as C
-from .converge import convergence
+from .converge import coarsest_converged, convergence, read_errors
 from .deck import (ecfet_roles, make_deck, make_ecfet_deck, make_fecap_deck,
                    make_fefet_deck, transistor_roles, va_interface)
 from .psf import find_signal, load_waveform
 from .suites import build_suite
-from .twinrun import builtin_spec, load_twin, make_model, run_twin
+from .twinrun import builtin_spec, load_twin, make_model, run_twin, seconds_per_step
 from ..twin_loader import load_twins
 
 REPO = Path(__file__).resolve().parents[2]
@@ -174,20 +174,22 @@ def score(dev, suite, stim, tw, ref):
                        note="the test has no read plateaus at the read level")
             return out
         if dev.profile == "fefet":
-            span = float(np.max(gr) - np.min(gr)) if np.all(np.isfinite(gr)) else 0.0
-            if not span > 0:
+            r = read_errors(tw, ref, "G", reads)
+            if r is None:
                 out.update(quantity="G", unit="S", rule="reads", verdict="INCONCLUSIVE",
                            read_times=reads, g_twin=gt, g_ref=gr, n_reads=int(len(reads)),
-                           note=f"Spectre's read conductance does not change during the "
-                                f"test (read gate {suite.read_level:g} V); check the "
-                                f"read bias and the program/erase amplitudes")
+                           note=f"Spectre conducts no usable read current (read gate "
+                                f"{suite.read_level:g} V); check the read bias")
                 return out
-            err = np.abs(gt - gr) / span
+            err, scale = r
             out.update(read_times=reads, g_twin=gt, g_ref=gr, n_reads=int(len(reads)),
                        read_g_max_pct=100 * float(np.max(err)),
                        read_g_mean_pct=100 * float(np.mean(err)),
                        quantity="G", unit="S",
-                       rule="read G error / G range: max <= 3 %, mean <= 1 %")
+                       rule=("read G error / G range: max <= 3 %, mean <= 1 %"
+                             if scale == "range" else
+                             "read G error / G (G does not change in this test): "
+                             "max <= 3 %, mean <= 1 %"))
             ok = err.max() <= C.READ_MAX_LIMIT and err.mean() <= C.READ_MEAN_LIMIT
             out["verdict"] = "PASS" if ok else "FAIL"
             return out
@@ -262,11 +264,20 @@ class Cancelled(RuntimeError):
 
 
 class Progress:
-    """Counts work units and estimates the time remaining.
+    """Counts the work and estimates the time remaining from what is left in
+    each stage, at the rate measured for that stage:
 
-    Units: one per Spectre run, one per test scored (twin runs + score), and
-    two for the training replay.  ETR = elapsed x remaining / done, from the
-    units finished so far (None until the first one finishes)."""
+      Spectre runs  - time per run from the runs finished (unknown before the
+                      first one finishes: eta None);
+      twin steps    - time per step from the twin's steps so far, before that
+                      from a short probe (a FeFET twin takes ms per step, so
+                      its runs can outlast Spectre);
+      replay        - one Spectre run plus the training (if planned).
+
+    done/total count units (Spectre runs, tests, replay); `fraction` is the
+    elapsed share of the estimated total time (the progress bar)."""
+
+    EMIT_EVERY_S = 0.5
 
     def __init__(self, callback=None):
         self.cb = callback
@@ -276,24 +287,66 @@ class Progress:
         self.done = 0
         self.tests_total = self.tests_done = 0
         self.runs_total = self.runs_done = 0
+        self.replay = self.replay_done = False
+        self.twin_total = self.twin_done = 0
+        self.twin_s = 0.0           # time spent in twin steps so far
+        self.probe_s = None         # probed time per twin step
+        self.t_spectre = None       # Spectre stage: start, and time per run
+        self.run_s = None
         self.stage = ""
+        self._last_emit = 0.0
 
-    def plan(self, runs, tests, replay):
+    def plan(self, runs, tests, replay, twin_steps=0, sec_per_step=None):
         self.runs_total, self.tests_total = runs, tests
+        self.replay = bool(replay)
         self.total = runs + tests + (2 if replay else 0)
+        self.twin_total, self.probe_s = int(twin_steps), sec_per_step
+        self.t_spectre = time.monotonic()
         self.emit("planned")
+
+    def twin_plan(self, twin_steps):
+        """The exact twin step count, once the steps are chosen."""
+        self.twin_total = self.twin_done + int(twin_steps)
+
+    def twin(self, n_steps, seconds):
+        self.twin_done += n_steps
+        self.twin_s += seconds
+        if time.monotonic() - self._last_emit >= self.EMIT_EVERY_S:
+            self.emit()
+
+    def eta(self):
+        rem = 0.0
+        if self.runs_done < self.runs_total:
+            if not self.runs_done:
+                return None
+            self.run_s = (time.monotonic() - self.t_spectre) / self.runs_done
+            rem += self.run_s * (self.runs_total - self.runs_done)
+        left = max(0, self.twin_total - self.twin_done)
+        if left:
+            rate = (self.twin_s / self.twin_done if self.twin_done >= 2000
+                    else self.probe_s)
+            if rate is None:
+                return None
+            rem += left * rate
+        if self.replay and not self.replay_done:
+            rem += (self.run_s or 0.0) + 5.0
+        return rem
 
     def emit(self, stage=None):
         if stage:
             self.stage = stage
         if self.cb is None:
             return
-        el = time.monotonic() - self.t0
-        eta = (el * (self.total - self.done) / self.done) if self.done else None
+        self._last_emit = time.monotonic()
+        el = self._last_emit - self.t0
+        eta = self.eta()
+        frac = (el / (el + eta) if eta is not None and el + eta > 0
+                else (self.done / self.total if self.total else 0.0))
         self.cb({"stage": self.stage, "done": self.done, "total": self.total,
                  "runs_done": self.runs_done, "runs_total": self.runs_total,
                  "tests_done": self.tests_done, "tests_total": self.tests_total,
-                 "elapsed_s": el, "eta_s": eta})
+                 "twin_steps_done": self.twin_done, "twin_steps_total": self.twin_total,
+                 "elapsed_s": el, "eta_s": eta, "fraction": min(1.0, frac)})
 
     def spectre(self, done, total):
         self.runs_done = done
@@ -301,14 +354,17 @@ class Progress:
         self.emit(f"Spectre {done}/{total} runs")
 
     def spectre_finished(self, n):
+        if self.runs_done and self.t_spectre is not None:
+            self.run_s = (time.monotonic() - self.t_spectre) / max(1, self.runs_total)
         self.done_base += n
         self.done = self.done_base
         self.runs_done = self.runs_total
 
-    def unit(self, stage, tests=0, n=1):
+    def unit(self, stage, tests=0, n=1, replay_done=False):
         self.done_base += n
         self.done = self.done_base
         self.tests_done += tests
+        self.replay_done = self.replay_done or replay_done
         self.emit(stage)
 
 
@@ -352,6 +408,22 @@ def _call_runner(runner, decks, va_path, out_dir, progress=None):
     if progress is not None:
         progress(len(decks), len(decks))
     return out
+
+def twin_steps_for(profile, steps, converged=None):
+    """Twin output steps for one test: a FeFET twin at the coarsest Spectre
+    step whose reads converged (`converged`; the middle step as the estimate
+    before Spectre has run) and twice that; other twins at the coarsest
+    Spectre step / 1, 2, 4."""
+    if profile == "fefet":
+        sc = converged if converged is not None else sorted(steps)[1 if len(steps) > 1 else 0]
+        return [sc, 2 * sc]
+    dt = max(steps)
+    return [dt, dt / 2, dt / 4]
+
+
+def _n_steps(stim, dts):
+    return sum(len(stim.grid(d)) - 1 for d in dts)
+
 
 def conv_steps(profile, base, t_stop):
     f = 4.0 if profile == "ecfet" else 10.0
@@ -602,26 +674,49 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
             for st in suite.stimuli}
     n = sum(len(v) for v in plan.values())
     do_replay = replay and dev.profile == "ecfet" and spec["key"] == "v3"
-    prog.plan(n, len(suite.stimuli), do_replay)
+    est = sum(_n_steps(st, twin_steps_for(suite.profile, plan[st.name]))
+              for st in suite.stimuli)
+    try:
+        probe = seconds_per_step(spec, suite.stimuli[0],
+                                 min(plan[suite.stimuli[0].name]), params)
+    except Exception:            # noqa: BLE001 - the estimate only
+        probe = None
+    prog.plan(n, len(suite.stimuli), do_replay, twin_steps=est, sec_per_step=probe)
     log(f"Spectre: {len(suite.stimuli)} tests x 3 steps = {n} runs ...")
     decks = {f"{st.name}__s{i}": dev.deck(st, step)
              for st in suite.stimuli for i, step in enumerate(plan[st.name])}
     res = _call_runner(runner, decks, va_path, out / "spectre", prog.spectre)
     prog.spectre_finished(n)
     info = next(iter(res.values()))[1]
+    # A FeFET's state is read at the read plateaus: Spectre's own convergence
+    # and the twin are judged there (domain switching makes the drain current
+    # between reads step-sensitive).  Its twin runs at the coarsest Spectre
+    # step whose reads converged, and at twice that as its own check.
+    all_refs, all_reads, tw_dts = {}, {}, {}
+    for st in suite.stimuli:
+        steps = plan[st.name]
+        all_refs[st.name] = {step: dev.reference(res[f"{st.name}__s{i}"][0])
+                             for i, step in enumerate(steps)}
+        all_reads[st.name] = (st.read_times(suite.read_level)
+                              if dev.profile == "fefet" else None)
+        sc_step = (coarsest_converged(all_refs[st.name], "G", all_reads[st.name])
+                   if dev.profile == "fefet" else None)
+        tw_dts[st.name] = twin_steps_for(dev.profile, steps, sc_step)
+    prog.twin_plan(sum(_n_steps(st, tw_dts[st.name]) for st in suite.stimuli))
     conv, l1, conv_rows = [], [], {}
     for st in suite.stimuli:
         steps = plan[st.name]
-        refs = {step: dev.reference(res[f"{st.name}__s{i}"][0])
-                for i, step in enumerate(steps)}
+        refs = all_refs[st.name]
         dt = max(steps)
-        twins = {dt / f: twin_view(dev, run_twin(spec, st, dt / f, params))
-                 for f in (1, 2, 4)}
+        reads = all_reads[st.name]
+        prog.emit(f"twin: {st.name} (test {len(l1) + 1}/{len(suite.stimuli)})")
+        twins = {d: twin_view(dev, run_twin(spec, st, d, params, progress=prog.twin))
+                 for d in tw_dts[st.name]}
         qkey, skey, cross = "I", None, True
         if dev.profile == "ecfet":
             qkey = "G"
         elif dev.profile == "fefet":            # the twin's G is a read value
-            qkey, skey, cross = "G", "I", False
+            qkey = "G"
         elif dev.profile == "fecap" and dev.monitors:
             pk = _pol_key(twins[dt], spec, dev.monitors[0])
             if pk:
@@ -629,7 +724,7 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
                 twins = {k: dict(t, P=t["obs:" + pk]) for k, t in twins.items()}
                 qkey = "P"
         rows, summ = convergence(refs, st, dev.profile, twins, quantity_key=qkey,
-                                 cross=cross, spectre_key=skey)
+                                 cross=cross, spectre_key=skey, reads=reads)
         conv_rows[st.name] = rows
         fine = sorted(steps)
         nxt = next(r for r in rows if r["what"] == "spectre vs finest spectre"
@@ -657,11 +752,13 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
         l1.append(sc)
         prog.unit(f"test {len(l1)}/{len(suite.stimuli)} scored: {st.name} {sc['verdict']}",
                   tests=1)
-        extra = (f", read G max {sc['read_g_max_pct']:.3g} %"
-                 if "read_g_max_pct" in sc else "")
+        parts = []
+        if "nrmse_pct" in sc:
+            parts.append(f"NRMSE {sc['nrmse_pct']:.3g} %, max {sc['max_err_pct']:.3g} %")
+        if "read_g_max_pct" in sc:
+            parts.append(f"read G max {sc['read_g_max_pct']:.3g} %")
         log(f"  {st.name:20s} ref {fine[0]:.3g} s {'conv.' if ref_ok else 'NOT conv.'}  "
-            f"{sc['quantity']}: NRMSE {sc.get('nrmse_pct', float('nan')):.3g} %, "
-            f"max {sc.get('max_err_pct', float('nan')):.3g} %{extra}  {sc['verdict']}")
+            f"{sc['quantity']}: {', '.join(parts) or '-'}  {sc['verdict']}")
     _plot_conv(out / "layer2_convergence.png", conv_rows)
 
     # ---- layer 3
@@ -679,7 +776,7 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
                                 ports=ports, pins=a.get("pins"),
                                 kind=spec.get("input_kind", "current"))
         sig = _call_runner(runner, {"replay": deck}, va_path, out / "spectre")["replay"][0]
-        prog.unit("replay: Spectre done")
+        prog.unit("replay: Spectre done", replay_done=True)
         rows3 = score_replay(rec, sig)
         _plot_replay(out / "layer3_replay.png", rows3, rec, sig)
         l3 = {"info": rec.info, "rows": rows3,

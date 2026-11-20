@@ -308,13 +308,18 @@ class ValidatePanel:
                 self._busy(False, "values suggested; edit if needed, then Start")
         elif kind == "val_progress":
             d = item[1]
-            frac = d["done"] / d["total"] if d["total"] else 0.0
+            frac = d.get("fraction")
+            if frac is None:
+                frac = d["done"] / d["total"] if d["total"] else 0.0
             dpg.set_value("val_bar", frac)
             dpg.configure_item("val_bar", overlay=f"{100 * frac:.0f} %")
             stage = "" if d["stage"].startswith("Spectre ") else d["stage"] + "\n"
+            twin = ""
+            if d.get("twin_steps_total"):
+                twin = (f"   twin steps {100 * d['twin_steps_done'] / d['twin_steps_total']:.0f} %")
             dpg.set_value("val_status",
                           f"{stage}Spectre runs {d['runs_done']}/{d['runs_total']}   "
-                          f"tests scored {d['tests_done']}/{d['tests_total']}   "
+                          f"tests scored {d['tests_done']}/{d['tests_total']}{twin}   "
                           f"elapsed {_fmt_time(d['elapsed_s'])}   "
                           f"remaining {_fmt_time(d['eta_s'])}")
         elif kind == "val_done":

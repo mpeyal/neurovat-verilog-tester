@@ -188,6 +188,28 @@ def test_convergence_table():
     assert s["twin_vs_finest"] == "PASS"
 
 
+def test_convergence_at_reads():
+    """FeFET rule: only the read plateaus count; the waveform between them may
+    differ (switching timing), and a test whose G never changes is judged
+    relative to G instead of its (zero) range."""
+    from vatester.spectre.converge import coarsest_converged, convergence, read_errors
+    t = np.linspace(0, 10, 1001)
+    reads = np.array([2.0, 4.0, 6.0, 8.0])
+    fine = {"time": t, "G": np.where(t < 5, 1e-6, 2e-6)}
+    wiggle = dict(fine, G=fine["G"] * (1 + 0.5 * np.sin(40 * t) ** 2 * (np.abs(
+        t[:, None] - reads).min(1) > 0.2)))                 # off only between reads
+    off = dict(fine, G=np.where(t < 5, 1e-6, 1.5e-6))       # misses a switch
+    assert coarsest_converged({1: fine, 2: wiggle, 3: off}, "G", reads) == 2
+    rows, s = convergence({1: fine, 2: wiggle, 3: off}, None, "fefet",
+                          {1: fine, 2: wiggle}, quantity_key="G", reads=reads)
+    assert s["unconverged_steps_s"] == [3]
+    assert s["twin_vs_finest"] == "PASS"
+    flat = {"time": t, "G": np.full_like(t, 2e-6)}
+    e, scale = read_errors(dict(flat, G=flat["G"] * 1.001), flat, "G", reads)
+    assert scale == "value" and np.allclose(e, 1e-3)
+    assert read_errors({"time": t, "G": 0 * t}, {"time": t, "G": 0 * t}, "G", reads) is None
+
+
 def test_replay_recording_waves_and_score():
     from vatester.spectre.replay import TICK, gate_waves, record_training, score_replay
     rec = record_training(afferents=4, seconds=0.6, seed=2)
