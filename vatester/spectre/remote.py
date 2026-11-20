@@ -184,15 +184,37 @@ class Session:
         return SpectreRunError(f"lost the connection to the Cadence host "
                                f"({type(e).__name__}: {e}); no retry.")
 
-    def exec(self, cmd, timeout=120, binary=False):
-        """Run a command over the open connection -> (exit code, stdout, stderr)."""
+    def exec(self, cmd, timeout=120, binary=False, output=True):
+        """Run a command over the open connection -> (exit code, stdout, stderr).
+
+        output=False waits only for the exit status and never reads the output
+        streams: a command that starts a detached job returns at once even if
+        the job keeps the streams open.  A command time-out is reported as
+        such (the connection is fine); a dropped connection pauses SSH."""
         if self.client is None:
             self.open()
         try:
             _, out, err = self.client.exec_command(cmd, timeout=timeout)
+            chan = out.channel
+            if not output:
+                t_end = time.monotonic() + timeout
+                while not chan.exit_status_ready():
+                    if time.monotonic() > t_end:
+                        chan.close()
+                        raise SpectreRunError(f"remote command did not return within "
+                                              f"{timeout} s: {cmd[:80]}")
+                    time.sleep(0.2)
+                code = chan.recv_exit_status()
+                chan.close()
+                return code, (b"" if binary else ""), ""
             data = out.read()
-            code = out.channel.recv_exit_status()
+            code = chan.recv_exit_status()
             e = err.read().decode(errors="replace")
+        except SpectreRunError:
+            raise
+        except (socket.timeout, TimeoutError) as ex:
+            raise SpectreRunError(f"remote command timed out after {timeout} s "
+                                  f"({cmd[:80]}); no retry") from ex
         except (OSError, EOFError, socket.error) as ex:
             raise self._lost(ex) from ex
         except Exception as ex:                     # paramiko.SSHException et al.
@@ -285,9 +307,9 @@ def _batch(s, decks, names, va_path, timeout, keep, out_dir, setup, spectre, pro
         # detached on the host, so a dropped connection does not kill Spectre
         start = (f"cd {q(rdir)} && setsid nohup bash -lc {q(job)} > job.out 2>&1 "
                  f"< /dev/null & echo started")
-        code, _, err = s.exec(start, 60)
+        code, _, _ = s.exec(start, 60, output=False)
         if code != 0:
-            raise SpectreRunError(f"spectre start failed: {err.strip()[-400:]}")
+            raise SpectreRunError(f"spectre start failed (exit {code})")
         out = _wait_status(s, rdir, timeout, len(names), progress)
         for ln in out.splitlines():
             if ln.startswith("EXIT_") and "=" in ln:
@@ -303,6 +325,10 @@ def _batch(s, decks, names, va_path, timeout, keep, out_dir, setup, spectre, pro
         if not keep and s.client is not None:
             try:
                 s.exec(f"rm -rf {q(rdir)}", 60)
+                # earlier runs left behind (e.g. a stopped validation) whose
+                # job has finished; same connection, no extra login
+                s.exec(f"for d in {REMOTE_ROOT}/*/; do grep -qs DONE \"$d/status.txt\" "
+                       f"&& rm -rf \"$d\"; done; true", 60)
             except SpectreRunError:
                 pass
     wall = time.perf_counter() - t0

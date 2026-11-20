@@ -321,6 +321,12 @@ class _FakeChan:
     def recv_exit_status(self):
         return self.code
 
+    def exit_status_ready(self):
+        return True
+
+    def close(self):
+        pass
+
 
 class _FakeStream:
     def __init__(self, data, code=0):
@@ -491,3 +497,43 @@ def test_setup_asks_for_pins_when_names_are_unknown(tmp_path):
     roles = _ask_pins(lambda q: next(replies), said.append, ["p1", "p2", "p3"], None)
     assert roles == {"in": "p2", "out": "p1", "gate": "p3"}
     assert any("cannot tell" in x for x in said)
+
+
+def test_start_does_not_wait_for_the_detached_jobs_output(tmp_path):
+    """The start command returns on its exit status even if the stream stays
+    open (reading it would wait for the whole Spectre job)."""
+    from vatester.spectre import remote
+
+    class Hanging:
+        def read(self):
+            raise AssertionError("must not read the output of a start command")
+
+    class Client:
+        def exec_command(self, cmd, timeout=None):
+            h = Hanging()
+            h.channel = _FakeChan(0)
+            return None, h, Hanging()
+
+        def close(self):
+            pass
+    s = remote.Session("u@h", guard=remote.LoginGuard(tmp_path / "g.json"))
+    s.client = Client()
+    assert s.exec("setsid nohup x &", 5, output=False)[0] == 0
+
+
+def test_command_timeout_does_not_pause_ssh(tmp_path):
+    import socket
+    from vatester.spectre import remote
+
+    class Slow:
+        def exec_command(self, cmd, timeout=None):
+            raise socket.timeout()
+
+        def close(self):
+            pass
+    guard = remote.LoginGuard(tmp_path / "g.json")
+    s = remote.Session("u@h", guard=guard)
+    s.client = Slow()
+    with pytest.raises(remote.SpectreRunError, match="timed out"):
+        s.exec("cat x", 1)
+    guard.check_and_record()                        # no 30 min pause for a time-out
