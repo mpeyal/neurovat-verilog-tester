@@ -474,6 +474,8 @@ class ControlBridge:
         panel.open()
         va = str(args.get("va") or "")
         if va:
+            norm = {os.path.normpath(v): v for v in panel.va_list}
+            va = norm.get(os.path.normpath(va), va)    # accept / or \ separators
             if va not in panel.va_list:
                 raise ValueError(f"unknown .va {va!r}; known: {panel.va_list}")
             dpg.set_value("val_va", va)

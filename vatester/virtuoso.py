@@ -185,10 +185,21 @@ class VirtuosoLink:
                 "skillbridge is not installed (pip install skillbridge)")
         how = self._ensure_tunnel()
         with self._lock:
+            # skillbridge caches the workspace Workspace.open() returns: a
+            # connection that failed (e.g. the skill server was not ready yet)
+            # would be handed back on every later Connect and fail at once
+            # until the app restarts.  Drop any cached one, and close a failed
+            # one, so Connect again opens a fresh connection (over the same
+            # tunnel: no new SSH login).
+            self._drop_cached_workspace()
+            ws = None
             try:
                 ws = Workspace.open()
                 version = str(ws["getVersion"]())
             except Exception as e:
+                if ws is not None:
+                    ws.close(log_exception=False)
+                self._drop_cached_workspace()
                 raise RuntimeError(
                     f"tunnel is up but skillbridge failed: {e}\n\n"
                     "The SSH tunnel is fine - the skill server didn't answer "
@@ -214,6 +225,21 @@ class VirtuosoLink:
             except Exception:
                 pass  # browsing helpers optional; connection itself is fine
         return info
+
+    @staticmethod
+    def _drop_cached_workspace():
+        """Close and forget skillbridge's cached default workspace, if any."""
+        try:
+            from skillbridge.client import workspace as _sbw
+        except ImportError:
+            return
+        old = _sbw._open_workspaces.get(None)
+        if old is not None:
+            try:
+                old.close(log_exception=False)
+            except Exception:
+                pass
+            _sbw._open_workspaces.pop(None, None)
 
     # ---------------- library / cell / view browsing ----------------
 
