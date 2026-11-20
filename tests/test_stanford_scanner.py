@@ -11,10 +11,10 @@ sys.path.insert(0, str(ROOT))
 
 from vatester import va_scan  # noqa: E402
 
-BUILTIN = [("fefet", ("fefet", "ferro", "hzo")),
-           ("v3", ("v3", "paper")),
-           ("v2", ("v2", "ecram", "practical")),
-           ("v1", ("v1", "basic", "drft", "ecfet"))]
+BUILTIN = [("fefet", ("fefet",)),
+           ("v3", ("ecfet_v3",)),
+           ("v2", ("ecfet_v2",)),
+           ("v1", ("ecfet_v1", "basic_v1", "drft"))]
 TWINS = [("rram_demo", ("rram", "reram")),
          ("fecap_nls", ("fecap", "ferrocap", "fe_cap")),
          ("fecap_nls_dr", ("fecap_v2_dr",)),
@@ -38,6 +38,19 @@ CASES = [
     ("asic2_memristor_model.va", "Memristor", ""),
     ("diffusive_memristor.va", "diffusive_memristor", ""),
     ("vteam.va", "memristor", ""),
+    # a new ECFET model is not the v1 port just because it says "ecfet"
+    ("ecfet_custom.va", "ecfet", ""),
+    # generic words / bare versions no longer pick an unrelated built-in twin
+    ("memristor_paper.va", "memristor_paper", ""),
+    ("my_hzo_synapse.va", "hzo_syn", ""),
+    ("ferro_v3.va", "ferro_v3", ""),
+    ("my_rram_v2.va", "my_dev", "rram_demo"),     # its own family, not ECFET v2
+    ("new_device_v2.va", "new_device_v2", ""),
+    ("practical_ecram.va", "ecram", ""),
+    # keywords must be whole name tokens
+    ("myfefetmodel.va", "myfefetmodel", ""),
+    ("fefet_preisach.va", "fefet_preisach", "fefet"),
+    ("ECFET_V2.va", "ECFET_V2", "v2"),
 ]
 
 
@@ -73,7 +86,7 @@ def test_match_hint_longest_and_tie_order():
 
 def test_builtin_hints_drop_generic_memristor_words():
     words = {w for _k, ws in va_scan.MODEL_HINTS for w in ws}
-    assert "memristor" not in words and "diffu" not in words
+    assert "memristor" not in words and "diffu" not in words and "ecfet" not in words
 
 
 def test_stanford_twin_spec_keywords():
@@ -86,3 +99,26 @@ def test_stanford_twin_spec_keywords():
     assert spec["key"] == "stanford_pku"
     assert "rram_v_1_0_0" in spec["va_keywords"]
     assert all(len(w) > len("rram") for w in spec["va_keywords"])
+
+
+def test_builtin_hints_are_model_specific():
+    words = {w for _k, ws in va_scan.MODEL_HINTS[-4:] for w in ws}
+    for generic in ("ferro", "hzo", "paper", "ecram", "practical", "v1", "v2", "v3"):
+        assert generic not in words
+
+
+def test_match_word_reports_keyword(tmp_path):
+    va = va_scan.parse_va(str(_write(tmp_path, "ecfet_v2.va", "ecfet_v2")))
+    assert (va.model_key, va.match_word) == ("v2", "ecfet_v2")
+    va = va_scan.parse_va(str(_write(tmp_path, "new_device.va", "new_device")))
+    assert (va.model_key, va.match_word) == ("", "")
+
+
+def test_va_paths_matches_scan(tmp_path):
+    (tmp_path / "verilog").mkdir()
+    _write(tmp_path / "verilog", "a.va", "a")
+    (tmp_path / "results").mkdir()
+    _write(tmp_path / "results", "skip.va", "skip")
+    paths = va_scan.va_paths(str(tmp_path))
+    assert [Path(p).name for p in paths] == ["a.va"]
+    assert [v.path for v in va_scan.scan(str(tmp_path))] == paths

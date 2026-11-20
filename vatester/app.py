@@ -28,7 +28,7 @@ from . import neuro
 from . import models_catalog
 from .agent import ClaudeAgent
 from .textshape import TextShaper, needs_shaping
-from .va_scan import scan as va_scan
+from .va_scan import scan as va_scan, va_paths
 from .virtuoso import VirtuosoLink
 from . import design_system as ds
 from .ui_constants import (
@@ -54,6 +54,7 @@ from .network_stream_robust import ROBUST_CONTROLS
 from .network_stream_robust import MODES as RB_MODES, mode_key as rb_mode_key
 from . import analysis, stdp_protocol
 from .stdp_panel import StdpControls
+from .validate_panel import ValidatePanel
 
 
 # (display label, CLI/API model id or None for the user's default, blurb)
@@ -337,6 +338,15 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         # register user/agent twins from the separate twins/ folder BEFORE the
         # model registry is consumed below
         self.dynamic_twins, self.twin_errors = register_dynamic_twins(self.workdir)
+        # twins/ file watch (existence + mtime only - nothing is imported):
+        # files present at startup, so a NEW one can be announced as
+        # "restart to load", and a failed one as "edited - restart to retry".
+        self._twin_seen = self._twin_file_mtimes()
+        self._twin_failed = {
+            os.path.normcase(os.path.join(self.workdir, "twins", n)): self._twin_seen.get(
+                os.path.normcase(os.path.join(self.workdir, "twins", n)))
+            for n, _err in self.twin_errors}
+        self._twin_pending = set()     # twin file names waiting for a restart
         # input-pattern plugins (patterns/ folder, hot-watched - see _nt_watch_patterns)
         self.pattern_plugins, self.pattern_errors = register_pattern_plugins(self.workdir)
         self._pat_mtimes = None
@@ -380,6 +390,9 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         self._twin_mtimes = None    # live-watch state for the model twins
         self._prev_mtimes = None
         self._watch_tick = 0
+        self._va_sig = None         # .va folder watch: {path: mtime} last loaded
+        self._va_sig_prev = None    #   ... and at the previous poll
+        self._va_watch_tick = 0
         self._backup_dir = None     # snapshot of editable files before agent
         self._last_compute = "transient"  # "transient" | "stdp" (live re-run)
         self._restart = False       # set to relaunch and apply GUI-code edits
@@ -388,6 +401,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         self.sim_running = False
         self.chat_busy = False
         self.virtuoso = VirtuosoLink()
+        self.validate_panel = ValidatePanel(self)
         self.virt_busy = False
         # per-provider model selection: provider -> (label, id-or-None).
         # Claude stays explicitly pinned (the CLI's own default may pick the
@@ -977,6 +991,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             ds.footer(self, [("Cancel", lambda: dpg.hide_item("virt_write_modal"), False, None),
                              ("Write to library", self._do_virt_write_back, True, None)])
         dpg.bind_item_theme("virt_write_modal", self.themes["dialog"])
+        self.validate_panel.build_dialog()      # twin vs Spectre window
 
         # auto-prompt: Verilog-A files that have no Python twin yet
         with dpg.window(label="Device simulation setup", tag="untwin_modal",
@@ -1075,6 +1090,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                     else "OFF - 'pip install uharfbuzz freetype-py' for shaped "
                          "complex scripts (falling back to unshaped glyphs)"))
         self._check_orphan_twins()        # warn about unregistered simulation_core/ twins
+        self._report_twin_errors()        # twins/ files that failed to load
         self.append_chat("agent",
                          "Hi! I can generate spike patterns (Poisson, STDP, "
                          "bursts...), explain or modify the .va sources, and "
@@ -1354,6 +1370,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                         dpg.add_button(label="Disconnect",
                                        callback=self.on_virtuoso_disconnect)
                     self._small("", tag="virt_info", wrap=LEFT_W - 36)
+                    self.validate_panel.build_button()
 
             # Neuro Trainer parameters - shown here (replacing the device-tester
             # sections above) while the Neuro Trainer center tab is active
@@ -1829,6 +1846,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
 
     def on_plot_polar(self, *_):
         if self.sim_running:
+            return
+        if self._untwinned_guard("polar"):
             return
         meas = (dpg.get_value("polar_meas") if dpg.does_item_exist("polar_meas")
                 else POLAR_MEASUREMENTS[0])
@@ -3020,6 +3039,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
     def on_run(self, *_, live=False):
         if self.sim_running:
             return
+        if not live and self._untwinned_guard("run"):
+            return
         try:
             wf, meta, unit, kind, label = self.build_waveform()
         except ValueError as e:
@@ -3090,6 +3111,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
 
     def on_plot_stdp(self, *_, live=False):
         if self.sim_running:
+            return
+        if not live and self._untwinned_guard("stdp"):
             return
         models = self._sweep_models()       # expands over the parameter sweep
         if not models:
@@ -3583,6 +3606,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
 
     def rescan_va(self, startup=False):
         self.va_files = va_scan(self.workdir)
+        self._va_sig = self._va_sig_prev = {v.path: v.mtime for v in self.va_files}
         self.network_studio.refresh_sources()
         self.compute_panel.refresh_sources()
         names = [v.name for v in self.va_files]
@@ -3607,27 +3631,186 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                                          callback=self._on_file_toggle)
                     else:
                         dpg.add_text("")
-                    dpg.add_selectable(
+                    sel = dpg.add_selectable(
                         label=v.name, tag=f"vasel_{v.name}", user_data=v.name,
                         default_value=(self.selected_va is not None
                                        and v.name == self.selected_va.name),
                         callback=lambda s, a, u: self.on_va_selected(u))
+                    with dpg.tooltip(sel):
+                        dpg.add_text(self._va_twin_note(v), wrap=320)
                     if mapped:
-                        self._small("." + mapped.input_kind, color=C_GREEN)
+                        kind_lbl = self._small("." + mapped.input_kind, color=C_GREEN)
+                        with dpg.tooltip(kind_lbl):
+                            dpg.add_text(self._va_twin_note(v), wrap=320)
                     elif v.role == "network_primitive":
                         primitive = self._small("primitive", color=C_TEXT2)
                         with dpg.tooltip(primitive):
                             dpg.add_text("Ideal source asset. Network Studio requires a supported conductance twin; this primitive is not available for training.", wrap=300)
                     else:
-                        dpg.add_text("")
+                        no_twin = self._small("no twin", color=C_AMBER)
+                        with dpg.tooltip(no_twin):
+                            dpg.add_text(self._va_twin_note(v), wrap=320)
         dpg.configure_item("va_edit_sel", items=names)
         if not startup:
             self.log(f"[va] found {len(names)} file(s): {', '.join(names)}")
         else:
             self.log(f"[va] auto-detected {len(names)} Verilog-A file(s)")
+        logged = getattr(self, "_untwin_logged", set())
+        for v in self.va_files:
+            if not v.model_key and v.role != "network_primitive" \
+                    and v.name not in logged:
+                logged.add(v.name)               # once per file, not every rescan
+                self.log(f"[va] {v.name}: no Python twin - it cannot be simulated "
+                         f"until one is built")
+        self._untwin_logged = logged
+        if self.selected_va is not None:           # keep the selection fresh
+            self.selected_va = self._va_by_name(self.selected_va.name)
         if names and not self.selected_va:
-            self.on_va_selected(names[0], interact=False)
+            # start on a file that can actually be simulated
+            first = next((v.name for v in self.va_files if v.model_key), names[0])
+            self.on_va_selected(first, interact=False)
         self._check_untwinned_va()      # prompt to build twins for unmapped .va
+
+    def _va_twin_note(self, v):
+        """Tooltip text: which Python twin simulates this .va, and why."""
+        spec = SPEC_BY_KEY.get(v.model_key)
+        if spec:
+            why = (f" (name keyword '{v.match_word}')" if v.match_word else "")
+            return (f"Simulated by the Python twin: {spec.label}{why}.\n"
+                    f"Plots come from this twin; the .va only supplies parameter "
+                    f"values. If this is the wrong twin, rename the file/module "
+                    f"or build a dedicated twin.")
+        if v.role == "network_primitive":
+            return "Ideal source asset - not a simulated device."
+        pending = getattr(self, "_twin_pending", set())
+        if pending:
+            return ("No Python twin loaded yet. New twin file(s) found: "
+                    + ", ".join(sorted(pending)) + " - restart NeuroVAT to "
+                    "load them; if one is for this file, it then gets a "
+                    "checkbox.")
+        return ("No Python twin yet, so this file cannot be simulated and has "
+                "no checkbox. Use 'Build selected twin' in the prompt, or "
+                "Agent > Build twin & run with this file open.")
+
+    def _watch_va(self):
+        """Poll the workspace .va files (~1 s) and rescan when a file is added,
+        removed or edited, so a new model shows up - and the build-a-twin prompt
+        appears - without Rescan or restart.  Only parses .va text; never
+        imports or runs twins/ code (CLAUDE.md security rule 4)."""
+        self._va_watch_tick += 1
+        if self._va_watch_tick % 60 != 0 or self._va_sig is None:
+            return
+        try:
+            self._watch_twin_poll()
+        except Exception as e:          # a render-loop tick must never raise
+            self.log(f"[twins] folder watch failed: {e!r}")
+        try:
+            self._watch_va_poll()
+        except Exception as e:          # a render-loop tick must never raise
+            self.log(f"[va] folder watch failed: {e!r}")
+
+    def _twin_file_mtimes(self):
+        """{normcased path: mtime} of the twins/*.py files the loader would
+        import (same filter as twin_loader: *.py, not starting with '_').
+        Only stats the files - never imports them (CLAUDE.md security rule 4)."""
+        out = {}
+        tdir = os.path.join(self.workdir, "twins")
+        try:
+            names = os.listdir(tdir)
+        except OSError:
+            return out
+        for n in names:
+            if n.endswith(".py") and not n.startswith("_"):
+                path = os.path.join(tdir, n)
+                try:
+                    out[os.path.normcase(path)] = os.path.getmtime(path)
+                except OSError:
+                    pass
+        return out
+
+    def _report_twin_errors(self):
+        """Say which twins/ files failed to load at startup (they used to be
+        dropped silently, leaving their .va on 'no twin' with no reason)."""
+        for name, err in self.twin_errors:
+            self.log(f"[twins] twins/{name} failed to load: {err}")
+        if self.twin_errors:
+            lines = "\n".join(f"  - twins/{n}: {e}" for n, e in self.twin_errors)
+            self.append_chat("err", "These twin files did not load, so their "
+                             "Verilog-A files cannot be simulated:\n" + lines +
+                             "\nFix the file (or ask me to), then restart NeuroVAT.")
+
+    def _watch_twin_poll(self):
+        """Announce a twin file that appeared (or a failed one that was
+        edited) since startup: it only takes effect after a restart, because
+        twins are executed only at startup."""
+        cur = self._twin_file_mtimes()
+        prev = getattr(self, "_twin_prev", None)
+        self._twin_prev = cur
+        if cur != prev:                  # wait one stable poll (file being written)
+            return
+        new = [p for p in cur if p not in self._twin_seen]
+        retry = [p for p in cur if p in self._twin_failed
+                 and cur[p] != self._twin_failed[p]]
+        if not new and not retry:
+            return
+        for p in new:
+            self._twin_seen[p] = cur[p]
+        for p in retry:
+            self._twin_failed[p] = cur[p]
+        names = [os.path.basename(p) for p in new + retry]
+        self._twin_pending.update(names)
+        what = ", ".join(f"twins/{n}" for n in names)
+        self.log(f"[twins] new or fixed twin file: {what} - restart NeuroVAT "
+                 f"to load it")
+        self.append_chat("sys", f"Twin ready to load: {what}. Restart NeuroVAT "
+                         f"to load it (twins are only loaded at startup). After "
+                         f"the restart its .va gets a checkbox and a green "
+                         f"input label in the file list; if it fails to load, "
+                         f"the reason is shown here.")
+        self._set_status(f"twin found: {names[0]} - restart to load", C_AMBER)
+        self.rescan_va()                 # refresh the 'no twin' tooltips
+
+    def _watch_va_poll(self):
+        try:
+            cur = {}
+            for p in va_paths(self.workdir):
+                try:
+                    cur[p] = os.path.getmtime(p)
+                except OSError:
+                    pass
+        except OSError:
+            return
+        stable = cur == self._va_sig_prev      # unchanged for one poll (no half-written file)
+        self._va_sig_prev = cur
+        if cur == self._va_sig or not stable or self.sim_running:
+            return
+        added = sorted(os.path.basename(p) for p in set(cur) - set(self._va_sig))
+        removed = sorted(os.path.basename(p) for p in set(self._va_sig) - set(cur))
+        bits = ([f"added {', '.join(added)}"] if added else []) + \
+               ([f"removed {', '.join(removed)}"] if removed else [])
+        self.log("[va] workspace changed" + (": " + "; ".join(bits) if bits
+                                              else " (file edited)") + " - rescanning")
+        self.rescan_va()
+
+    def _untwinned_guard(self, what):
+        """Refuse to run when the selected .va has no twin: otherwise the run
+        would silently plot whatever OTHER files are ticked.  Returns True when
+        the run must stop."""
+        va = self.selected_va
+        if not va or va.model_key or va.role == "network_primitive":
+            return False
+        ticked = [SPEC_BY_KEY[k].label for k in self._enabled_keys()]
+        msg = (f"{va.name} has no Python twin, so it cannot be simulated. "
+               + (f"Not running the ticked model(s) ({', '.join(ticked)}) "
+                  f"instead - select one of those files to run them, or build a "
+                  f"twin for {va.name}." if ticked else
+                  "Build a twin for it first."))
+        self.log(f"[{what}] {msg}")
+        self.append_chat("sys", msg)
+        self._busy(False, f"{va.name}: no twin")
+        self._untwinned_prompted = None              # let the prompt show again
+        self._check_untwinned_va(prefer=va.name)
+        return True
 
     def _va_by_name(self, name):
         for v in self.va_files:
@@ -3705,7 +3888,13 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
         if not va:
             self.log("[va] select a .va file first")
             return
-        spec = SPEC_BY_KEY.get(va.model_key) or self._param_spec()
+        spec = SPEC_BY_KEY.get(va.model_key)
+        if spec is None:
+            # no twin: copying its params into whatever model the panel shows
+            # would silently change an UNRELATED model's next run
+            self.log(f"[va] {va.name}: no Python twin - parameters not applied "
+                     f"to any model")
+            return
         vals = self.param_values[spec.key]
         fields = {k.lower(): k for k in vals}
         applied, skipped = [], []
@@ -3910,7 +4099,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                                  f"twin but isn't registered, so it won't run. "
                                  f"Register it or put it in twins/.")
 
-    def _check_untwinned_va(self):
+    def _check_untwinned_va(self, prefer=None):
         """If any .va has no Python twin, prompt to build one (agent -> twins/)."""
         untw = [v for v in self.va_files if not v.model_key and v.role != "network_primitive"]
         if not untw:
@@ -3928,7 +4117,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             msg += "\nConnect an assistant in Account to enable model generation."
         dpg.set_value("untwin_msg", msg)
         dpg.configure_item("untwin_list", items=[v.name for v in untw], num_items=min(5, max(2, len(untw))))
-        dpg.set_value("untwin_list", untw[0].name)
+        dpg.set_value("untwin_list", prefer if prefer in names else untw[0].name)
         dpg.configure_item("untwin_build", enabled=backend_ok)
         dpg.show_item("untwin_modal")
         ds.center_dialog("untwin_modal")
@@ -7519,6 +7708,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
 
     def _process_queue(self):
         self.network_studio.tick()
+        self.validate_panel.tick()
         while True:
             try:
                 item = self.q.get_nowait()
@@ -7555,6 +7745,8 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
                     self._on_account_status(item[1])
                 elif kind == "virtuoso":
                     self._on_virtuoso_done(item[1], item[2])
+                elif kind.startswith("val_"):
+                    self.validate_panel.handle(item)
                 elif kind == "virt_browse":
                     self._on_virt_browse(item[1], item[2])
                 elif kind == "nt_snap":
@@ -7721,6 +7913,7 @@ class App(PlotInteractionMixin, NetworkVisualizationMixin, NetworkDataMixin,
             self._chat_tick()
             self.noise_panel.tick()
             self._watch_code()
+            self._watch_va()
             self._nt_watch_patterns()
             if self.control is not None:        # process one bridge command/frame
                 self.control.poll()

@@ -14,32 +14,47 @@ _RE_MODULE = re.compile(r"^\s*module\s+([A-Za-z_]\w*)", re.M)
 _RE_PARAM = re.compile(
     r"parameter\s+(?:real|integer)?\s*([A-Za-z_]\w*)\s*=\s*([^;]+);")
 
-# (model_key, keywords), checked against filename + module.  The MOST SPECIFIC
-# (longest) matching keyword wins; equal lengths fall back to list order.
-# Dynamic twins insert their va_keywords at the front at load time
+# (model_key, keywords), checked against filename + module.  A keyword must
+# match a WHOLE name token: it may not touch a letter or digit on either side
+# ("_", "." and spaces separate tokens), so "fefet" matches fefet_x.va but not
+# myfefetmodel.va, and "rram" no longer matches inside "pkurram".  The MOST
+# SPECIFIC (longest) matching keyword wins; equal lengths fall back to list
+# order.  Dynamic twins insert their va_keywords at the front at load time
 # (registry._register_twin), so without the length rule the winner would depend
-# on twin load order.  Generic device words ("memristor", "diffu"[sive]) are
-# deliberately NOT ECFET keywords: an unrelated memristor .va must stay
-# unmapped (the GUI then offers to build a twin) instead of silently
-# simulating the ECFET v1 port.  The v1 source (basic_v1_Diffu_Drft_verilog.va)
-# still maps through "v1"/"basic"/"drft".
+# on twin load order.
+#
+# Built-in keywords name ONE model, never a device class or a common word: a new
+# .va that only shares a generic word with a built-in ("memristor", "diffu",
+# "ecfet", "ecram", "ferro", "hzo", "paper", "practical", or a bare version
+# like "v2" - e.g. my_rram_v2.va) must stay UNMAPPED so the GUI offers to build
+# its own twin, instead of silently simulating an unrelated built-in model.
+# The v1 source (basic_v1_Diffu_Drft_verilog.va) maps through "basic_v1"/"drft".
 MODEL_HINTS = [
-    ("fefet", ("fefet", "ferro", "hzo")),
-    ("v3", ("v3", "paper")),
-    ("v2", ("v2", "ecram", "practical")),
-    ("v1", ("v1", "basic", "drft", "ecfet")),
+    ("fefet", ("fefet",)),
+    ("v3", ("ecfet_v3",)),
+    ("v2", ("ecfet_v2",)),
+    ("v1", ("ecfet_v1", "basic_v1", "drft")),
 ]
 
 
-def match_hint(hint_text, hints=None):
-    """Model key of the longest keyword found in hint_text ("" if none);
-    ties go to the earlier entry in `hints`."""
-    best_key, best_len = "", 0
+def _token_hit(word, text):
+    """True if `word` occurs in `text` as a whole name token (no letter/digit
+    directly before or after it)."""
+    return re.search(r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])",
+                     text) is not None
+
+
+def match_hint(hint_text, hints=None, with_word=False):
+    """Model key of the longest keyword found in hint_text as a whole token
+    ("" if none); ties go to the earlier entry in `hints`.  with_word=True
+    returns (key, keyword) so the GUI can say why a file was mapped."""
+    best_key, best_len, best_word = "", 0, ""
     for key, words in (MODEL_HINTS if hints is None else hints):
         for w in words:
-            if w and len(w) > best_len and w in hint_text:
-                best_key, best_len = key, len(w)
-    return best_key
+            w = (w or "").lower()
+            if w and len(w) > best_len and _token_hit(w, hint_text):
+                best_key, best_len, best_word = key, len(w), w
+    return (best_key, best_word) if with_word else best_key
 
 
 @dataclass
@@ -49,6 +64,7 @@ class VaFile:
     params: dict = field(default_factory=dict)   # name -> float (parsable only)
     raw_params: dict = field(default_factory=dict)  # name -> source text
     model_key: str = ""                          # mapped python model ("" = none)
+    match_word: str = ""                         # keyword that mapped it
     mtime: float = 0.0
     error: str = ""
     role: str = "device"  # network primitives are source assets, not missing device twins
@@ -88,7 +104,7 @@ def parse_va(path):
             pass
 
     hint_text = (va.name + " " + va.module).lower()
-    va.model_key = match_hint(hint_text)
+    va.model_key, va.match_word = match_hint(hint_text, with_word=True)
     # Guard versioned names: if the name says "vN" but we matched a DIFFERENT
     # version family (e.g. "ecfet_v4" falling through to the generic "ecfet"->v1
     # keyword), trust the name's version - remap to vN if that's a real twin,
@@ -100,7 +116,27 @@ def parse_va(path):
         vkey = "v" + ver.group(1)
         if va.model_key != vkey:
             va.model_key = vkey if vkey in known_versions else ""
+            if not va.model_key:
+                va.match_word = ""
     return va
+
+
+_SKIP_DIRS = ("results", "__pycache__", "node_modules", "venv", ".git")
+
+
+def va_paths(workdir, max_depth=2):
+    """Paths of every .va file scan() would parse (no parsing): cheap enough
+    for the GUI to poll so a file added to verilog/ shows up without Rescan."""
+    out = []
+    workdir = os.path.abspath(workdir)
+    base_depth = workdir.rstrip(os.sep).count(os.sep)
+    for root, dirs, files in os.walk(workdir):
+        if root.rstrip(os.sep).count(os.sep) - base_depth >= max_depth:
+            dirs[:] = []
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in _SKIP_DIRS]
+        out.extend(os.path.join(root, fn) for fn in sorted(files)
+                   if fn.lower().endswith(".va"))
+    return out
 
 
 def scan(workdir, max_depth=2):
@@ -109,16 +145,4 @@ def scan(workdir, max_depth=2):
     Keep scanning older workspace layouts; hidden and results directories are
     excluded. The standard verilog/ folder fits within the default depth limit.
     """
-    found = []
-    workdir = os.path.abspath(workdir)
-    base_depth = workdir.rstrip(os.sep).count(os.sep)
-    for root, dirs, files in os.walk(workdir):
-        if root.rstrip(os.sep).count(os.sep) - base_depth >= max_depth:
-            dirs[:] = []
-        dirs[:] = [d for d in dirs
-                   if not d.startswith(".") and d not in
-                   ("results", "__pycache__", "node_modules", "venv", ".git")]
-        for fn in sorted(files):
-            if fn.lower().endswith(".va"):
-                found.append(parse_va(os.path.join(root, fn)))
-    return found
+    return [parse_va(p) for p in va_paths(workdir, max_depth)]

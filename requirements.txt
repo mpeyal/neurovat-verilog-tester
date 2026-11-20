@@ -11,3 +11,7 @@ freetype-py
 anthropic
 # optional - OpenAI provider for the agent chat (/provider openai):
 # openai
+# Cadence link (Virtuoso skillbridge) and the twin-vs-Spectre validation's SSH
+# runner (one login per job); bundled into the .exe so Validate twin works there
+skillbridge
+paramiko>=3.4

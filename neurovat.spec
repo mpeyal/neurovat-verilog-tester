@@ -28,7 +28,8 @@ hiddenimports += (collect_submodules("simulation_core") + collect_submodules("va
 # collect each explicitly or `import anthropic` fails at runtime in the exe.
 for opt in ("uharfbuzz", "freetype", "anthropic", "openai",
             "httpx", "httpcore", "h11", "certifi", "idna", "anyio", "sniffio",
-            "distro", "jiter", "annotated_types", "pydantic", "pydantic_core"):
+            "distro", "jiter", "annotated_types", "pydantic", "pydantic_core",
+            "skillbridge", "paramiko", "cryptography", "bcrypt", "nacl"):
     try:
         d, b, h = collect_all(opt)
         datas += d; binaries += b; hiddenimports += h
