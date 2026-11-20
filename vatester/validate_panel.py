@@ -130,7 +130,17 @@ class ValidatePanel:
             dpg.add_spacer(height=4)
             dpg.add_progress_bar(tag="val_bar", default_value=0.0, width=-1, overlay="")
             dpg.add_text("", tag="val_status", color=C_TEXT2, wrap=660)
-            dpg.add_text("", tag="val_verdict")
+            with dpg.group(horizontal=True):
+                dpg.add_text("", tag="val_verdict")
+                dpg.add_spacer(width=16)
+                fx = dpg.add_button(label="Fix twin with AI", tag="val_btn_fix", show=False,
+                                    callback=self.fix_with_ai)
+                with dpg.tooltip(fx):
+                    dpg.add_text("The validation did not pass. The assistant edits the\n"
+                                 "twin and NeuroVAT re-scores it against this run's\n"
+                                 "Spectre results (no new Spectre run), until it\n"
+                                 "passes or a few rounds are used up. Progress and\n"
+                                 "the verdict show in the results window.")
             dpg.add_input_text(tag="val_log", multiline=True, readonly=True, width=-1,
                                height=200)
         if "dialog" in self.app.themes:
@@ -151,6 +161,9 @@ class ValidatePanel:
             dpg.configure_item("val_btn_start", enabled=con and not self.running)
 
     def _log(self, line):
+        import textwrap
+        if len(line) > 96 and not line.startswith(" "):   # the log box does not wrap
+            line = "\n".join(textwrap.wrap(line, 96, subsequent_indent="      "))
         self.log_lines.append(line)
         self.log_lines = self.log_lines[-400:]
         dpg.set_value("val_log", "\n".join(self.log_lines))
@@ -304,6 +317,7 @@ class ValidatePanel:
         self.running, self.stop_requested = True, False
         self._busy(True, "starting ...")
         dpg.configure_item("val_btn_report", enabled=False)
+        dpg.configure_item("val_btn_fix", show=False)
         dpg.set_value("val_verdict", "")
         dpg.set_value("val_bar", 0.0)
         q, wd = self.app.q, self.app.workdir
@@ -340,6 +354,12 @@ class ValidatePanel:
         if self.running:
             self.stop_requested = True
             self._log("stopping at the next progress point ...")
+
+    def fix_with_ai(self, *_):
+        """Open this run in the results window and start the AI twin fix there."""
+        if self.out_dir:
+            self.results.show(self.out_dir)
+            self.results.start_fix()
 
     def open_report(self, *_):
         """The results window on this run (report.html: its Open report button)."""
@@ -425,5 +445,6 @@ class ValidatePanel:
             dpg.configure_item("val_bar", overlay="100 %")
             self._busy(False, f"finished: {v}; report in {out}")
             dpg.configure_item("val_btn_report", enabled=True)
+            dpg.configure_item("val_btn_fix", show=(v != "PASS"))
             self.app.log(f"[validate] {report['module']}: {v} -> {out}")
             self.open_report()

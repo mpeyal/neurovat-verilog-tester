@@ -95,6 +95,9 @@ class ValidateResults:
 
     # ------------------------------------------------------------ AI twin fix
     def _fix_log(self, line):
+        import textwrap
+        if len(line) > 150:                      # the log box does not wrap
+            line = "\n".join(textwrap.wrap(line, 150, subsequent_indent="      "))
         self.fix_lines = (self.fix_lines + [line])[-500:]
         dpg.set_value("vres_fix_log", "\n".join(self.fix_lines))
 

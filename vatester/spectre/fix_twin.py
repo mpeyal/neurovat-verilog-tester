@@ -9,8 +9,10 @@ How one round works
      file.  The .va, the Spectre results and the report are fenced UNTRUSTED
      context (agent._wrap_ctx).
   2. Every other file under twins/, verilog/, simulation_core/, vatester/ and
-     tools/ is compared with a snapshot taken before the round: a changed file
-     is restored, a new file is removed (twins/ files are executed on load).
+     tools/ is compared with a snapshot taken before the round: a changed
+     source file is restored; a new source file under twins/ or verilog/ is
+     removed (twins/ files are executed on load).  Binaries and other new
+     files are never deleted, only reported.
   3. validate() re-runs the twin and scores it against the Spectre results
      that the failed run already downloaded - no Spectre run, no SSH login.
      The netlists must be identical to the ones Spectre ran (a twin parameter
@@ -87,40 +89,72 @@ def twin_file(key, workspace):
     return None
 
 
+SOURCE_SUFFIXES = {".py", ".va", ".vams", ".scs", ".json", ".md", ".txt", ".toml",
+                   ".cfg", ".ini", ".csv"}
+REMOVE_NEW_IN = ("twins", "verilog")     # new files there are executed / referenced
+KEEP_MAX = 4_000_000                     # bytes kept per file for a restore
+
+
 def _digest(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def snapshot(workspace, exclude):
-    snap = {}
+def _files(workspace):
     for d in SNAPSHOT_DIRS:
         root = Path(workspace) / d
-        if not root.is_dir():
+        if root.is_dir():
+            for p in root.rglob("*"):
+                if p.is_file() and "__pycache__" not in p.parts:
+                    yield p
+
+
+def snapshot(workspace, exclude):
+    """Every file under SNAPSHOT_DIRS is recorded (so none looks 'new' later);
+    the content of source-sized files is kept for a restore."""
+    snap = {}
+    for p in _files(workspace):
+        if p == exclude:
             continue
-        for p in root.rglob("*"):
-            if p.is_file() and "__pycache__" not in p.parts and p != exclude \
-                    and p.stat().st_size < 4_000_000:
-                snap[p] = (p.read_bytes(), _digest(p))
+        st = p.stat()
+        keep = st.st_size <= KEEP_MAX and p.suffix.lower() in SOURCE_SUFFIXES
+        snap[p] = ((p.read_bytes(), _digest(p)) if keep else None,
+                   (st.st_size, st.st_mtime_ns))
     return snap
 
 
 def enforce_snapshot(workspace, snap, exclude):
-    """Undo changes outside the twin file -> list of what was undone."""
+    """Undo the assistant's changes outside the twin file -> list of actions.
+    Changed source files are restored; new source files under twins/ and
+    verilog/ are removed (twins/ files are executed on load).  Nothing else
+    is ever deleted: other new or changed files are only reported."""
     undone = []
-    for p, (data, dig) in snap.items():
-        if not p.exists() or _digest(p) != dig:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(data)
-            undone.append(f"restored {p.relative_to(workspace)}")
-    for d in SNAPSHOT_DIRS:
-        root = Path(workspace) / d
-        if not root.is_dir():
+    for p, (kept, stat) in snap.items():
+        rel = p.relative_to(workspace)
+        if not p.exists():
+            if kept is not None:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(kept[0])
+                undone.append(f"restored deleted {rel}")
+            else:
+                undone.append(f"NOTE: {rel} was deleted (not restorable)")
             continue
-        for p in root.rglob("*"):
-            if p.is_file() and "__pycache__" not in p.parts and p != exclude \
-                    and p not in snap:
-                p.unlink()
-                undone.append(f"removed new file {p.relative_to(workspace)}")
+        st = p.stat()
+        if (st.st_size, st.st_mtime_ns) == stat:
+            continue
+        if kept is not None and _digest(p) != kept[1]:
+            p.write_bytes(kept[0])
+            undone.append(f"restored {rel}")
+        elif kept is None:
+            undone.append(f"NOTE: {rel} changed (left as is)")
+    for p in _files(workspace):
+        if p == exclude or p in snap:
+            continue
+        rel = p.relative_to(workspace)
+        if rel.parts[0] in REMOVE_NEW_IN and p.suffix.lower() in SOURCE_SUFFIXES:
+            p.unlink()
+            undone.append(f"removed new file {rel}")
+        else:
+            undone.append(f"NOTE: new file {rel} (left in place)")
     return undone
 
 

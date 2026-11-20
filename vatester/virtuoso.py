@@ -192,14 +192,27 @@ class VirtuosoLink:
             # one, so Connect again opens a fresh connection (over the same
             # tunnel: no new SSH login).
             self._drop_cached_workspace()
-            ws = None
-            try:
-                ws = Workspace.open()
-                version = str(ws["getVersion"]())
-            except Exception as e:
-                if ws is not None:
-                    ws.close(log_exception=False)
-                self._drop_cached_workspace()
+            ws, err = None, None
+            # The skill server serves one client at a time: right after another
+            # client (e.g. a closed NeuroVAT window) its connection is still
+            # being torn down and a new one is reset.  One more attempt after a
+            # short pause - over the SAME tunnel, so it is not an SSH login.
+            for attempt in (1, 2):
+                try:
+                    ws = Workspace.open()
+                    version = str(ws["getVersion"]())
+                    err = None
+                    break
+                except Exception as e:
+                    err = e
+                    if ws is not None:
+                        ws.close(log_exception=False)
+                    ws = None
+                    self._drop_cached_workspace()
+                    if attempt == 1:
+                        time.sleep(3.0)
+            if err is not None:
+                e = err
                 raise RuntimeError(
                     f"tunnel is up but skillbridge failed: {e}\n\n"
                     "The SSH tunnel is fine - the skill server didn't answer "

@@ -230,6 +230,32 @@ def test_ai_fill_reply_is_checked():
         parse_reply("no json here", ports, keys)
 
 
+def test_fix_twin_guard_never_deletes_binaries(tmp_path):
+    """The fix loop's guard restores edited sources and removes new twins/ or
+    verilog/ sources, but never deletes a binary or a file it did not record
+    (a large existing tool binary once looked 'new' and was deleted)."""
+    from vatester.spectre import fix_twin as F
+    ws = tmp_path
+    for d in ("twins", "verilog", "tools/bin"):
+        (ws / d).mkdir(parents=True)
+    twin = ws / "twins/my.py"
+    twin.write_text("x = 1\n")
+    va = ws / "verilog/my.va"
+    va.write_text("module my(p, n); endmodule\n")
+    big = ws / "tools/bin/tool.exe"
+    big.write_bytes(b"\0" * (F.KEEP_MAX + 10))
+    snap = F.snapshot(ws, twin)
+    twin.write_text("x = 2\n")                          # the allowed edit
+    va.write_text("// changed\n")
+    (ws / "twins/evil.py").write_text("raise SystemExit\n")
+    (ws / "tools/bin/new_download.exe").write_bytes(b"MZ")
+    done = F.enforce_snapshot(ws, snap, twin)
+    assert va.read_text().startswith("module") and twin.read_text() == "x = 2\n"
+    assert not (ws / "twins/evil.py").exists()
+    assert big.exists() and (ws / "tools/bin/new_download.exe").exists()
+    assert any("left in place" in d for d in done)
+
+
 def test_results_viewer_data_roundtrip(tmp_path):
     """l1_<test>.npz holds the plotted series and loads without pickle."""
     from vatester.spectre.validate import _save_l1_data, load_l1_data, read_error_pct

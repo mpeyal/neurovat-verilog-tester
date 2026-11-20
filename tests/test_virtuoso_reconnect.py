@@ -44,7 +44,8 @@ class FakeWs:
 
 def test_connect_again_after_failure_opens_fresh(monkeypatch):
     FakeWs.opened.clear()
-    alive = iter([False, True])
+    alive = iter([False, False, True])        # connect 1: both attempts reset
+    monkeypatch.setattr(V.time, "sleep", lambda s: None)
 
     def fake_open(cls=None, workspace_id=None, **kw):     # mimics the cache
         if workspace_id not in sbw._open_workspaces:
@@ -60,7 +61,32 @@ def test_connect_again_after_failure_opens_fresh(monkeypatch):
 
     with pytest.raises(RuntimeError, match="skillbridge failed"):
         link.connect()
-    assert FakeWs.opened[0].closed and None not in sbw._open_workspaces
+    assert FakeWs.opened[0].closed and FakeWs.opened[1].closed
+    assert None not in sbw._open_workspaces
     info = link.connect()                                 # the server is up now
     assert link.connected and "IC25.1" in info["version"]
-    assert len(FakeWs.opened) == 2 and link.ws is FakeWs.opened[1]
+    assert len(FakeWs.opened) == 3 and link.ws is FakeWs.opened[2]
+    assert len(tunnels) == 2                              # no extra tunnel/login per attempt
+
+
+def test_one_busy_reset_is_absorbed(monkeypatch):
+    """The skill server still busy with the previous client: one pause and a
+    second attempt over the same tunnel (not an SSH login)."""
+    FakeWs.opened.clear()
+    alive = iter([False, True])
+    sleeps = []
+    monkeypatch.setattr(V.time, "sleep", sleeps.append)
+
+    def fake_open(cls=None, workspace_id=None, **kw):
+        if workspace_id not in sbw._open_workspaces:
+            sbw._open_workspaces[workspace_id] = FakeWs(next(alive))
+        return sbw._open_workspaces[workspace_id]
+
+    monkeypatch.setattr(sbw.Workspace, "open", classmethod(fake_open))
+    monkeypatch.setattr(sbw, "_open_workspaces", {})
+    link = V.VirtuosoLink(host="user@example.invalid")
+    tunnels = []
+    monkeypatch.setattr(link, "_ensure_tunnel", lambda: tunnels.append(1) or "reused")
+    monkeypatch.setattr(link, "_ensure_helpers", lambda: None)
+    assert "IC25.1" in link.connect()["version"]
+    assert sleeps == [3.0] and len(tunnels) == 1 and len(FakeWs.opened) == 2
