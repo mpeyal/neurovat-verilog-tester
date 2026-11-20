@@ -6,7 +6,9 @@ sets (or lets the tool suggest) the device type, pulse amplitudes and width,
 read bias and drain bias; "Start validation" runs vatester.spectre.validate in
 a worker thread.  Progress (Spectre runs and tests done of the total, elapsed
 time, estimated time remaining) and the log are shown live; at the end the
-verdict is shown and report.html opens.
+verdict is shown and the results window (validate_results.py: test table,
+Spectre-vs-twin plots, step check, netlists) opens in the app.  "Validation
+results" under the button shows earlier runs, also without Cadence.
 
 Threading: the worker talks to the GUI only through app.q ("val_*" messages,
 handled on the render thread by handle()); it always posts "val_done".
@@ -16,13 +18,13 @@ Twin building is NOT done here: that stays with the assistant.
 import os
 import threading
 import time
-import webbrowser
 
 import dearpygui.dearpygui as dpg
 
 from . import design_system as ds
 from .ui_constants import C_AMBER, C_GREEN, C_MUTED, C_RED, C_TEXT2, LEFT_W
 from .va_scan import va_paths
+from .validate_results import ValidateResults
 
 FIELDS = [  # tag, label, kind, help
     ("val_twin", "twin", "text", "key of the twin (twins/ file or v1/v2/v3); empty = matched "
@@ -63,6 +65,7 @@ class ValidatePanel:
         self.out_dir = None
         self.log_lines = []
         self.va_list = []
+        self.results = ValidateResults(app)
 
     # ------------------------------------------------------------ building
     def build_button(self):
@@ -76,6 +79,12 @@ class ValidatePanel:
                          "Needs the Cadence connection above.")
         self.app._small("connect to Cadence to validate a twin", tag="val_hint",
                         wrap=LEFT_W - 36)
+        r = dpg.add_button(label="Validation results", tag="btn_val_results", width=-1,
+                           callback=lambda: self.results.show())
+        with dpg.tooltip(r):
+            dpg.add_text("Plots and tables of finished validations\n"
+                         "(Spectre vs twin per test, step check, netlists).\n"
+                         "No Cadence connection needed.")
 
     def build_dialog(self):
         with dpg.window(label="Validate twin against Spectre", tag="val_win", show=False,
@@ -102,12 +111,20 @@ class ValidatePanel:
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Suggest values", tag="val_btn_suggest",
                                callback=self.suggest)
+                ai = dpg.add_button(label="Ask AI to fill", tag="val_btn_ai",
+                                    callback=self.ask_ai)
+                with dpg.tooltip(ai):
+                    dpg.add_text("The assistant reads the .va, the available twins and\n"
+                                 "the automatic suggestion, fills the EMPTY fields and\n"
+                                 "gives a reason for each (see the log). Your values\n"
+                                 "are kept; edit anything before Start. Uses the\n"
+                                 "assistant's model; no Cadence login.")
                 b = dpg.add_button(label="Start validation", tag="val_btn_start",
                                    callback=self.start)
                 dpg.bind_item_theme(b, self.app.themes["primary"])
                 dpg.add_button(label="Stop", tag="val_btn_stop", enabled=False,
                                callback=self.request_stop)
-                dpg.add_button(label="Open report", tag="val_btn_report", enabled=False,
+                dpg.add_button(label="Show results", tag="val_btn_report", enabled=False,
                                callback=self.open_report)
                 dpg.add_button(label="Close", callback=lambda: dpg.hide_item("val_win"))
             dpg.add_spacer(height=4)
@@ -118,6 +135,7 @@ class ValidatePanel:
                                height=200)
         if "dialog" in self.app.themes:
             dpg.bind_item_theme("val_win", self.app.themes["dialog"])
+        self.results.build()
 
     # ------------------------------------------------------------ state
     def tick(self):
@@ -223,6 +241,51 @@ class ValidatePanel:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _agent_clone(self):
+        """A fresh assistant with the app's provider and credentials, so this
+        one-off request does not join (or disturb) the chat conversation."""
+        from .agent import ClaudeAgent
+        src = self.app.agent
+        a = ClaudeAgent(self.app.workdir)
+        a.set_provider(src.provider)
+        for k in ("override_kind", "override_value", "openai_key", "gemini_key"):
+            setattr(a, k, getattr(src, k, None))
+        return a
+
+    def ask_ai(self, *_):
+        if self.running:
+            return
+        va = self._va()
+        if not va:
+            self._log("pick a Verilog-A model first")
+            return
+        try:
+            given = self._answers_from_fields()
+        except ValueError as e:
+            self._log(str(e))
+            return
+        self.running = True
+        self._busy(True, "asking the AI to fill the empty fields ...")
+        q, wd = self.app.q, self.app.workdir
+        agent = self._agent_clone()
+
+        def worker():
+            try:
+                from .spectre.ai_fill import build_request, parse_reply
+                prompt, context, ports, keys = build_request(va, wd, given)
+                q.put(("val_log", f"AI ({agent.backend_label()}): reading "
+                                  f"{os.path.basename(va)} ..."))
+                res = agent.send(prompt, context=context, allow_edits=False,
+                                 allow_bash=False, timeout=300)
+                if not res.get("ok"):
+                    raise RuntimeError(res.get("error") or "no answer")
+                a, reasons, rejected = parse_reply(res.get("text", ""), ports, keys, given)
+                q.put(("val_ai", a, reasons, rejected, given, None))
+            except Exception as e:             # noqa: BLE001 - shown, never stuck
+                q.put(("val_ai", None, {}, {}, given, f"{type(e).__name__}: {e}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def start(self, *_):
         if self.running:
             return
@@ -279,20 +342,23 @@ class ValidatePanel:
             self._log("stopping at the next progress point ...")
 
     def open_report(self, *_):
+        """The results window on this run (report.html: its Open report button)."""
         if self.out_dir:
-            path = os.path.join(self.out_dir, "report.html")
-            if os.path.exists(path):
-                webbrowser.open("file:///" + os.path.abspath(path).replace("\\", "/"))
+            self.results.show(self.out_dir)
 
     def _busy(self, on, msg):
         dpg.configure_item("val_btn_start", enabled=not on and bool(self.connected))
         dpg.configure_item("val_btn_suggest", enabled=not on)
+        dpg.configure_item("val_btn_ai", enabled=not on)
         dpg.configure_item("val_btn_stop", enabled=on)
         dpg.set_value("val_status", msg)
 
     # ------------------------------------------------------------ queue
     def handle(self, item):
         kind = item[0]
+        if kind.startswith("val_fix"):          # AI twin fix (results window)
+            self.results.handle(item)
+            return
         if kind == "val_log":
             self._log(item[1])
         elif kind == "val_suggest":
@@ -306,6 +372,25 @@ class ValidatePanel:
             if self.running and dpg.get_value("val_status") == "suggesting values ...":
                 self.running = False
                 self._busy(False, "values suggested; edit if needed, then Start")
+        elif kind == "val_ai":
+            a, reasons, rejected, given, err = item[1:6]
+            self.running = False
+            if err:
+                self._log(f"AI fill failed: {err}")
+                self._busy(False, "AI fill failed (see the log); fill the fields or use "
+                                  "Suggest values")
+                return
+            filled = {k: v for k, v in a.items() if k not in given}
+            self._fill({**given, **filled})
+            for k in filled:
+                self._log(f"AI  {k} = {a[k]}" + (f"  - {reasons[k]}" if k in reasons else ""))
+            for k, why in rejected.items():
+                self._log(f"AI  {k} not used ({why})")
+            if not a.get("twin"):
+                self._log("AI: no twin fits this .va - a twin has to be written first "
+                          "(ask the assistant to build one), then validate")
+            self._busy(False, f"AI filled {len(filled)} field(s); check them, edit if "
+                              "needed, then Start")
         elif kind == "val_progress":
             d = item[1]
             frac = d.get("fraction")

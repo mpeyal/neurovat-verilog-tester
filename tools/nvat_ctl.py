@@ -71,6 +71,9 @@ _ARG_SPECS = {
     "fit": ["path"], "openvaf": ["path"],       # openvaf path optional
     "nt_robust": ["seconds", "retrain", "train_s", "repeats"], "nt_robust_raster": ["entry"],
     "validate": ["va"],
+    "validate_results": ["dir", "test", "tab"],
+    "validate_ai": ["va", "clear"],
+    "validate_fix": ["dir"],
 }
 
 

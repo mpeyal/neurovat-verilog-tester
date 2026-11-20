@@ -458,10 +458,10 @@ def _plot_l1(path, dev, stim, tw, ref, s):
     ax[2].set_xlabel("time (s)")
     if "read_times" in s and len(s["read_times"]):
         ax2 = ax[2].twinx()
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ax2.plot(s["read_times"], 100 * (s["g_twin"] - s["g_ref"]) / np.abs(s["g_ref"]),
-                     "o", color="#009E73", ms=3)
-        ax2.set_ylabel("read G error (%)", color="#009E73")
+        ax2.plot(s["read_times"], read_error_pct(dev.profile, s["g_twin"], s["g_ref"]),
+                 "o", color="#009E73", ms=3)
+        ax2.set_ylabel("read G error (% of G range)" if dev.profile == "fefet"
+                       else "read G error (%)", color="#009E73")
     if n == 4:
         ax[3].plot(ref["V"], y_ref, color="black", lw=1.0, label="Spectre")
         ax[3].plot(tw["V"], y_tw, "--", color="#D55E00", lw=0.9, label="twin")
@@ -470,6 +470,46 @@ def _plot_l1(path, dev, stim, tw, ref, s):
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
+
+
+def read_error_pct(profile, g_twin, g_ref):
+    """Signed read-G error in % on the scale of the profile's read rule:
+    FeFET - the G range of the test (of G when it does not change);
+    memristor - G itself."""
+    gt, gr = np.asarray(g_twin, float), np.asarray(g_ref, float)
+    if not len(gr):
+        return gr
+    scale = np.abs(gr)
+    if profile == "fefet":
+        span = float(np.max(gr) - np.min(gr))
+        if span > 0 and span > 1e-9 * float(np.max(np.abs(gr))):
+            scale = span
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return 100 * (gt - gr) / scale
+
+
+def _save_l1_data(path, dev, stim, tw, ref, s):
+    """The series of one Layer-1 plot (drive, Spectre, twin, reads) for the
+    GUI results viewer; numeric arrays plus a JSON string (no pickle)."""
+    y_tw, y_ref, label = compared_series(dev, tw, ref, s)
+    d = {"drive_t": np.asarray(stim.t, float), "drive_v": np.asarray(stim.v, float),
+         "t_ref": np.asarray(ref["time"], float), "y_ref": np.asarray(y_ref, float),
+         "t_tw": np.asarray(tw["time"], float), "y_tw": np.asarray(y_tw, float)}
+    if "read_times" in s and len(s["read_times"]):
+        d.update(read_t=np.asarray(s["read_times"], float),
+                 g_ref=np.asarray(s["g_ref"], float), g_twin=np.asarray(s["g_twin"], float),
+                 read_err_pct=read_error_pct(dev.profile, s["g_twin"], s["g_ref"]))
+    meta = {"label": label, "drive_kind": stim.kind, "stimulus": stim.name,
+            "profile": dev.profile, "reference_step_s": s.get("reference_step_s")}
+    np.savez_compressed(path, meta=np.array(json.dumps(meta)), **d)
+
+
+def load_l1_data(path):
+    """Read back _save_l1_data -> (arrays dict, meta dict); never unpickles."""
+    with np.load(path, allow_pickle=False) as z:
+        arrs = {k: z[k] for k in z.files if k != "meta"}
+        meta = json.loads(str(z["meta"])) if "meta" in z.files else {}
+    return arrs, meta
 
 
 def _plot_conv(path, per_stim):
@@ -685,6 +725,9 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
     log(f"Spectre: {len(suite.stimuli)} tests x 3 steps = {n} runs ...")
     decks = {f"{st.name}__s{i}": dev.deck(st, step)
              for st in suite.stimuli for i, step in enumerate(plan[st.name])}
+    (out / "spectre").mkdir(parents=True, exist_ok=True)
+    for name, text in decks.items():      # the netlists Spectre ran (results viewer)
+        (out / "spectre" / f"{name}.scs").write_text(str(text), encoding="utf-8")
     res = _call_runner(runner, decks, va_path, out / "spectre", prog.spectre)
     prog.spectre_finished(n)
     info = next(iter(res.values()))[1]
@@ -749,6 +792,7 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
                 conv_note += "; the twin agrees with the finest run"
             sc["note"] = conv_note + (f". {sc['note']}" if sc.get("note") else "")
         _plot_l1(out / f"l1_{st.name}.png", dev, st, tw, ref, sc)
+        _save_l1_data(out / f"l1_{st.name}.npz", dev, st, tw, ref, sc)
         l1.append(sc)
         prog.unit(f"test {len(l1)}/{len(suite.stimuli)} scored: {st.name} {sc['verdict']}",
                   tests=1)

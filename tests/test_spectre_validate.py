@@ -210,6 +210,53 @@ def test_convergence_at_reads():
     assert read_errors({"time": t, "G": 0 * t}, {"time": t, "G": 0 * t}, "G", reads) is None
 
 
+def test_ai_fill_reply_is_checked():
+    """The model's setup is only ever data: unknown twins, wrong signs, foreign
+    pins and out-of-range numbers are dropped; the user's own values win."""
+    from vatester.spectre.ai_fill import parse_reply
+    ports, keys = ["d", "g", "s", "b"], {"fefet_det", "vteam"}
+    reply = ('Sure.\n```json\n{"twin": "fefet_det", "profile": "fefet", "amp_pos": "3", '
+             '"amp_neg": 2.5, "width": 1e-6, "read_level": 1.5, "v_ds": 0.1, '
+             '"pins": {"in": "d", "out": "s", "gate": "x"}, '
+             '"reasons": {"amp_pos": "above the coercive voltage", "rm -rf": "no"}}\n```')
+    a, why, bad = parse_reply(reply, ports, keys, given={"width": 2e-6})
+    assert a == {"twin": "fefet_det", "profile": "fefet", "amp_pos": 3.0,
+                 "width": 2e-6, "read_level": 1.5, "v_ds": 0.1}
+    assert set(bad) == {"amp_neg", "pins"} and set(why) == {"amp_pos"}
+    a, _, bad = parse_reply('{"twin": "evil; import os", "profile": "dram", "width": 99}',
+                            ports, keys)
+    assert a == {} and set(bad) == {"twin", "profile", "width"}
+    with pytest.raises(ValueError):
+        parse_reply("no json here", ports, keys)
+
+
+def test_results_viewer_data_roundtrip(tmp_path):
+    """l1_<test>.npz holds the plotted series and loads without pickle."""
+    from vatester.spectre.validate import _save_l1_data, load_l1_data, read_error_pct
+    from vatester.validate_results import envelope
+
+    class Dev:
+        profile = "memristor"
+    st = Stimulus.pulses([0.5, -0.25], 10e-9, 3e-9, read=-0.1)
+    t = np.linspace(0, 1e-7, 50)
+    tw = {"time": t, "I": np.sin(t * 1e8), "V": t}
+    ref = {"time": t, "I": np.sin(t * 1e8) * 1.001, "V": t}
+    s = {"read_times": t[::10], "g_ref": np.full(5, 2.0), "g_twin": np.full(5, 2.02),
+         "reference_step_s": 1e-12}
+    _save_l1_data(tmp_path / "l1_x.npz", Dev, st, tw, ref, s)
+    d, meta = load_l1_data(tmp_path / "l1_x.npz")
+    assert meta["label"] == "I (A)" and meta["reference_step_s"] == 1e-12
+    np.testing.assert_allclose(d["y_tw"], tw["I"])
+    np.testing.assert_allclose(d["read_err_pct"], 1.0)
+    g = read_error_pct("fefet", [1.0, 3.0], [1.0, 2.0])         # FeFET: % of the G range
+    np.testing.assert_allclose(g, [0.0, 100.0])
+    x = np.linspace(0, 1, 100001)
+    y = np.zeros_like(x)
+    y[54321] = 7.0                                                  # a one-sample spike
+    xe, ye = envelope(x, y, 2000)
+    assert len(xe) <= 2002 and ye.max() == 7.0 and np.all(np.diff(xe) > 0)
+
+
 def test_replay_recording_waves_and_score():
     from vatester.spectre.replay import TICK, gate_waves, record_training, score_replay
     rec = record_training(afferents=4, seconds=0.6, seed=2)

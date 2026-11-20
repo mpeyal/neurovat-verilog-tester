@@ -483,11 +483,68 @@ class ControlBridge:
         panel.start()
         return {"started": panel.running, "va": dpg.get_value("val_va")}
 
+    def _cmd_validate_ai(self, args):
+        """Open the Validate-twin window for args['va'], clear the fields when
+        args['clear'] is 1, and press "Ask AI to fill"; returns at once
+        (follow with validate_status / validate_fields)."""
+        panel = self.app.validate_panel
+        if not self.app.virtuoso.connected:
+            raise RuntimeError("not connected to Cadence (virt_connect first)")
+        panel.open()
+        va = str(args.get("va") or "")
+        norm = {os.path.normpath(v): v for v in panel.va_list}
+        va = norm.get(os.path.normpath(va), va)
+        if va not in panel.va_list:
+            raise ValueError(f"unknown .va {va!r}; known: {panel.va_list}")
+        dpg.set_value("val_va", va)
+        panel._on_va()
+        if str(args.get("clear", "")) in ("1", "true"):
+            panel._fill({})
+        panel.ask_ai()
+        return {"asked": panel.running, "va": va}
+
+    def _cmd_validate_fields(self, args):
+        from .validate_panel import KEYS
+        return {k: dpg.get_value(tag) for tag, k in KEYS.items()}
+
     def _cmd_validate_status(self, args):
         panel = self.app.validate_panel
         return {"running": panel.running, "status": dpg.get_value("val_status"),
                 "progress": dpg.get_value("val_bar"), "verdict": dpg.get_value("val_verdict"),
                 "report_dir": panel.out_dir}
+
+    def _cmd_validate_results(self, args):
+        """Show the validation results window: args['dir'] (a run folder name
+        under results/validation, default the newest) and args['test']."""
+        res = self.app.validate_panel.results
+        from .validate_results import list_runs
+        runs = list_runs(self.app.workdir)
+        name = str(args.get("dir") or "")
+        hit = [r for r in runs if os.path.basename(r) == name] if name else runs[:1]
+        if not hit:
+            raise ValueError(f"no validation run {name!r}; known: "
+                             f"{[os.path.basename(r) for r in runs]}")
+        res.show(hit[0])
+        if args.get("test"):
+            res.select(str(args["test"]))
+        tab = str(args.get("tab") or "")
+        return {"run": os.path.basename(hit[0]), "test": res.test, "tab": tab}
+
+    def _cmd_validate_fix(self, args):
+        """Press "Fix twin with AI" on the run shown (or args['dir']); returns at
+        once (follow with validate_fix_status)."""
+        if args.get("dir"):
+            self._cmd_validate_results({"dir": args["dir"]})
+        res = self.app.validate_panel.results
+        if not dpg.is_item_enabled("vres_btn_fix"):
+            raise RuntimeError("Fix twin is available only for a run that did not pass")
+        res.start_fix()
+        return {"fixing": res.fixing, "run": res.run_dir}
+
+    def _cmd_validate_fix_status(self, args):
+        res = self.app.validate_panel.results
+        return {"fixing": res.fixing, "status": dpg.get_value("vres_fix_status"),
+                "log_tail": res.fix_lines[-12:]}
 
     def _cmd_validate_stop(self, args):
         self.app.validate_panel.request_stop()
@@ -538,6 +595,9 @@ class ControlBridge:
         "ping": _cmd_ping, "state": _cmd_state,
         "virt_connect": _cmd_virt_connect, "validate": _cmd_validate,
         "validate_status": _cmd_validate_status, "validate_stop": _cmd_validate_stop,
+        "validate_results": _cmd_validate_results, "validate_ai": _cmd_validate_ai,
+        "validate_fields": _cmd_validate_fields, "validate_fix": _cmd_validate_fix,
+        "validate_fix_status": _cmd_validate_fix_status,
         "get": _cmd_get, "set": _cmd_set, "tab": _cmd_tab,
         "snapshot": _cmd_snapshot, "shot": _cmd_shot,
         "run": _cmd_run, "stdp": _cmd_stdp, "reload": _cmd_reload,
