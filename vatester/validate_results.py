@@ -29,6 +29,13 @@ import dearpygui.dearpygui as dpg
 
 from .ui_constants import C_AMBER, C_GREEN, C_MUTED, C_RED, C_TEXT2
 
+# fill the window's remaining height, but never shrink below these (px);
+# below that the window scrolls instead: (item sized, item whose top is
+# measured - containers report no position -, offset, minimum, space below)
+FIT = (("vres_sub", "vres_p_drive", -4, 320, 24),
+       ("vres_p_conv", "vres_p_conv", 0, 260, 150),
+       ("vres_deck_text", "vres_deck_text", 0, 300, 24))
+
 C_SPECTRE = (225, 230, 240)
 C_TWIN = (255, 140, 60)
 C_READ = (60, 200, 140)
@@ -87,6 +94,27 @@ class ValidateResults:
         self.fix_stop = False
         self.fix_lines = []
         self._fix_agent = None
+        self._fit_h = {}
+
+    def fit(self):
+        """Render thread, every frame (from ValidatePanel.tick): size the plots
+        and the netlist to the window's remaining height, with a minimum."""
+        if not dpg.does_item_exist("vres_win") or not dpg.is_item_shown("vres_win"):
+            return
+        wy = dpg.get_item_pos("vres_win")[1]
+        wh = dpg.get_item_height("vres_win")
+        scroll = dpg.get_y_scroll("vres_win")
+        for tag, probe, off, low, below in FIT:
+            if not dpg.is_item_visible(probe):
+                continue
+            try:
+                top = dpg.get_item_state(probe)["rect_min"][1] + off - wy + scroll
+            except (KeyError, SystemError):
+                continue
+            h = int(max(low, wh - top - below))
+            if abs(h - self._fit_h.get(tag, 0)) > 2:
+                self._fit_h[tag] = h
+                dpg.configure_item(tag, height=h)
 
     @staticmethod
     def _rounds():
@@ -249,7 +277,7 @@ class ValidateResults:
                                  "zoom, drag to pan, double-click to fit; the three plots "
                                  "share the time axis.", color=C_MUTED)
                     with dpg.subplots(3, 1, tag="vres_sub", link_all_x=True, width=-1,
-                                      height=-1, row_ratios=[0.7, 1.8, 1.5]):
+                                      height=480, row_ratios=[0.7, 1.8, 1.5]):
                         with dpg.plot(tag="vres_p_drive", height=-1, width=-1):
                             dpg.add_plot_axis(dpg.mvXAxis, tag="vres_x_drive", no_tick_labels=True)
                             dpg.add_plot_axis(dpg.mvYAxis, tag="vres_y_drive", label="drive")
@@ -267,7 +295,7 @@ class ValidateResults:
                                  "than the pass limit means Spectre was not converged "
                                  "there; the twin is judged against a converged (or the "
                                  "finest) run.", wrap=1200, color=C_TEXT2)
-                    with dpg.plot(tag="vres_p_conv", height=-130, width=-1):
+                    with dpg.plot(tag="vres_p_conv", height=400, width=-1):
                         dpg.add_plot_legend(location=dpg.mvPlot_Location_NorthWest)
                         dpg.add_plot_axis(dpg.mvXAxis, tag="vres_x_conv",
                                           label="Spectre maximum time step (s)",
@@ -276,7 +304,7 @@ class ValidateResults:
                                           label="max error vs finest step (%)",
                                           scale=dpg.mvPlotScale_Log10)
                     dpg.add_input_text(tag="vres_conv_rows", multiline=True, readonly=True,
-                                       width=-1, height=-1)
+                                       width=-1, height=126)
                 with dpg.tab(label="Spectre netlist"):
                     dpg.add_text("The netlist Spectre ran for the selected test (run "
                                  "directly with Spectre on the host, not through "
@@ -284,7 +312,7 @@ class ValidateResults:
                                  wrap=1200, color=C_TEXT2)
                     dpg.add_combo([], tag="vres_deck", width=420, callback=self._on_deck)
                     dpg.add_input_text(tag="vres_deck_text", multiline=True, readonly=True,
-                                       width=-1, height=-1)
+                                       width=-1, height=400)
         if "dialog" in self.app.themes:
             dpg.bind_item_theme("vres_win", self.app.themes["dialog"])
         with dpg.theme() as compact:               # one short row per test

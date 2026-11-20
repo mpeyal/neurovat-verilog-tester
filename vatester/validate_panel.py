@@ -149,7 +149,12 @@ class ValidatePanel:
 
     # ------------------------------------------------------------ state
     def tick(self):
-        """Render thread, every frame: follow the Cadence connection."""
+        """Render thread, every frame: follow the Cadence connection and keep
+        the results window's plots fitted."""
+        try:
+            self.results.fit()
+        except Exception:                        # noqa: BLE001 - never break a frame
+            pass
         con = bool(self.app.virtuoso.connected)
         if con == self.connected:
             return
