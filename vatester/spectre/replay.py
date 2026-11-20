@@ -152,16 +152,25 @@ def gate_waves(rec):
     return [_pwl_wave(per[k], stop) for k in range(rec.n)], t_stop
 
 
-def score_replay(rec, sig):
-    """Per synapse: engine read G against Spectre G = 1/V(n_rm<k>) at the
-    engine's read times, under the Layer-1 waveform rule."""
+def spectre_g(sig, k, v_read=0.01):
+    """Synapse k's conductance in the replay result: |I(vread<k>)| / V_read
+    (older decks saved the v3 Rmem node n_rm<k> = R instead)."""
+    i = find_signal(sig, f"vread{k}:p")
+    if i is not None:
+        return np.abs(np.asarray(i, float)) / v_read
+    r = find_signal(sig, f"n_rm{k}")
+    if r is None:
+        raise KeyError(f"neither vread{k}:p nor n_rm{k} in the Spectre result")
+    return 1.0 / np.asarray(r, float)
+
+
+def score_replay(rec, sig, v_read=0.01):
+    """Per synapse: engine read G against Spectre G (read current / V_read) at
+    the engine's read times, under the Layer-1 waveform rule."""
     t_ref = np.asarray(sig["time"], float)
     rows = []
     for k in range(rec.n):
-        r = find_signal(sig, f"n_rm{k}")
-        if r is None:
-            raise KeyError(f"n_rm{k} not in the Spectre result")
-        g_ref = 1.0 / np.asarray(r, float)
+        g_ref = spectre_g(sig, k, v_read)
         m = C.waveform_metrics(rec.reads_t, rec.reads_g[:, k], t_ref, g_ref)
         rows.append({"synapse": k, "pulses": sum(1 for p in rec.pulses if p[0] == k),
                      "reads": m["n_points"], "g_range_uS": 1e6 * m["range"],

@@ -96,6 +96,42 @@ def suggest_read_gate(vg, idd, v_program):
     return v
 
 
+def pins_text(roles):
+    return ",".join(f"{k}={roles[k]}" for k in ("in", "out", "gate") if k in roles)
+
+
+def parse_pins(text):
+    out = {}
+    for part in text.replace(";", ",").replace(" ", ",").split(","):
+        if part.strip():
+            k, _, v = part.partition("=")
+            if not v:
+                raise ValueError(f"pins need role=port pairs, got {part!r}")
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+def _ask_pins(ask, say, ports, saved):
+    """Show the ECFET pin mapping found by name; let the user confirm or set it.
+    Never guessed from the order: an unmapped device must be given its pins."""
+    from .deck import PinError, ecfet_roles
+    try:
+        roles, mon = ecfet_roles(ports, saved)
+        say(f"  pins found: read channel {roles['in']} -> {roles['out']}, gate "
+            f"{roles['gate']}" + (f"; monitor outputs {', '.join(mon)}" if mon else ""))
+        default = pins_text(roles)
+    except PinError as e:
+        say(f"  {e}")
+        default = ""
+    while True:
+        raw = ask(f"  ECFET pins (in=...,out=...,gate=...) [{default}]: ").strip()
+        try:
+            roles, _ = ecfet_roles(ports, parse_pins(raw) if raw else parse_pins(default))
+            return roles
+        except (PinError, ValueError) as e:
+            say(f"    {e}")
+
+
 def _ask_value(ask, say, label, default, kind=float, choices=None):
     shown = f"{default:g}" if isinstance(default, float) else str(default)
     while True:
@@ -142,6 +178,13 @@ def interactive_setup(va_path, workspace, runner=None, out_dir=None, ask=input, 
                               a.get("profile") or profile_of(spec), str, PROFILES)
     prof = a["profile"]
     params = {}
+    if prof == "ecfet":
+        a["pins"] = _ask_pins(ask, say, ports, a.get("pins"))
+    elif prof == "fefet":
+        from .deck import transistor_roles
+        roles, mon = transistor_roles(ports)
+        say("  pins found: " + ", ".join(f"{k} {v}" for k, v in roles.items())
+            + (f"; monitor outputs {', '.join(mon)}" if mon else ""))
     if prof == "fefet":
         a["v_ds"] = _ask_value(ask, say, "drain read bias V_ds (V)", a.get("v_ds", 0.1))
     say("  probing the twin for suggested amplitudes ...")
@@ -153,8 +196,10 @@ def interactive_setup(va_path, workspace, runner=None, out_dir=None, ask=input, 
         say(f"    the twin gave no suggestion ({e}); please enter values")
         su, cal = None, {}
     if prof == "ecfet":
-        a["amp_pos"] = _ask_value(ask, say, "unit gate current per pulse (A)",
-                                  a.get("amp_pos", cal.get("I_unit_A", 50e-12)))
+        unit = "A" if spec.get("input_kind", "current") == "current" else "V"
+        a["amp_pos"] = _ask_value(ask, say, f"unit gate pulse amplitude ({unit})",
+                                  a.get("amp_pos", cal.get("I_unit_A",
+                                                           cal.get("V_unit", 50e-12))))
         a["width"] = _ask_value(ask, say, "pulse width (s)", a.get("width", 10e-3))
     elif prof == "fecap":
         a["amp_pos"] = _ask_value(ask, say, "amplitude that switches half the polarization (V)",
@@ -226,6 +271,16 @@ def suggest_answers(va_path, workspace, runner=None, given=None, out_dir=None):
     prof = a["profile"]
     if prof == "fefet":
         a.setdefault("v_ds", 0.1)
+    if prof == "ecfet":
+        from .deck import PinError, ecfet_roles
+        try:
+            roles, mon = ecfet_roles(ports, a.get("pins"))
+            a["pins"] = roles
+            notes.append(f"pins: read {roles['in']} -> {roles['out']}, gate {roles['gate']}"
+                         + (f"; monitors {', '.join(mon)}" if mon else ""))
+        except PinError as e:
+            notes.append(f"pins: {e}")
+            a.pop("pins", None)
     try:
         su = build_suite(spec, None, prof, a.get("width"), a.get("read_level"),
                          {k: a[k] for k in ("amp_pos", "amp_neg") if k in a})
@@ -234,7 +289,7 @@ def suggest_answers(va_path, workspace, runner=None, given=None, out_dir=None):
         notes.append(f"the twin gave no suggestion: {e}")
         su, cal = None, {}
     if prof == "ecfet":
-        a.setdefault("amp_pos", float(cal.get("I_unit_A", 50e-12)))
+        a.setdefault("amp_pos", float(cal.get("I_unit_A", cal.get("V_unit", 50e-12))))
         a.setdefault("width", 10e-3)
     elif prof == "fecap":
         a.setdefault("amp_pos", float(cal.get("V_half_switch", 1.0)))

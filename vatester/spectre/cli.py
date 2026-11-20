@@ -19,7 +19,8 @@ back as PSF-ASCII.  A result you already have (PSF-ASCII or a CSV export from
 Virtuoso/ViVA) is compared with `compare --psf`.  The stimulus is one of
 --pwl "t v t v ...", --pwl-file (t,value CSV) or --pulses; --param name=value
 goes to both the .va instance and the twin.  --device picks the deck:
-"2t" (X1 (n_p 0)) or "ecfet" (In, Out, IGsc, Rmem; G = 1/V(n_rmem)); the
+"2t" (X1 (n_p 0)) or "ecfet" (pins by name, --pins to set them; G = read
+current / V_read); the
 default is "ecfet" for the built-in ECFET twins v1/v2/v3, else "2t".
 """
 
@@ -96,9 +97,26 @@ def _deck(a, stim, maxstep, name=None):
     if _device(a) == "ecfet":
         st = stim if name is None else Stimulus(stim.t, stim.v, stim.kind, name)
         return make_ecfet_deck(va, module, st, maxstep, params, v_read=a.v_read_bias,
-                               strobe=a.strobe)
+                               strobe=a.strobe, ports=_ports(a.va), pins=_pins(a))
     return make_deck(va, module, stim, maxstep, params,
                      pin=a.i_signal.split(":", 1)[1] if ":" in a.i_signal else "p")
+
+
+def _ports(va_path):
+    from .deck import va_interface
+    return va_interface(Path(va_path).read_text(encoding="utf-8", errors="replace"))[1]
+
+
+def _pins(a):
+    """--pins in=In,out=Out,gate=IGsc -> dict (ECFET pin roles)."""
+    out = {}
+    for part in (getattr(a, "pins", None) or "").replace(";", ",").split(","):
+        if part.strip():
+            k, _, v = part.partition("=")
+            if not v:
+                raise SystemExit(f"--pins needs role=port pairs, got {part!r}")
+            out[k.strip()] = v.strip()
+    return out
 
 
 def _signals(a):
@@ -119,7 +137,7 @@ def _save(out, name, obj):
 
 def _layer1(a, sig, info, stim):
     dev = _device(a)
-    ref = layer1.reference(sig, dev, _signals(a))
+    ref = layer1.reference(sig, dev, _signals(a), a.v_read_bias)
     spec, tw = _twin(a, stim, a.dt_max or a.maxstep)
     s = {"twin": spec["key"], "device": dev, "stimulus": stim.name, "kind": stim.kind,
          "simulator": info.get("simulator", ""), "version": info.get("version", ""),
@@ -158,7 +176,7 @@ def _converge(a, stim):
     refs = {}
     for s in steps:
         sig, info = load_waveform(runs[names[s]].raw_dir)
-        refs[s] = layer1.reference(sig, dev, _signals(a))
+        refs[s] = layer1.reference(sig, dev, _signals(a), a.v_read_bias)
     dt = a.dt_max or max(steps)
     spec = load_twin(a.twin, a.workspace)
     twins = {dt / f: run_twin(spec, stim, dt / f, _params(a.param)) for f in (1, 2, 4)}
@@ -193,7 +211,7 @@ def _replay(a):
     deck = make_replay_deck(Path(a.va).name, module, waves, t_stop, a.maxstep,
                             {"Rinit": 1.0 / rec.g_start, "A_stdp": 0.0, **over,
                              **_va_params(a.va_param, a.maxstep)},
-                            strobe=a.strobe or 2e-4)
+                            strobe=a.strobe or 2e-4, ports=_ports(a.va), pins=_pins(a))
     run = run_remote_batch({a.name: deck}, a.va, timeout=a.timeout, keep=a.keep,
                            out_dir=a.out)[a.name]
     sig, info = load_waveform(run.raw_dir)
@@ -240,6 +258,8 @@ def _add_common(p, twin_required=False):
     p.add_argument("--v-signal", default="n_p")
     p.add_argument("--i-signal", default="X1:p")
     p.add_argument("--rmem-signal", default="n_rmem")
+    p.add_argument("--pins", help="ECFET pin roles, e.g. in=In,out=Out,gate=IGsc "
+                   "(default: by name)")
     p.add_argument("--out", help="folder for results, CSV and JSON")
     p.add_argument("--keep", action="store_true", help="keep the remote run folder")
     p.add_argument("--timeout", type=int, default=3600)

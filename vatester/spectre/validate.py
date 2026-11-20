@@ -39,8 +39,8 @@ import numpy as np
 
 from . import compare as C
 from .converge import convergence
-from .deck import (make_deck, make_ecfet_deck, make_fecap_deck, make_fefet_deck,
-                   transistor_roles, va_interface)
+from .deck import (ecfet_roles, make_deck, make_ecfet_deck, make_fecap_deck,
+                   make_fefet_deck, transistor_roles, va_interface)
 from .psf import find_signal, load_waveform
 from .suites import build_suite
 from .twinrun import builtin_spec, load_twin, make_model, run_twin
@@ -90,12 +90,16 @@ def shared_params(spec, va_params, overrides=None):
 
 # ------------------------------------------------------------------ decks / refs
 class Device:
-    def __init__(self, profile, va_path, module, ports, inst, bound, v_ds=0.1, spec=None):
+    def __init__(self, profile, va_path, module, ports, inst, bound, v_ds=0.1, spec=None,
+                 pins=None, v_read=0.01):
         self.spec = spec or {}
         self.profile, self.va_path, self.module, self.ports = profile, va_path, module, ports
         self.inst, self.bound, self.v_ds = inst, bound, v_ds
+        self.pins, self.v_read = pins or {}, v_read
         if profile == "fefet":
             self.roles, self.monitors = transistor_roles(ports)
+        elif profile == "ecfet":
+            self.roles, self.monitors = ecfet_roles(ports, self.pins)
         else:
             self.roles, self.monitors = {}, ports[2:] if profile == "fecap" else []
 
@@ -105,7 +109,8 @@ class Device:
             p[self.bound] = step
         va = Path(self.va_path).name
         if self.profile == "ecfet":
-            return make_ecfet_deck(va, self.module, stim, step, p)
+            return make_ecfet_deck(va, self.module, stim, step, p, self.v_read,
+                                   ports=self.ports, pins=self.pins)
         if self.profile == "fecap":
             return make_fecap_deck(va, self.module, self.ports, stim, step, p)
         if self.profile == "fefet":
@@ -122,7 +127,7 @@ class Device:
                                f"({', '.join(k for k in sig if k != 'time')})")
             return np.asarray(y, float)
         if self.profile == "ecfet":
-            return {"time": t, "G": 1.0 / get("n_rmem")}
+            return {"time": t, "G": np.abs(get("vread:p")) / self.v_read}
         if self.profile == "fefet":
             idd = get(f"X1:{self.roles['drain']}")
             return {"time": t, "V": get("n_g"), "I": idd, "G": idd / self.v_ds}
@@ -427,7 +432,8 @@ def _plot_replay(path, rows, rec, sig):
     ax[0].set_yscale("log")
     ax[0].set_xlabel("synapse")
     ax[0].set_ylabel("max read error (% of range)")
-    g_ref = 1.0 / np.asarray(find_signal(sig, f"n_rm{k}"), float)
+    from .replay import spectre_g
+    g_ref = spectre_g(sig, k)
     ax[1].plot(sig["time"], g_ref * 1e6, color="black", lw=1.0, label="Spectre")
     ax[1].plot(rec.reads_t, rec.reads_g[:, k] * 1e6, "--", color="#D55E00", lw=0.9,
                label="engine read")
@@ -581,7 +587,8 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
     suite = build_suite(spec, params, profile, width, read_level, given)
     inst = {**shared_params(spec, va_params, params),
             **{k: v for k, v in (params or {}).items() if k in va_params}}
-    dev = Device(suite.profile, va_path, module, ports, inst, bound, v_ds, spec)
+    dev = Device(suite.profile, va_path, module, ports, inst, bound, v_ds, spec,
+                 pins=a.get("pins"))
     out = Path(out_dir or REPO / "results" / "validation" /
                f"{module}_{time.strftime('%Y%m%d-%H%M%S')}")
     out.mkdir(parents=True, exist_ok=True)
@@ -668,7 +675,9 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
         prog.unit("replay: engine run recorded")
         waves, t_stop = gate_waves(rec)
         deck = make_replay_deck(va_path.name, module, waves, t_stop, 1e-3,
-                                {"Rinit": 1.0 / rec.g_start, "A_stdp": 0.0})
+                                {"Rinit": 1.0 / rec.g_start, "A_stdp": 0.0},
+                                ports=ports, pins=a.get("pins"),
+                                kind=spec.get("input_kind", "current"))
         sig = _call_runner(runner, {"replay": deck}, va_path, out / "spectre")["replay"][0]
         prog.unit("replay: Spectre done")
         rows3 = score_replay(rec, sig)

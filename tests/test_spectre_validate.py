@@ -158,14 +158,16 @@ def test_ecfet_deck_and_builtin_twin():
     st = Stimulus.from_text("0 0 0.01 0 0.010001 5e-11 0.02 5e-11 0.020001 0 0.5 0",
                             kind="current", name="single")
     d = make_ecfet_deck("ecfet_v3.va", "ecfet_v3", st, 1e-3, {"Rinit": 4400})
-    assert "X1 (n_in 0 n_igsc n_rmem) ecfet_v3 Rinit=4400" in d
-    assert "igate (0 n_igsc) isource type=pwl" in d and "ic=node" in d
-    with pytest.raises(ValueError):
-        make_ecfet_deck("ecfet_v3.va", "ecfet_v3", Stimulus.from_text("0 0 1 1"), 1e-3)
+    assert "X1 (n_in 0 n_g n_Rmem) ecfet_v3 Rinit=4400" in d   # v3 pins by default
+    assert "igate (0 n_g) isource type=pwl" in d and "ic=node" in d
+    assert "save vread:p n_Rmem" in d
     spec = load_twin("v3", ROOT)                       # built-in, not in twins/
     tw = run_twin(spec, st, 1e-3)
     assert tw["G"][-1] > tw["G"][0]                    # +50 pA potentiates
-    ref = reference({"time": tw["time"], "n_rmem": 1.0 / tw["G"]}, "ecfet")
+    ref = reference({"time": tw["time"], "vread:p": -0.01 * tw["G"]}, "ecfet", v_read=0.01)
+    np.testing.assert_allclose(ref["G"], tw["G"])
+    old = reference({"time": tw["time"], "n_rmem": 1.0 / tw["G"]}, "ecfet")  # old results
+    np.testing.assert_allclose(old["G"], tw["G"])
     s = score(tw, ref, "ecfet", st)
     assert s["compared"] == "conductance" and s["verdict"] == "PASS"
     bad = run_twin(spec, st, 1e-3, {"Q_full": 0.4e-9})
@@ -413,3 +415,79 @@ def test_lost_connection_is_not_retried(tmp_path):
         s.exec("mkdir x")
     with pytest.raises(remote.SpectreRunError, match="paused"):
         guard.check_and_record()                   # every login now refused for 30 min
+
+
+# ---------------------------------------------------------------- ECFET pins
+def test_ecfet_pins_by_name_any_order_and_no_monitor():
+    from vatester.spectre.deck import PinError, ecfet_roles, make_ecfet_deck
+    roles, mon = ecfet_roles(["Rmem", "IGsc", "Out", "In"])        # shuffled order
+    assert roles == {"in": "In", "out": "Out", "gate": "IGsc"} and mon == ["Rmem"]
+    roles, mon = ecfet_roles(["d", "s", "g"])                      # 3 pins, no monitor
+    assert roles == {"in": "d", "out": "s", "gate": "g"} and mon == []
+    roles, _ = ecfet_roles(["drain", "gate", "source", "x_mon", "y_mon"])
+    assert roles == {"in": "drain", "out": "source", "gate": "gate"}
+    with pytest.raises(PinError, match="cannot tell"):
+        ecfet_roles(["p1", "p2", "p3"])                            # never guessed
+    roles, mon = ecfet_roles(["p1", "p2", "p3"], {"in": "p2", "out": "p1", "gate": "p3"})
+    assert roles == {"in": "p2", "out": "p1", "gate": "p3"} and mon == []
+    with pytest.raises(PinError):
+        ecfet_roles(["p1", "p2", "p3"], {"in": "p2", "out": "p2", "gate": "p3"})
+    with pytest.raises(PinError):
+        ecfet_roles(["p1", "p2", "p3"], {"in": "nope", "out": "p1", "gate": "p3"})
+    st = Stimulus.from_text("0 0 1e-3 0.5 2e-3 0", kind="voltage", name="vg")
+    d = make_ecfet_deck("e.va", "ecram", st, 1e-4, ports=["G", "S", "D"])
+    assert "X1 (n_g 0 n_in) ecram" in d                            # node per role
+    assert "vgate (n_g 0) vsource type=pwl" in d                   # voltage gate
+    assert d.rstrip().endswith("save vread:p")                     # no monitor pin
+    with pytest.raises(PinError):
+        make_ecfet_deck("e.va", "m", st, 1e-4, ports=["a1", "a2", "a3"])
+
+
+def test_replay_deck_has_one_read_source_per_synapse():
+    from vatester.spectre.deck import make_replay_deck
+    from vatester.spectre.replay import spectre_g
+    d = make_replay_deck("e.va", "dev", ["[ 0 0 1 0 ]", "[ 0 0 1 0 ]"], 1.0, 1e-3,
+                         ports=["S", "G", "D"], kind="voltage")
+    assert "X0 (0 n_g0 n_in0) dev" in d and "vread1 (n_in1 0)" in d
+    assert "vg1 (n_g1 0) vsource" in d and "save vread0:p vread1:p" in d
+    sig = {"time": np.array([0.0, 1.0]), "vread1:p": np.array([-2e-6, -3e-6])}
+    np.testing.assert_allclose(spectre_g(sig, 1, 0.01), [2e-4, 3e-4])
+
+
+def test_voltage_gated_ecfet_twin_gets_the_ecfet_set(tmp_path):
+    from vatester.spectre.suites import build_suite, profile_of
+    tw = tmp_path / "twins"
+    tw.mkdir()
+    (tw / "my_ecram.py").write_text('''
+from dataclasses import dataclass
+@dataclass
+class P:
+    g0: float = 1e-4
+    k: float = 2e-5
+class ECRAM:
+    def __init__(self, p): self.p = p; self.reset()
+    def reset(self): self.g = self.p.g0
+    def step(self, t, dt, v):
+        if abs(v) > 0.5: self.g += self.p.k * (v - 0.5 if v > 0 else v + 0.5) * dt / 1e-3
+    @property
+    def G(self): return self.g
+    @property
+    def R(self): return 1 / self.g
+    def observables(self): return {"G": self.g}
+TWIN_SPEC = {"key": "my_ecram", "label": "ECRAM", "device_class": "ECRAM",
+             "input_kind": "voltage", "model_class": ECRAM, "params_class": P}
+''', encoding="utf-8")
+    spec = load_twin("my_ecram", str(tmp_path))
+    assert profile_of(spec) == "ecfet"
+    su = build_suite(spec)
+    assert su.profile == "ecfet" and "V_unit" in su.calibration
+    assert all(st.kind == "voltage" for st in su.stimuli)
+
+
+def test_setup_asks_for_pins_when_names_are_unknown(tmp_path):
+    from vatester.spectre.setup import _ask_pins
+    replies = iter(["", "in=p2,out=p1,gate=p3"])     # Enter is refused (no default)
+    said = []
+    roles = _ask_pins(lambda q: next(replies), said.append, ["p1", "p2", "p3"], None)
+    assert roles == {"in": "p2", "out": "p1", "gate": "p3"}
+    assert any("cannot tell" in x for x in said)

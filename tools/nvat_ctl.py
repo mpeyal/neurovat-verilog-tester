@@ -70,6 +70,7 @@ _ARG_SPECS = {
     "shot": ["path"], "nt_load": ["path"],
     "fit": ["path"], "openvaf": ["path"],       # openvaf path optional
     "nt_robust": ["seconds", "retrain", "train_s", "repeats"], "nt_robust_raster": ["entry"],
+    "validate": ["va"],
 }
 
 

@@ -7,7 +7,8 @@
 Compared quantity:
     device "2t":    the terminal current (voltage stimulus) or voltage (current
                     stimulus); with read plateaus also G = I/V at each read
-    device "ecfet": the channel conductance G = 1 / V(n_rmem)
+    device "ecfet": the channel conductance G = |I(vread)| / V_read (older
+                    results: 1 / V(n_rmem))
 """
 
 import numpy as np
@@ -30,10 +31,13 @@ def _get(sig, name):
     return np.asarray(y, float)
 
 
-def reference(sig, device, signals=None):
+def reference(sig, device, signals=None, v_read=0.01):
     s = {**DEFAULT_SIGNALS, **(signals or {})}
     t = np.asarray(sig["time"], float)
     if device == "ecfet":
+        i = find_signal(sig, "vread:p")
+        if i is not None:
+            return {"time": t, "G": np.abs(np.asarray(i, float)) / v_read}
         r = _get(sig, s["rmem"])
         return {"time": t, "G": 1.0 / r}
     return {"time": t, "V": _get(sig, s["v"]), "I": _get(sig, s["i"])}

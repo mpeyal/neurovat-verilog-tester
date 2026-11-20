@@ -485,6 +485,13 @@ further pin is a monitor output (e.g. polarization, compared with the twin's
 `P (uC/cm2)`, `Ptot (uC/cm2)` or `P (norm.)` observable, in that order, or
 the one named in `TWIN_SPEC["spectre"]["monitors"] = {"<pin>": "<observable>"}`); a transistor's pins
 are found by name (d/drain, g/gate, s/source, b/body/bulk) or by that order.
+An ECFET's read channel and gate are found by name in any order (In/D/drain,
+Out/S/source, IGsc/G/gate); any other pin is a monitor output. If the names do
+not tell, nothing is guessed: the setup asks for them (`--pins
+in=..,out=..,gate=..` on the command line, the "ECFET pins" field in the GUI).
+Its conductance is the read current over the read bias, so no monitor pin is
+needed, and the gate may be driven by a current or a voltage (the twin's
+`input_kind`).
 Optional hints in `TWIN_SPEC["spectre"]`: `profile`, `width` (base pulse
 width), `read_level`, `monitors`. `--profile`, `--width`, `--read-level`,
 `--param name=value`, `--amp-pos`, `--amp-neg` and `--v-ds` override them.

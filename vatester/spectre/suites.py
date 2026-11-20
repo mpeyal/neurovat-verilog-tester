@@ -39,6 +39,8 @@ def profile_of(spec):
         return "ecfet"
     cls = str(spec.get("device_class", "")).lower()
     key = str(spec.get("key", "")).lower()
+    if any(w in cls or w in key for w in ("ecfet", "ecram", "electrochem")):
+        return "ecfet"
     if "fecap" in cls or "fecap" in key or "ferroelectric cap" in cls:
         return "fecap"
     if "fefet" in cls or "fefet" in key:
@@ -243,60 +245,66 @@ def _memristor(spec, params, width, read_level, given=None):
 
 
 def _ecfet(spec, params, given=None):
+    """ECFET set; the gate is driven by a current or a voltage, as the twin's
+    input_kind says (the unit amplitude is then in A or V)."""
     given = given or {}
+    kind = spec.get("input_kind", "current")
+    lo, hi = (1e-13, 1e-6) if kind == "current" else (1e-3, 20.0)
     width = float(given.get("width") or 10e-3)
     edge = 1e-6
     iu = given.get("amp_pos")
     if iu is None:
-        iu = _find_amp(spec, params, "current", +1, width, edge, _G, 0.01, 1e-13, 1e-6,
+        iu = _find_amp(spec, params, kind, +1, width, edge, _G, 0.01, lo, hi,
                        opposite=False)
     if iu is None:
-        neg = _find_amp(spec, params, "current", -1, width, edge, _G, 0.01, 1e-13,
-                        1e-6, opposite=False)
+        neg = _find_amp(spec, params, kind, -1, width, edge, _G, 0.01, lo, hi,
+                        opposite=False)
         if neg is None:
-            raise RuntimeError("the twin's G does not move by 1 % with 10 ms pulses "
-                               "up to 1 uA of either sign")
+            raise RuntimeError("the twin's G does not move by 1 % with 10 ms gate pulses "
+                               f"up to {hi:g} {'A' if kind == 'current' else 'V'} of "
+                               "either sign; give the amplitude (--amp-pos)")
         iu = -neg
     S = []
-    s = _Seq("current", edge).wait(0.01)
+    s = _Seq(kind, edge).wait(0.01)
     for a in [iu] * 20 + [-iu] * 20:
         s.pulse(a, width).wait(0.04)
     S.append(s.wait(0.5).build("train", "20 potentiation then 20 depression pulses "
                                "(10 ms, 40 ms apart), then relaxation"))
-    S.append(_Seq("current", edge).wait(0.01).pulse(iu, width).wait(2.0)
+    S.append(_Seq(kind, edge).wait(0.01).pulse(iu, width).wait(2.0)
              .build("single_pulse", "one pulse, then 2 s of relaxation"))
-    s = _Seq("current", edge).wait(0.01)
+    s = _Seq(kind, edge).wait(0.01)
     for f in (0.25, 0.5, 1, 2, 4):
         s.pulse(f * iu, width).wait(0.2)
     for f in (0.25, 0.5, 1, 2, 4):
         s.pulse(-f * iu, width).wait(0.2)
     S.append(s.build("amplitude_sweep", "0.25-4 x the unit current, each sign"))
-    s = _Seq("current", edge).wait(0.01)
+    s = _Seq(kind, edge).wait(0.01)
     for w in (1e-3, 2e-3, 5e-3, 10e-3, 20e-3, 50e-3):
         s.pulse(iu, w).wait(0.2)
     S.append(s.build("width_sweep", "1-50 ms pulses at the unit current"))
-    s = _Seq("current", edge).wait(0.01)
+    s = _Seq(kind, edge).wait(0.01)
     for g in (5e-3, 20e-3, 100e-3, 300e-3, 1.0):
         s.pulse(iu, width).wait(g).pulse(iu, width).wait(0.5)
     S.append(s.build("gap_sweep", "pulse pairs 5 ms to 1 s apart"))
-    s = _Seq("current", edge).wait(0.01)
+    s = _Seq(kind, edge).wait(0.01)
     for _ in range(10):
         s.pulse(iu, width).wait(0.02)
     S.append(s.wait(10.0).build("retention_hold", "10 pulses, then a 10 s hold"))
-    s = _Seq("current", edge).wait(0.01)
+    s = _Seq(kind, edge).wait(0.01)
     for d in (5e-3, 20e-3, 50e-3, 200e-3):
         s.pulse(iu, width).wait(d).pulse(-iu, width).wait(0.3)
         s.pulse(-iu, width).wait(d).pulse(iu, width).wait(0.3)
     S.append(s.build("stdp_pairs", "opposite-sign pulse pairs 5-200 ms apart, "
                      "both orders"))
-    s = _Seq("current", edge).wait(0.01)
+    s = _Seq(kind, edge).wait(0.01)
     rng = np.random.default_rng(7)
     for _ in range(40):
         s.pulse(rng.choice((1, -1)) * rng.uniform(0.5, 2) * iu, width)
         s.wait(rng.uniform(0.005, 0.15))
     S.append(s.build("random_spike_train", "40 pulses, random sign, 0.5-2 x amplitude "
                      "and 5-150 ms gaps (seed 7)"))
-    return Suite("ecfet", S, {"I_unit_A": iu, "width_s": width}, None, width, 1e-3)
+    cal = {"I_unit_A" if kind == "current" else "V_unit": iu, "width_s": width}
+    return Suite("ecfet", S, cal, None, width, 1e-3)
 
 
 def _fecap(spec, params, width, given=None):

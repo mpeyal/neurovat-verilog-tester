@@ -452,6 +452,45 @@ class ControlBridge:
         return {"path": path}
 
     # -- shared async waiters --------------------------------------------
+    # ---- Cadence connection and twin validation (vatester/validate_panel.py)
+    def _cmd_virt_connect(self, args):
+        """Connect to Cadence (as the panel's Connect button); waits for it."""
+        self.app.on_virtuoso_connect()
+
+        def done():
+            return not self.app.virt_busy
+
+        def finalize():
+            return {"connected": bool(self.app.virtuoso.connected)}
+        return _Async(done, finalize, timeout_s=args.get("timeout_s", 60))
+
+    def _cmd_validate(self, args):
+        """Open the Validate-twin window for args['va'] (path relative to the
+        workspace) and press Start; returns at once (follow with
+        validate_status).  Refused when not connected to Cadence."""
+        panel = self.app.validate_panel
+        if not self.app.virtuoso.connected:
+            raise RuntimeError("not connected to Cadence (virt_connect first)")
+        panel.open()
+        va = str(args.get("va") or "")
+        if va:
+            if va not in panel.va_list:
+                raise ValueError(f"unknown .va {va!r}; known: {panel.va_list}")
+            dpg.set_value("val_va", va)
+            panel._on_va()
+        panel.start()
+        return {"started": panel.running, "va": dpg.get_value("val_va")}
+
+    def _cmd_validate_status(self, args):
+        panel = self.app.validate_panel
+        return {"running": panel.running, "status": dpg.get_value("val_status"),
+                "progress": dpg.get_value("val_bar"), "verdict": dpg.get_value("val_verdict"),
+                "report_dir": panel.out_dir}
+
+    def _cmd_validate_stop(self, args):
+        self.app.validate_panel.request_stop()
+        return {"stopping": self.app.validate_panel.running}
+
     def _await_sim(self, name, write_snapshot, timeout_s):
         app = self.app
 
@@ -495,6 +534,8 @@ class ControlBridge:
 
     _HANDLERS = {
         "ping": _cmd_ping, "state": _cmd_state,
+        "virt_connect": _cmd_virt_connect, "validate": _cmd_validate,
+        "validate_status": _cmd_validate_status, "validate_stop": _cmd_validate_stop,
         "get": _cmd_get, "set": _cmd_set, "tab": _cmd_tab,
         "snapshot": _cmd_snapshot, "shot": _cmd_shot,
         "run": _cmd_run, "stdp": _cmd_stdp, "reload": _cmd_reload,
