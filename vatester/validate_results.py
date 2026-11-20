@@ -231,11 +231,11 @@ class ValidateResults:
                 dpg.add_text("", tag="vres_fix_status", wrap=1200)
                 dpg.add_input_text(tag="vres_fix_log", multiline=True, readonly=True,
                                    width=-1, height=170)
-            dpg.add_text("Click a test to see its plots.", color=C_MUTED)
-            with dpg.table(tag="vres_table", header_row=True, resizable=True,
-                           policy=dpg.mvTable_SizingStretchProp, borders_innerH=True,
-                           borders_outerH=True, row_background=True, height=140,
-                           scrollY=True):
+            with dpg.group(tag="vres_table_grp"), \
+                    dpg.table(tag="vres_table", header_row=True, resizable=True,
+                              policy=dpg.mvTable_SizingStretchProp, borders_innerH=True,
+                              borders_outerH=True, row_background=True, height=150,
+                              scrollY=True):
                 for name, w in (("test", 0.14), ("verdict", 0.08),
                                 ("waveform NRMSE / max (%)", 0.15),
                                 ("read G max / mean (%)", 0.14),
@@ -245,8 +245,11 @@ class ValidateResults:
             with dpg.tab_bar():
                 with dpg.tab(label="Twin vs Spectre"):
                     dpg.add_text("", tag="vres_test_info", wrap=1200, color=C_TEXT2)
+                    dpg.add_text("Click a test name in the table to plot it. Scroll to "
+                                 "zoom, drag to pan, double-click to fit; the three plots "
+                                 "share the time axis.", color=C_MUTED)
                     with dpg.subplots(3, 1, tag="vres_sub", link_all_x=True, width=-1,
-                                      height=500, row_ratios=[0.9, 2.0, 1.3]):
+                                      height=-1, row_ratios=[0.7, 1.8, 1.5]):
                         with dpg.plot(tag="vres_p_drive", height=-1, width=-1):
                             dpg.add_plot_axis(dpg.mvXAxis, tag="vres_x_drive", no_tick_labels=True)
                             dpg.add_plot_axis(dpg.mvYAxis, tag="vres_y_drive", label="drive")
@@ -258,15 +261,13 @@ class ValidateResults:
                             dpg.add_plot_legend(location=dpg.mvPlot_Location_NorthEast)
                             dpg.add_plot_axis(dpg.mvXAxis, tag="vres_x_err", label="time (s)")
                             dpg.add_plot_axis(dpg.mvYAxis, tag="vres_y_err", label="error (%)")
-                    dpg.add_text("Scroll to zoom, drag to pan, double-click to fit; the "
-                                 "three plots share the time axis.", color=C_MUTED)
                 with dpg.tab(label="Spectre step check"):
                     dpg.add_text("Each test ran in Spectre at three maximum time steps. "
                                  "A step whose result differs from the finest by more "
                                  "than the pass limit means Spectre was not converged "
                                  "there; the twin is judged against a converged (or the "
                                  "finest) run.", wrap=1200, color=C_TEXT2)
-                    with dpg.plot(tag="vres_p_conv", height=420, width=-1):
+                    with dpg.plot(tag="vres_p_conv", height=-130, width=-1):
                         dpg.add_plot_legend(location=dpg.mvPlot_Location_NorthWest)
                         dpg.add_plot_axis(dpg.mvXAxis, tag="vres_x_conv",
                                           label="Spectre maximum time step (s)",
@@ -275,7 +276,7 @@ class ValidateResults:
                                           label="max error vs finest step (%)",
                                           scale=dpg.mvPlotScale_Log10)
                     dpg.add_input_text(tag="vres_conv_rows", multiline=True, readonly=True,
-                                       width=-1, height=150)
+                                       width=-1, height=-1)
                 with dpg.tab(label="Spectre netlist"):
                     dpg.add_text("The netlist Spectre ran for the selected test (run "
                                  "directly with Spectre on the host, not through "
@@ -283,9 +284,18 @@ class ValidateResults:
                                  wrap=1200, color=C_TEXT2)
                     dpg.add_combo([], tag="vres_deck", width=420, callback=self._on_deck)
                     dpg.add_input_text(tag="vres_deck_text", multiline=True, readonly=True,
-                                       width=-1, height=520)
+                                       width=-1, height=-1)
         if "dialog" in self.app.themes:
             dpg.bind_item_theme("vres_win", self.app.themes["dialog"])
+        with dpg.theme() as compact:               # one short row per test
+            with dpg.theme_component(dpg.mvAll):   # the table and its cells
+                dpg.add_theme_style(dpg.mvStyleVar_CellPadding, 6, 3,
+                                    category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 4, 1,
+                                    category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 1,
+                                    category=dpg.mvThemeCat_Core)
+        dpg.bind_item_theme("vres_table", compact)
 
     # ------------------------------------------------------------ actions
     def show(self, run_dir=None):
@@ -354,7 +364,9 @@ class ValidateResults:
                 ok = c.get("reference_converged")
                 dpg.add_text("yes" if ok else ("no" if ok is not None else "-"),
                              color=C_GREEN if ok else C_AMBER)
-                dpg.add_text(t.get("description", ""), wrap=420)
+                desc = dpg.add_text(t.get("description", ""))   # one line per row
+                with dpg.tooltip(desc):
+                    dpg.add_text(t.get("description", ""), wrap=480)
         self._plot_conv(conv)
         if tests:
             self.select(tests[0]["stimulus"])
