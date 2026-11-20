@@ -51,6 +51,13 @@ jobs:
           Switch with /provider claude|openai|gemini in the chat box.
           The model list is fetched from the provider, so new models appear
           without updating the app.
+
+          Validate a twin against Cadence Spectre (optional): put one line
+          'user@host' (your Cadence login) in a file virtuoso.local next to
+          NeuroVAT.exe, or set NVAT_VIRTUOSO_HOST. SSH key login is required
+          and the host key must already be in known_hosts. Start the skill
+          server in Virtuoso's CIW with skill(), click Connect, then
+          'Validate twin vs Spectre'. Results: 'Validation results'.
           "@ | Out-File -Encoding utf8 "$dst/README.txt"
 
       - name: Zip the folder

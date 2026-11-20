@@ -22,19 +22,24 @@ import time
 def _load_host():
     """The Virtuoso login 'user@host' - kept OUT of the repo. Set the
     NVAT_VIRTUOSO_HOST env var, or put one 'user@host' line in a gitignored
-    'virtuoso.local' file at the repo root."""
+    'virtuoso.local' file at the repo root (Windows exe: next to NeuroVAT.exe;
+    the current folder is also searched)."""
     h = os.environ.get("NVAT_VIRTUOSO_HOST", "").strip()
     if h:
         return h
-    local = os.path.join(os.path.dirname(__file__), os.pardir, "virtuoso.local")
-    try:
-        with open(local, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    return line
-    except OSError:
-        pass
+    places = [os.path.join(os.path.dirname(__file__), os.pardir)]
+    if getattr(sys, "frozen", False):            # PyInstaller exe
+        places.append(os.path.dirname(sys.executable))
+    places.append(os.getcwd())
+    for base in places:
+        try:
+            with open(os.path.join(base, "virtuoso.local"), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        return line
+        except OSError:
+            continue
     return ""
 
 

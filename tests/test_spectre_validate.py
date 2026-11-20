@@ -230,6 +230,16 @@ def test_ai_fill_reply_is_checked():
         parse_reply("no json here", ports, keys)
 
 
+def test_default_output_is_under_the_workspace(tmp_path):
+    """Without out_dir the run goes to <workspace>/results/validation (the
+    Windows exe's code folder is not the workspace)."""
+    import inspect
+    from vatester.spectre import validate as V
+    src = inspect.getsource(V._validate)
+    assert 'Path(workspace) / "results" / "validation"' in src
+    assert 'REPO / "results"' not in src
+
+
 def test_fix_twin_guard_never_deletes_binaries(tmp_path):
     """The fix loop's guard restores edited sources and removes new twins/ or
     verilog/ sources, but never deletes a binary or a file it did not record

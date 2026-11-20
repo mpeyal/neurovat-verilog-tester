@@ -701,7 +701,9 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
             **{k: v for k, v in (params or {}).items() if k in va_params}}
     dev = Device(suite.profile, va_path, module, ports, inst, bound, v_ds, spec,
                  pins=a.get("pins"))
-    out = Path(out_dir or REPO / "results" / "validation" /
+    # under the WORKSPACE (in the Windows exe the code lives in _internal/,
+    # where the results window would not find the run)
+    out = Path(out_dir or Path(workspace) / "results" / "validation" /
                f"{module}_{time.strftime('%Y%m%d-%H%M%S')}")
     out.mkdir(parents=True, exist_ok=True)
     runner = runner or ssh_runner()
