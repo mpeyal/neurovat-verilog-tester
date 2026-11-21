@@ -264,11 +264,12 @@ class ValidateResults:
                               policy=dpg.mvTable_SizingStretchProp, borders_innerH=True,
                               borders_outerH=True, row_background=True, height=150,
                               scrollY=True):
-                for name, w in (("test", 0.14), ("verdict", 0.08),
-                                ("waveform NRMSE / max (%)", 0.15),
-                                ("read G max / mean (%)", 0.14),
-                                ("Spectre step judged at (s)", 0.13),
-                                ("Spectre converged", 0.10), ("what the test does", 0.36)):
+                for name, w in (("test", 0.13), ("verdict", 0.07),
+                                ("waveform NRMSE / max (%)", 0.14),
+                                ("read G max / mean (%)", 0.13),
+                                ("state NRMSE (%)", 0.08),
+                                ("Spectre step judged at (s)", 0.11),
+                                ("Spectre converged", 0.09), ("what the test does", 0.30)):
                     dpg.add_table_column(label=name, init_width_or_weight=w)
             with dpg.tab_bar():
                 with dpg.tab(label="Twin vs Spectre"):
@@ -367,7 +368,9 @@ class ValidateResults:
         dpg.set_value("vres_head",
                       f"{s.get('module', '?')}  -  twin {s.get('twin', '?')}  -  device "
                       f"type {s.get('profile', '?')}  -  {s.get('simulator', 'Spectre')}  -  "
-                      f"{s.get('date', '')}")
+                      f"{s.get('date', '')}"
+                      + (f"  -  test set {s['test_set']['name']}" if s.get("test_set")
+                         else "  -  automatic test set"))
         dpg.set_value("vres_verdict", f"Overall: {v}")
         dpg.configure_item("vres_verdict", color=VERDICT_COL.get(v, C_AMBER))
         dpg.configure_item("vres_btn_fix", enabled=(v != "PASS" and not self.fixing))
@@ -387,11 +390,14 @@ class ValidateResults:
                 dpg.add_text(f"{_pct(t.get('read_g_max_pct'))} / "
                              f"{_pct(t.get('read_g_mean_pct'))}" if "read_g_max_pct" in t
                              else "-")
+                dpg.add_text(_pct(t.get("state_nrmse_pct")) if "state_nrmse_pct" in t
+                             else "-")
                 dpg.add_text(f"{t.get('reference_step_s', float('nan')):.3g}"
                              if t.get("reference_step_s") else "-")
                 ok = c.get("reference_converged")
-                dpg.add_text("yes" if ok else ("no" if ok is not None else "-"),
-                             color=C_GREEN if ok else C_AMBER)
+                dpg.add_text("yes" if ok else ("no" if ok is not None else "1 step"),
+                             color=C_GREEN if ok else (C_AMBER if ok is not None
+                                                       else C_TEXT2))
                 desc = dpg.add_text(t.get("description", ""))   # one line per row
                 with dpg.tooltip(desc):
                     dpg.add_text(t.get("description", ""), wrap=480)

@@ -43,6 +43,7 @@ from .deck import (ecfet_roles, make_deck, make_ecfet_deck, make_fecap_deck,
                    make_fefet_deck, transistor_roles, va_interface)
 from .psf import find_signal, load_waveform
 from .suites import build_suite
+from .testset import load_test_set, spectre_state, state_metrics
 from .twinrun import builtin_spec, load_twin, make_model, run_twin, seconds_per_step
 from ..twin_loader import load_twins
 
@@ -96,6 +97,8 @@ class Device:
         self.profile, self.va_path, self.module, self.ports = profile, va_path, module, ports
         self.inst, self.bound, self.v_ds = inst, bound, v_ds
         self.pins, self.v_read = pins or {}, v_read
+        self.va_params = None             # .va parameter names (per-stimulus values)
+        self.state = None                 # test set: internal-state comparison
         if profile == "fefet":
             self.roles, self.monitors = transistor_roles(ports)
         elif profile == "ecfet":
@@ -105,6 +108,9 @@ class Device:
 
     def deck(self, stim, step):
         p = dict(self.inst)
+        for k, v in (stim.meta.get("instance") or {}).items():   # test-set start state
+            if self.va_params is None or k in self.va_params:
+                p[k] = v
         if self.bound:
             p[self.bound] = step
         va = Path(self.va_path).name
@@ -115,7 +121,10 @@ class Device:
             return make_fecap_deck(va, self.module, self.ports, stim, step, p)
         if self.profile == "fefet":
             return make_fefet_deck(va, self.module, self.ports, stim, step, p, self.v_ds)
-        return make_deck(va, self.module, stim, step, p, pin=self.ports[0])
+        extra = ([self.state["spectre_save"]]
+                 if self.state and "spectre_save" in self.state else [])
+        return make_deck(va, self.module, stim, step, p, pin=self.ports[0],
+                         extra_saves=extra)
 
     def reference(self, sig):
         t = np.asarray(sig["time"], float)
@@ -134,6 +143,8 @@ class Device:
         ref = {"time": t, "V": get("n_p"), "I": get(f"X1:{self.ports[0]}")}
         for p in self.monitors:
             ref["mon:" + p] = get(f"n_{p}")
+        if self.state:
+            ref["state"] = spectre_state(get, self.state, ref)
         return ref
 
 
@@ -141,6 +152,9 @@ def twin_view(dev, tw):
     """Twin record in the reference's terms (current of a FeCAP from I_dev)."""
     if dev.profile == "fecap" and "obs:I_dev (A)" in tw:
         tw = dict(tw, I=tw["obs:I_dev (A)"])
+    if dev.state and "obs:" + dev.state["twin_obs"] in tw:
+        tw = dict(tw, state=np.asarray(tw["obs:" + dev.state["twin_obs"]], float)
+                  * dev.state.get("twin_scale", 1.0))
     return tw
 
 
@@ -153,6 +167,20 @@ def _pol_key(tw, spec=None, monitor=None):
     return next((k for k in POL_KEYS if "obs:" + k in tw), None)
 
 
+def _state_check(dev, tw, ref, out):
+    """Score the internal state (a test set with a 'state'): -> (ok or None,
+    rule text).  None when there is no state or it does not move."""
+    if "state" not in tw or "state" not in ref:
+        return None, ""
+    ms = state_metrics(tw["time"], tw["state"], ref["time"], ref["state"])
+    lab = (dev.state or {}).get("label", "state")
+    out.update(state_label=lab, state_nrmse_pct=100 * ms["nrmse"],
+               state_max_err_pct=100 * ms["maxerr"])
+    if not math.isfinite(ms["nrmse"]):
+        return None, f" ({lab} does not move: not scored)"
+    return ms["nrmse"] <= C.NRMSE_LIMIT, f", {lab} NRMSE <= 1 %"
+
+
 def score(dev, suite, stim, tw, ref):
     """Profile-specific Layer-1 score -> dict with 'verdict' and the series to plot."""
     out = {"stimulus": stim.name, "description": stim.meta.get("description", "")}
@@ -163,6 +191,17 @@ def score(dev, suite, stim, tw, ref):
         return out
     if dev.profile in ("memristor", "fefet"):
         reads = stim.read_times(suite.read_level)
+        if not len(reads) and dev.profile == "memristor" and suite.name:
+            # a test-set stimulus without reads (a DC loop, a sine): its pass
+            # rule scores the current and the state only
+            m = C.waveform_metrics(tw["time"], tw["I"], ref["time"], ref["I"])
+            out.update(quantity="I", unit="A", nrmse_pct=100 * m["nrmse"],
+                       max_err_pct=100 * m["maxerr"], n_reads=0)
+            ok = m["nrmse"] <= C.NRMSE_LIMIT
+            s_ok, s_rule = _state_check(dev, tw, ref, out)
+            out["rule"] = "I NRMSE <= 1 % (no reads in this test)" + s_rule
+            out["verdict"] = "PASS" if ok and s_ok is not False else "FAIL"
+            return out
         if dev.profile == "fefet":
             gt = np.interp(reads, tw["time"], tw["G"])
             gr = np.interp(reads, ref["time"], ref["G"])
@@ -197,8 +236,8 @@ def score(dev, suite, stim, tw, ref):
         if not np.all(np.isfinite(gr)) or np.min(np.abs(gr)) <= max(g_floor, 1e-30):
             out.update(quantity="G", unit="S", rule="reads", verdict="INCONCLUSIVE",
                        read_times=reads, g_twin=gt, g_ref=gr, n_reads=int(len(reads)),
-                       note=f"Spectre conducts (almost) no current at the read level "
-                            f"{suite.read_level:g} V; set --read-level")
+                       note="Spectre conducts (almost) no current at the reads; "
+                            "check the read bias (--read-level)")
             return out
         rel = np.abs(gt - gr) / np.abs(gr)
         out.update(read_times=reads, g_twin=gt, g_ref=gr, n_reads=int(len(reads)),
@@ -211,6 +250,9 @@ def score(dev, suite, stim, tw, ref):
                        max_err_pct=100 * m["maxerr"])
             ok = ok and m["nrmse"] <= C.NRMSE_LIMIT
             out["rule"] = "I NRMSE <= 1 %, read G max <= 3 %, mean <= 1 %"
+            s_ok, s_rule = _state_check(dev, tw, ref, out)   # test set with a state
+            ok = ok and s_ok is not False
+            out["rule"] += s_rule
         else:
             out.update(quantity="G", unit="S")
             out["rule"] = "read G max <= 3 %, mean <= 1 %"
@@ -409,11 +451,13 @@ def _call_runner(runner, decks, va_path, out_dir, progress=None):
         progress(len(decks), len(decks))
     return out
 
-def twin_steps_for(profile, steps, converged=None):
-    """Twin output steps for one test: a FeFET twin at the coarsest Spectre
-    step whose reads converged (`converged`; the middle step as the estimate
-    before Spectre has run) and twice that; other twins at the coarsest
-    Spectre step / 1, 2, 4."""
+def twin_steps_for(profile, steps, converged=None, twin_dt=None):
+    """Twin output steps for one test: a test set's own twin step (`twin_dt`)
+    and half of it; a FeFET twin at the coarsest Spectre step whose reads
+    converged (`converged`; the middle step as the estimate before Spectre has
+    run) and twice that; other twins at the coarsest Spectre step / 1, 2, 4."""
+    if twin_dt:
+        return [twin_dt, twin_dt / 2]
     if profile == "fefet":
         sc = converged if converged is not None else sorted(steps)[1 if len(steps) > 1 else 0]
         return [sc, 2 * sc]
@@ -527,7 +571,8 @@ def _plot_conv(path, per_stim):
     ax.set_xlabel("Spectre maximum time step (s)")
     ax.set_ylabel("max error vs finest step (%)")
     ax.set_title("Spectre against its own finest run (3 % line = pass limit)", fontsize=9)
-    ax.legend(fontsize=7, ncol=2)
+    if ax.get_legend_handles_labels()[0]:       # none with one step per test
+        ax.legend(fontsize=7, ncol=2)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
@@ -654,10 +699,12 @@ def _jsonable(o):
 # ------------------------------------------------------------------ main entry
 def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
              profile=None, width=None, runner=None, replay=True, open_report=True,
-             v_ds=0.1, log=print, read_level=None, answers=None, progress=None):
+             v_ds=0.1, log=print, read_level=None, answers=None, progress=None,
+             test_set=None):
     """answers: the user's setup (setup.interactive_setup or a saved
     <name>.validate.json): twin, profile, width, amp_pos, amp_neg, read_level,
-    v_ds, twin_read_param.  Explicit arguments win over answers.
+    v_ds, twin_read_param, test_set.  Explicit arguments win over answers.
+    test_set: a test-set file (testset.py) to run instead of the automatic set.
     progress(dict) receives the stage, done/total work units, Spectre runs and
     tests done, the elapsed time and the estimated time remaining (s)."""
     prog = Progress(progress)
@@ -670,10 +717,12 @@ def validate(va_path, twin=None, workspace=None, out_dir=None, params=None,
 
 
 def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner, replay,
-              open_report, v_ds, log, read_level, answers, progress, prog):
+              open_report, v_ds, log, read_level, answers, progress, prog, test_set=None):
     a = answers or {}
-    twin = twin or a.get("twin")
-    profile = profile or a.get("profile")
+    test_set = test_set or a.get("test_set") or None
+    ts = load_test_set(test_set) if test_set else None
+    twin = twin or a.get("twin") or (ts.twin if ts else None)
+    profile = ts.profile if ts else (profile or a.get("profile"))
     width = width or a.get("width")
     read_level = read_level if read_level is not None else a.get("read_level")
     if a.get("v_ds") is not None and v_ds == 0.1:
@@ -696,11 +745,20 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
     module, ports, va_params, bound = va_interface(text)
     key = twin or match_twin(va_path.name, module, workspace)
     spec = load_twin(key, workspace)
-    suite = build_suite(spec, params, profile, width, read_level, given)
+    suite = build_suite(spec, params, profile, width, read_level, given, test_set=ts)
     inst = {**shared_params(spec, va_params, params),
             **{k: v for k, v in (params or {}).items() if k in va_params}}
     dev = Device(suite.profile, va_path, module, ports, inst, bound, v_ds, spec,
-                 pins=a.get("pins"))
+                 pins=a.get("pins"), v_read=suite.v_read or 0.01)
+    dev.va_params, dev.state = set(va_params), suite.state
+    from dataclasses import fields as _fields
+    twin_fields = {f.name for f in _fields(spec["params_class"])}
+
+    def tparams(st):
+        """The twin's parameters for one stimulus (test-set start state)."""
+        inst_st = {k: v for k, v in (st.meta.get("instance") or {}).items()
+                   if k in twin_fields}
+        return {**(params or {}), **inst_st} or None
     # under the WORKSPACE (in the Windows exe the code lives in _internal/,
     # where the results window would not find the run)
     out = Path(out_dir or Path(workspace) / "results" / "validation" /
@@ -709,14 +767,22 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
     runner = runner or ssh_runner()
     log(f"{va_path.name}: module {module}({', '.join(ports)}), twin {spec['key']}, "
         f"profile {suite.profile}, {len(suite.stimuli)} stimuli")
-    log(f"  calibration: " + ", ".join(f"{k} {v:.4g}" for k, v in suite.calibration.items()))
+    if suite.name:
+        log(f"  test set {suite.name} ({Path(ts.path).name}): steps "
+            + ", ".join(f"{s:.3g}" for s in suite.steps) + " s"
+            + (f"; state {suite.state['label']}" if suite.state else ""))
+    if suite.calibration:
+        log(f"  calibration: " + ", ".join(f"{k} {v:.4g}"
+                                         for k, v in suite.calibration.items()))
 
     # ---- layers 2 and 1: every test at three steps, scored against its finest
-    plan = {st.name: conv_steps(suite.profile, suite.base_step, st.t_stop)
+    plan = {st.name: (st.meta.get("steps") or suite.steps
+                      or conv_steps(suite.profile, suite.base_step, st.t_stop))
             for st in suite.stimuli}
     n = sum(len(v) for v in plan.values())
     do_replay = replay and dev.profile == "ecfet" and spec["key"] == "v3"
-    est = sum(_n_steps(st, twin_steps_for(suite.profile, plan[st.name]))
+    est = sum(_n_steps(st, twin_steps_for(suite.profile, plan[st.name],
+                                          twin_dt=st.meta.get("twin_dt")))
               for st in suite.stimuli)
     try:
         probe = seconds_per_step(spec, suite.stimuli[0],
@@ -724,7 +790,7 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
     except Exception:            # noqa: BLE001 - the estimate only
         probe = None
     prog.plan(n, len(suite.stimuli), do_replay, twin_steps=est, sec_per_step=probe)
-    log(f"Spectre: {len(suite.stimuli)} tests x 3 steps = {n} runs ...")
+    log(f"Spectre: {len(suite.stimuli)} tests, {n} runs ...")
     decks = {f"{st.name}__s{i}": dev.deck(st, step)
              for st in suite.stimuli for i, step in enumerate(plan[st.name])}
     (out / "spectre").mkdir(parents=True, exist_ok=True)
@@ -746,7 +812,8 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
                               if dev.profile == "fefet" else None)
         sc_step = (coarsest_converged(all_refs[st.name], "G", all_reads[st.name])
                    if dev.profile == "fefet" else None)
-        tw_dts[st.name] = twin_steps_for(dev.profile, steps, sc_step)
+        tw_dts[st.name] = twin_steps_for(dev.profile, steps, sc_step,
+                                         twin_dt=st.meta.get("twin_dt"))
     prog.twin_plan(sum(_n_steps(st, tw_dts[st.name]) for st in suite.stimuli))
     conv, l1, conv_rows = [], [], {}
     for st in suite.stimuli:
@@ -755,7 +822,7 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
         dt = max(steps)
         reads = all_reads[st.name]
         prog.emit(f"twin: {st.name} (test {len(l1) + 1}/{len(suite.stimuli)})")
-        twins = {d: twin_view(dev, run_twin(spec, st, d, params, progress=prog.twin))
+        twins = {d: twin_view(dev, run_twin(spec, st, d, tparams(st), progress=prog.twin))
                  for d in tw_dts[st.name]}
         qkey, skey, cross = "I", None, True
         if dev.profile == "ecfet":
@@ -772,19 +839,25 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
                                  cross=cross, spectre_key=skey, reads=reads)
         conv_rows[st.name] = rows
         fine = sorted(steps)
-        nxt = next(r for r in rows if r["what"] == "spectre vs finest spectre"
-                   and r["step_s"] == fine[1])
-        ref_ok = nxt["verdict"] == "PASS"
+        if len(fine) > 1:
+            nxt = next(r for r in rows if r["what"] == "spectre vs finest spectre"
+                       and r["step_s"] == fine[1])
+            ref_ok = nxt["verdict"] == "PASS"
+        else:                       # one reference step (a test set): no Layer 2
+            nxt, ref_ok = None, None
         conv.append({"stimulus": st.name, "steps": steps, "rows": rows,
-                     "next_vs_finest_max_pct": nxt["max_err_pct"],
+                     "next_vs_finest_max_pct": nxt["max_err_pct"] if nxt else None,
                      "reference_converged": ref_ok,
                      "coarsest_converged_step_s": summ["coarsest_converged_step_s"],
-                     "deck_step_converged": max(steps) not in summ["unconverged_steps_s"]})
+                     "deck_step_converged": (max(steps) not in summ["unconverged_steps_s"]
+                                             if nxt else None)})
         ref = refs[fine[0]]
-        tw = twins[min(twins)]
+        # a test set's twin is scored at its own step (as the set's source did);
+        # half that step is only the twin's convergence check
+        tw = twins[st.meta["twin_dt"]] if st.meta.get("twin_dt") in twins             else twins[min(twins)]
         sc = score(dev, suite, st, tw, ref)
         sc["reference_step_s"] = fine[0]
-        if not ref_ok:
+        if ref_ok is False:
             conv_note = (f"Spectre's result depends on the time step: at {fine[1]:.3g} s it "
                          f"differs from {fine[0]:.3g} s by up to {nxt['max_err_pct']:.3g} %")
             if sc["verdict"] == "FAIL":
@@ -803,7 +876,10 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
             parts.append(f"NRMSE {sc['nrmse_pct']:.3g} %, max {sc['max_err_pct']:.3g} %")
         if "read_g_max_pct" in sc:
             parts.append(f"read G max {sc['read_g_max_pct']:.3g} %")
-        log(f"  {st.name:20s} ref {fine[0]:.3g} s {'conv.' if ref_ok else 'NOT conv.'}  "
+        if "state_nrmse_pct" in sc:
+            parts.append(f"{sc['state_label']} NRMSE {sc['state_nrmse_pct']:.3g} %")
+        cv = {True: "conv.", False: "NOT conv.", None: "1 step"}[ref_ok]
+        log(f"  {st.name:20s} ref {fine[0]:.3g} s {cv}  "
             f"{sc['quantity']}: {', '.join(parts) or '-'}  {sc['verdict']}")
     _plot_conv(out / "layer2_convergence.png", conv_rows)
 
@@ -838,7 +914,10 @@ def _validate(va_path, twin, workspace, out_dir, params, profile, width, runner,
     report = {"verdict": overall, "module": module, "va": str(va_path),
               "twin": f"{spec['key']} ({spec.get('label', '')})", "profile": dev.profile,
               "simulator": f"{info.get('simulator', '')} {info.get('version', '')}".strip(),
-              "date": time.strftime("%Y-%m-%d %H:%M"), "setup": a,
+              "date": time.strftime("%Y-%m-%d %H:%M"),
+              "setup": {**a, "test_set": ts.path} if ts else a,
+              "test_set": ({"name": ts.name, "file": ts.path, "steps": ts.steps,
+                            "state": (ts.state or {}).get("label")} if ts else None),
               "calibration": suite.calibration, "shared_params": dev.inst,
               "layer2": conv,
               "layer1": l1, "layer3": l3}

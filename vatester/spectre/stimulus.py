@@ -22,6 +22,7 @@ class Stimulus:
     kind: str = "voltage"            # "voltage" | "current"
     name: str = "stimulus"
     meta: dict = field(default_factory=dict)
+    reads: object = None             # explicit read times (s); None = find plateaus
 
     def __post_init__(self):
         self.t = np.asarray(self.t, dtype=float)
@@ -106,7 +107,12 @@ class Stimulus:
         return np.concatenate(pts)
 
     def read_times(self, level, tol=1e-12):
-        """Middles of the plateaus held at `level` (excluding zero-length)."""
+        """Middles of the plateaus held at `level` (excluding zero-length);
+        a stimulus with explicit `reads` (a test set) returns those."""
+        if self.reads is not None:
+            return np.asarray(self.reads, dtype=float)
+        if level is None:
+            return np.array([])
         out = []
         for k in range(len(self.t) - 1):
             if (abs(self.v[k] - level) <= tol and abs(self.v[k + 1] - level) <= tol

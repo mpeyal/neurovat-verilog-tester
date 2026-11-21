@@ -290,6 +290,8 @@ def main(argv=None):
     p.add_argument("--yes", action="store_true",
                    help="ask nothing: use saved answers, else the automatic values")
     p.add_argument("--no-replay", action="store_true", help="skip layer 3")
+    p.add_argument("--test-set", help="run this test-set file (JSON, see testset.py) "
+                                      "instead of the automatic set")
     p.add_argument("--no-open", action="store_true", help="do not open the report")
     p.add_argument("--out", help="report folder (default results/validation/<module>_<time>)")
     p.add_argument("--keep", action="store_true", help="keep the remote run folders")
@@ -328,7 +330,7 @@ def main(argv=None):
         runner = ssh_runner(a.timeout, a.keep)
         saved = load_answers(va)
         answers = saved
-        if not a.yes and sys.stdin.isatty():
+        if not a.yes and not a.test_set and sys.stdin.isatty():
             if saved and not a.ask:
                 print(f"saved setup for {Path(va).name}: "
                       + ", ".join(f"{k}={v}" for k, v in saved.items()))
@@ -343,7 +345,8 @@ def main(argv=None):
         report, out = validate(va, a.twin, a.workspace, a.out, _params(a.param) or None,
                                a.profile, a.width, runner,
                                not a.no_replay, not a.no_open, a.v_ds,
-                               read_level=a.read_level, answers=answers)
+                               read_level=a.read_level, answers=answers,
+                               test_set=a.test_set)
         return 0 if report["verdict"] == "PASS" else 1
 
     if a.cmd == "import":

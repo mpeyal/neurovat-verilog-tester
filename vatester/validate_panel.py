@@ -41,10 +41,16 @@ FIELDS = [  # tag, label, kind, help
     ("val_v_ds", "drain bias V_ds", "num", "V, FeFET only"),
     ("val_pins", "ECFET pins", "text", "in=...,out=...,gate=... (read channel and gate "
                                        "ports); empty = found by name"),
+    ("val_test_set", "test set", "testset", "(automatic) = the fixed tests of the device\n"
+                                            "type, scaled to the values above. A file from\n"
+                                            "<workspace>/testsets/*.json runs that fixed set\n"
+                                            "instead (e.g. a paper's published stimuli); the\n"
+                                            "amplitude, width and read fields are then unused."),
 ]
 KEYS = {"val_twin": "twin", "val_profile": "profile", "val_amp_pos": "amp_pos",
         "val_amp_neg": "amp_neg", "val_width": "width", "val_read_level": "read_level",
-        "val_v_ds": "v_ds", "val_pins": "pins"}
+        "val_v_ds": "v_ds", "val_pins": "pins", "val_test_set": "test_set"}
+AUTO_SET = "(automatic)"
 
 
 def _fmt_time(s):
@@ -104,6 +110,9 @@ class ValidatePanel:
                         if kind == "combo":
                             w = dpg.add_combo(["", "ecfet", "memristor", "fecap", "fefet"],
                                               tag=tag, width=-1)
+                        elif kind == "testset":
+                            w = dpg.add_combo([AUTO_SET], tag=tag, width=-1,
+                                              default_value=AUTO_SET)
                         else:
                             w = dpg.add_input_text(tag=tag, width=-1)
                         with dpg.tooltip(w):
@@ -182,9 +191,11 @@ class ValidatePanel:
         a = {}
         for tag, key in KEYS.items():
             v = str(dpg.get_value(tag) or "").strip()
-            if not v:
+            if not v or v == AUTO_SET:
                 continue
-            if key in ("twin", "profile"):
+            if key == "test_set":
+                a[key] = os.path.join(self.app.workdir, "testsets", v)
+            elif key in ("twin", "profile"):
                 a[key] = v
             elif key == "pins":
                 from .spectre.setup import parse_pins
@@ -199,7 +210,9 @@ class ValidatePanel:
     def _fill(self, answers):
         for tag, key in KEYS.items():
             v = answers.get(key)
-            if v is None or v == "" or v == {}:
+            if key == "test_set":
+                dpg.set_value(tag, os.path.basename(v) if v else AUTO_SET)
+            elif v is None or v == "" or v == {}:
                 dpg.set_value(tag, "")
             elif isinstance(v, dict):
                 from .spectre.setup import pins_text
@@ -217,6 +230,9 @@ class ValidatePanel:
         wd = self.app.workdir
         self.va_list = [os.path.relpath(p, wd) for p in va_paths(wd)]
         dpg.configure_item("val_va", items=self.va_list)
+        from .spectre.testset import list_test_sets
+        dpg.configure_item("val_test_set", items=[AUTO_SET] + [
+            os.path.basename(p) for p in list_test_sets(wd)])
         if self.va_list and dpg.get_value("val_va") not in self.va_list:
             dpg.set_value("val_va", self.va_list[0])
             self._on_va()
@@ -340,7 +356,9 @@ class ValidatePanel:
                 from .spectre.validate import ssh_runner, validate
                 runner = ssh_runner()
                 q.put(("val_log", "filling empty values with suggestions ..."))
-                answers, notes = suggest_answers(va, wd, runner, given)
+                # a fixed test set needs no Spectre-based suggestion (no login)
+                answers, notes = suggest_answers(
+                    va, wd, None if given.get("test_set") else runner, given)
                 for n in notes:
                     q.put(("val_log", n))
                 save_answers(va, answers)

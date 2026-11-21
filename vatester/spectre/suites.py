@@ -97,6 +97,10 @@ class Suite:
     read_level: float = None          # read plateaus at this level (None: no reads)
     width: float = 0.0                # the pulse width the set is built on
     base_step: float = 0.0            # Spectre maxstep before the convergence check
+    steps: list = None                # explicit Spectre steps (a test set)
+    state: dict = None                # internal-state comparison (a test set)
+    v_read: float = None              # ECFET channel read bias (a test set)
+    name: str = None                  # test-set name (None: the automatic set)
 
 
 # ---------------------------------------------------------------- calibration
@@ -362,10 +366,16 @@ def _fefet(spec, params, width, read_level, given=None):
 
 
 def build_suite(spec, params=None, profile=None, width=None, read_level=None,
-                given=None):
+                given=None, test_set=None):
     """The automatic test set of a twin.  `given` holds user answers that
     replace the calibration: amp_pos, amp_neg (V, or A for the ECFET unit
-    current), width (s)."""
+    current), width (s).  `test_set` (a testset.TestSet) replaces the
+    automatic set with a fixed one from a file."""
+    if test_set is not None:
+        return Suite(profile=test_set.profile, stimuli=list(test_set.stimuli),
+                     calibration={}, read_level=None, width=0.0,
+                     base_step=max(test_set.steps), steps=list(test_set.steps),
+                     state=test_set.state, v_read=test_set.v_read, name=test_set.name)
     given = dict(given or {})
     if given.get("width") and not width:
         width = float(given["width"])

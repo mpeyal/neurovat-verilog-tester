@@ -95,3 +95,7 @@ control/
 # bundled into the release exe (CI checks out from git, so it stays out)
 /twins/example_rram.va
 /twins/example_rram.py
+
+# fixed test sets for the Spectre validation (e.g. a paper's reproducibility
+# package): kept local, they are data, not part of the software
+testsets/

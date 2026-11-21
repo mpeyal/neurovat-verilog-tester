@@ -230,6 +230,91 @@ def test_ai_fill_reply_is_checked():
         parse_reply("no json here", ports, keys)
 
 
+def _vteam_set(tmp_path, steps=(1e-10,)):
+    """A small test set for the public VTEAM model: a pulse train with reads,
+    one test from the OFF state, the state x = d * V(X1.ws)."""
+    import json
+    st = Stimulus.pulses([0.8, 0.8, -0.225, -0.225], 10e-9, 10e-9, read=-0.1)
+    reads = [float(x) for x in st.read_times(-0.1)]
+    d = {"format": "neurovat-testset-1", "name": "mini-vteam", "profile": "memristor",
+         "twin": "vteam", "steps": list(steps),
+         "state": {"label": "x (m)", "spectre_save": "X1.ws", "spectre_clip": [0, 1],
+                   "spectre_scale": 3e-9, "twin_obs": "x (nm)", "twin_scale": 1e-9},
+         "stimuli": [{"name": "train", "t": st.t.tolist(), "v": st.v.tolist(),
+                      "reads": reads, "twin_dt": 1e-10},
+                     {"name": "from_off", "t": st.t.tolist(), "v": (-st.v).tolist(),
+                      "reads": reads, "instance": {"x_init": 3e-9}, "twin_dt": 1e-10}]}
+    f = tmp_path / "mini.json"
+    f.write_text(json.dumps(d))
+    return f, d
+
+
+def test_test_set_file_is_checked(tmp_path):
+    import json
+    from vatester.spectre.testset import TestSetError, load_test_set
+    f, d = _vteam_set(tmp_path)
+    ts = load_test_set(f)
+    assert ts.name == "mini-vteam" and ts.steps == [1e-10] and len(ts.stimuli) == 2
+    assert ts.stimuli[1].meta["instance"] == {"x_init": 3e-9}
+    assert len(ts.stimuli[0].read_times(None)) == 4      # explicit reads, no level needed
+    assert ts.state["spectre_save"] == "X1.ws"
+    for bad in ({"format": "x"}, {"profile": "dram"}, {"steps": []},
+                {"stimuli": [{"name": "a", "t": [0, 1], "v": [0]}]},
+                {"state": {"twin_obs": "x", "spectre_save": "X1.ws; rm"}},
+                {"stimuli": [{"name": "a", "t": [0, 1], "v": [0, 0], "reads": [5.0]}]}):
+        g = tmp_path / "bad.json"
+        g.write_text(json.dumps({**d, **bad}))
+        with pytest.raises(TestSetError):
+            load_test_set(g)
+
+
+def test_validate_runs_a_test_set_with_state(tmp_path):
+    """End to end without Spectre: the 'reference' is the twin itself, so the
+    set must pass, with the state scored and one step (no Layer 2)."""
+    from vatester.spectre.validate import validate
+    f, d = _vteam_set(tmp_path)
+    spec = load_twin("vteam", ROOT)
+    from vatester.spectre.testset import load_test_set
+    ts = load_test_set(f)
+
+    def runner(decks, va_path, out_dir):
+        out = {}
+        for name, text in decks.items():
+            assert "save n_p X1:p X1.ws" in text
+            st = next(s for s in ts.stimuli if name.startswith(s.name + "__"))
+            prm = st.meta.get("instance")
+            if st.name == "from_off":
+                assert "x_init=3e-09" in text
+            tw = run_twin(spec, st, 2.5e-11, prm)
+            out[name] = ({"time": tw["time"], "n_p": tw["V"], "X1:p": tw["I"],
+                          "X1.ws": tw["obs:x (nm)"] * 1e-9 / 3e-9},
+                         {"simulator": "spectre", "version": "test"})
+        return out
+
+    rep, out = validate(os.path.join(ROOT, "verilog", "vteam.va"), workspace=ROOT,
+                        out_dir=tmp_path / "run", runner=runner, replay=False,
+                        open_report=False, test_set=str(f), log=lambda m: None)
+    assert rep["verdict"] == "PASS" and rep["test_set"]["name"] == "mini-vteam"
+    assert all("state_nrmse_pct" in t for t in rep["layer1"])
+    assert all(c["reference_converged"] is None for c in rep["layer2"])
+    # a wrong twin fails on its state too
+    bad = dict(spec)
+    import dataclasses
+    pcls = dataclasses.make_dataclass("P2", [("k_off", float, 0.8 * 5e-4)],
+                                      bases=(spec["params_class"],))
+    bad["params_class"] = pcls
+    import vatester.spectre.validate as V
+    orig = V.load_twin
+    V.load_twin = lambda key, ws: bad
+    try:
+        rep2, _ = validate(os.path.join(ROOT, "verilog", "vteam.va"), workspace=ROOT,
+                           out_dir=tmp_path / "run2", runner=runner, replay=False,
+                           open_report=False, test_set=str(f), log=lambda m: None)
+    finally:
+        V.load_twin = orig
+    assert rep2["verdict"] == "FAIL"
+
+
 def test_twin_edited_while_the_gui_runs_is_loaded_fresh(tmp_path):
     """The GUI registers twins/ files in the model registry at startup; a
     validation (and each Fix-twin round) must still run the file as it is now,
